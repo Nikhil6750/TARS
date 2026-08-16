@@ -26,3 +26,8 @@ kokoro-onnx==0.5.0
 # package is required to *run* a custom-trained one, training it is a
 # separate, later step.
 openwakeword==0.6.0
+
+# Test-only: resamples Kokoro's 24kHz output to faster-whisper's 16kHz input
+# in tests/test_voice_end_to_end_real.py's real STT<->TTS round trip. Not a
+# runtime dependency of any provider adapter itself.
+scipy==1.17.0
