@@ -60,6 +60,24 @@ def test_symbol_history_uses_public_query_filter() -> None:
         assert client.history_for_symbol("ES") == [VALID_EVENT]
 
 
+def test_memory_search_preserves_public_source_identifier() -> None:
+    expected = {
+        "source": "vault",
+        "source_id": "Research/Setup.md",
+        "title": "Setup",
+        "snippet": "attention marker",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/memory/search"
+        assert request.url.params["q"] == "attention"
+        assert request.url.params["source"] == "vault"
+        return response([expected])
+
+    with TarsTestClient(transport=httpx.MockTransport(handler)) as client:
+        assert client.search_memory("attention", source="vault") == [expected]
+
+
 def test_configurable_routes_do_not_require_backend_imports() -> None:
     seen: list[str] = []
 

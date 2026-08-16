@@ -38,7 +38,7 @@ def test_backend_and_frontend_were_started_and_health_works(
     health = client.health()
     assert str(health.get("status", "")).casefold() in {"ok", "healthy", "ready"}
     assert os.getenv("TARS_ACCEPTANCE_ZERO_PAID_KEYS") == "1"
-    assert os.getenv("TARS_ACCEPTANCE_INVALID_VAULT_PATH") == "1"
+    assert os.getenv("TARS_ACCEPTANCE_VAULT_SOURCE_ID")
     for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "FISH_AUDIO_API_KEY"):
         assert not os.getenv(key)
 

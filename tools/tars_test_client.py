@@ -54,6 +54,7 @@ class Routes:
     history: str = "/api/events/history"
     invalidate: str = "/api/events/{event_id}/invalidate"
     assistant: str = "/api/assistant/messages"
+    memory_search: str = "/api/v1/memory/search"
     websocket: str = "/ws"
 
     @classmethod
@@ -65,6 +66,7 @@ class Routes:
             history=os.getenv("TARS_HISTORY_PATH", cls.history),
             invalidate=os.getenv("TARS_INVALIDATE_PATH", cls.invalidate),
             assistant=os.getenv("TARS_ASSISTANT_PATH", cls.assistant),
+            memory_search=os.getenv("TARS_MEMORY_SEARCH_PATH", cls.memory_search),
             websocket=os.getenv("TARS_WEBSOCKET_PATH", cls.websocket),
         )
 
@@ -237,6 +239,21 @@ class TarsTestClient:
         if message["role"] != "assistant":
             raise ContractViolation("Assistant endpoint did not return role='assistant'")
         return message
+
+    def search_memory(
+        self, query: str, *, source: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if source is not None:
+            params["source"] = source
+        payload = self._json(
+            self.http.get(self._url(self.routes.memory_search), params=params)
+        )
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) for item in payload
+        ):
+            raise ContractViolation("Memory search response must be a list of objects")
+        return payload
 
     async def websocket_messages(
         self, count: int = 1, timeout_seconds: float | None = None
