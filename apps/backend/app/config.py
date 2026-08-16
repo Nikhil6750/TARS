@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     wake_word_provider: str = "mock"
     wake_word_phrase: str = "TARS"
     wake_word_model_path: str | None = None
+    wake_word_threshold: float = 0.5
 
     # ---- VAD ----
     vad_provider: str = "silero"
@@ -50,12 +51,19 @@ class Settings(BaseSettings):
     # ---- STT ----
     stt_provider: str = "mock"
     faster_whisper_model: str = "base"
+    faster_whisper_device: str = "cpu"
+    faster_whisper_compute_type: str = "int8"
     openai_api_key: str | None = None
 
     # ---- TTS ----
     tts_provider: str = "mock"
     fish_speech_model_path: str | None = None
+    fish_speech_api_url: str = "http://localhost:8080"
+    fish_speech_reference_id: str | None = None
     kokoro_model_path: str | None = None
+    kokoro_voices_path: str | None = None
+    kokoro_voice: str = "af_heart"
+    kokoro_lang: str = "en-us"
     fish_audio_api_key: str | None = None
 
     # ---- Assistant ----

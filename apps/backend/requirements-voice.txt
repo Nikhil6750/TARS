@@ -1,0 +1,28 @@
+# TARS voice stack — all local/free, no API keys required. Optional
+# relative to requirements.txt: the backend runs without these installed
+# (every voice provider has a mock fallback), but voice endpoints degrade
+# to mock behavior until this is installed and a real *_PROVIDER is set.
+#
+# Installing this upgrades fastapi/starlette to whatever pipecat-ai[websocket]
+# requires — already validated against requirements.txt's own pin (see
+# apps/backend/requirements.txt), so installing both together is safe.
+
+# Realtime orchestration (Pipecat) + its local-provider extras:
+#   whisper   -> faster-whisper backend for pipecat.services.whisper.stt
+#   kokoro    -> kokoro-onnx backend for pipecat.services.kokoro.tts
+#   silero    -> bundled Silero VAD ONNX model (pipecat.audio.vad.silero)
+#   websocket -> FastAPIWebsocketTransport, for serving voice sessions from
+#                this same FastAPI app with no separate transport service
+#   openai    -> OLLamaLLMService reuses the OpenAI-compatible client shape
+pipecat-ai[whisper,kokoro,silero,websocket,openai]==1.7.0
+
+# Standalone STT/TTS adapters used outside the realtime pipeline (the
+# single-shot REST transcribe/synthesize endpoints — see voice/providers/).
+# Pinned versions match what pipecat's own extras above already resolve to.
+faster-whisper==1.2.1
+kokoro-onnx==0.5.0
+
+# Wake word — see AGENTS.md: no pretrained "TARS" model exists; this
+# package is required to *run* a custom-trained one, training it is a
+# separate, later step.
+openwakeword==0.6.0
