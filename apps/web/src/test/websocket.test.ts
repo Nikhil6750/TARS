@@ -62,7 +62,7 @@ describe('TARSWebSocketClient', () => {
     expect(client.getStatus()).toBe('offline');
   });
 
-  it('receives, validates, and emits canonical trading events', async () => {
+  it('handles real backend trading_event envelope with { type: "trading_event", event: payload }', async () => {
     const client = new TARSWebSocketClient('ws://127.0.0.1:8000/ws/events');
     const receivedEvents: TARSTradingEvent[] = [];
     client.onTradingEvent((evt) => receivedEvents.push(evt));
@@ -71,7 +71,7 @@ describe('TARSWebSocketClient', () => {
     await new Promise((r) => setTimeout(r, 20));
 
     const wsInstance = MockWebSocket.instances[0];
-    const validEvent: TARSTradingEvent = {
+    const backendTradingEventPayload: TARSTradingEvent = {
       schema_version: '1.0.0',
       event_id: '12345678-1234-1234-1234-123456789abc',
       timestamp: new Date().toISOString(),
@@ -86,11 +86,96 @@ describe('TARSWebSocketClient', () => {
       risk_reward: 3.0
     };
 
-    wsInstance.triggerMessage(validEvent);
+    // Real backend EventBus.broadcast envelope
+    wsInstance.triggerMessage({
+      type: 'trading_event',
+      event: backendTradingEventPayload,
+      active_state_change: 'add'
+    });
 
     expect(receivedEvents.length).toBe(1);
     expect(receivedEvents[0].symbol).toBe('NQ');
+    expect(receivedEvents[0].state).toBe('SETUP_VALID');
     expect(receivedEvents[0].risk_reward).toBe(3.0);
+  });
+
+  it('handles real backend active_snapshot hydration on connection', async () => {
+    const client = new TARSWebSocketClient('ws://127.0.0.1:8000/ws/events');
+    const snapshotEvents: TARSTradingEvent[] = [];
+    const individualEvents: TARSTradingEvent[] = [];
+
+    client.onActiveSnapshot((events) => snapshotEvents.push(...events));
+    client.onTradingEvent((evt) => individualEvents.push(evt));
+
+    client.connect();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const wsInstance = MockWebSocket.instances[0];
+    const setup1: TARSTradingEvent = {
+      schema_version: '1.0.0',
+      event_id: 'e1-1234-1234-1234-123456789abc',
+      timestamp: new Date().toISOString(),
+      source: 'mock',
+      symbol: 'XAUUSD',
+      state: 'SETUP_VALID',
+      validation_status: 'VALID',
+      direction: 'LONG',
+      entry: 2684.50,
+      stop_loss: 2676.00,
+      take_profit: 2708.50,
+      risk_reward: 2.82
+    };
+
+    const setup2: TARSTradingEvent = {
+      schema_version: '1.0.0',
+      event_id: 'e2-1234-1234-1234-123456789abc',
+      timestamp: new Date().toISOString(),
+      source: 'mock',
+      symbol: 'ES',
+      state: 'SETUP_DEVELOPING',
+      validation_status: 'PENDING',
+      direction: 'LONG',
+      entry: 5880.0,
+      stop_loss: 5865.0,
+      take_profit: 5920.0,
+      risk_reward: 2.67
+    };
+
+    wsInstance.triggerMessage({
+      type: 'active_snapshot',
+      events: [setup1, setup2]
+    });
+
+    expect(snapshotEvents.length).toBe(2);
+    expect(snapshotEvents[0].symbol).toBe('XAUUSD');
+    expect(snapshotEvents[1].symbol).toBe('ES');
+    expect(individualEvents.length).toBe(2);
+  });
+
+  it('handles heartbeat ping/pong latency measurement', async () => {
+    const client = new TARSWebSocketClient('ws://127.0.0.1:8000/ws/events');
+    client.connect();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const wsInstance = MockWebSocket.instances[0];
+    wsInstance.triggerMessage({
+      type: 'pong',
+      timestamp: new Date().toISOString()
+    });
+
+    expect(client.getStatus()).toBe('connected');
+  });
+
+  it('supports explicit reconnect method', async () => {
+    const client = new TARSWebSocketClient('ws://127.0.0.1:8000/ws/events');
+    client.connect();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(MockWebSocket.instances.length).toBe(1);
+
+    client.reconnect();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(MockWebSocket.instances.length).toBe(2);
+    expect(client.getStatus()).toBe('connected');
   });
 
   it('catches and reports schema violations on malformed events', async () => {
@@ -104,10 +189,13 @@ describe('TARSWebSocketClient', () => {
     const wsInstance = MockWebSocket.instances[0];
     // Malformed event with illegal extra property and wrong schema_version
     wsInstance.triggerMessage({
-      schema_version: '0.9.0',
-      symbol: 'ES',
-      state: 'SETUP_VALID',
-      fake_ai_confidence: 99.9
+      type: 'trading_event',
+      event: {
+        schema_version: '0.9.0',
+        symbol: 'ES',
+        state: 'SETUP_VALID',
+        fake_ai_confidence: 99.9
+      }
     });
 
     expect(protocolErrors.length).toBe(1);
