@@ -77,18 +77,31 @@ export const App: React.FC = () => {
     toggleCompactWindow(settings.compactMode);
   }, [settings.compactMode]);
 
-  // Register Global Shortcut (CommandOrControl+Shift+T) to toggle compact HUD
+  // Register Global & In-App Shortcut (Ctrl+Shift+T / Command+Shift+T) to toggle compact HUD
   useEffect(() => {
-    const shortcut = 'CommandOrControl+Shift+T';
-    registerGlobalShortcut(shortcut, () => {
+    const handleToggle = () => {
       setSettings((prev) => {
         const next = { ...prev, compactMode: !prev.compactMode };
         saveSettings(next);
         return next;
       });
-    });
+    };
+
+    // 1. In-App Keydown Listener (for web, PWA, and direct in-window input)
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
+        e.preventDefault();
+        handleToggle();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+
+    // 2. Native OS Global Shortcut (when window is in background)
+    const shortcut = 'CommandOrControl+Shift+T';
+    registerGlobalShortcut(shortcut, handleToggle);
 
     return () => {
+      window.removeEventListener('keydown', handleKeyDown);
       unregisterGlobalShortcut(shortcut);
     };
   }, []);
