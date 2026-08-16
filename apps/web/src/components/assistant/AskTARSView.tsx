@@ -20,6 +20,7 @@ interface AskTARSViewProps {
   onTogglePushToTalk: () => void;
   activeSetups: TARSTradingEvent[];
   onInspectSetup: (setup: TARSTradingEvent) => void;
+  apiEndpoint?: string;
 }
 
 export const AskTARSView: React.FC<AskTARSViewProps> = ({
@@ -28,7 +29,8 @@ export const AskTARSView: React.FC<AskTARSViewProps> = ({
   isListening,
   onTogglePushToTalk,
   activeSetups,
-  onInspectSetup
+  onInspectSetup,
+  apiEndpoint = 'http://127.0.0.1:8000'
 }) => {
   const [inputText, setInputText] = useState('');
   const [speakingId, setSpeakingId] = useState<string | null>(null);
@@ -54,8 +56,13 @@ export const AskTARSView: React.FC<AskTARSViewProps> = ({
     }
 
     setSpeakingId(msg.message_id);
-    await audioService.speakText(msg.content);
-    setSpeakingId(null);
+    try {
+      await audioService.synthesizeAndPlay(msg.content, apiEndpoint);
+    } catch {
+      await audioService.speakText(msg.content);
+    } finally {
+      setSpeakingId(null);
+    }
   };
 
   return (

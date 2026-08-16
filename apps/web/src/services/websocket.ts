@@ -10,6 +10,7 @@ import { ConnectionStatus, CompanionVisualState } from '../types/companion';
 import { validateTradingEvent, validateAssistantMessage } from '../contracts/validator';
 
 export type TradingEventListener = (event: TARSTradingEvent) => void;
+export type ActiveSnapshotListener = (events: TARSTradingEvent[]) => void;
 export type AssistantMessageListener = (message: TARSAssistantMessage) => void;
 export type CompanionStateListener = (state: CompanionVisualState, reason?: string) => void;
 export type ConnectionChangeListener = (status: ConnectionStatus, latencyMs?: number, error?: string) => void;
@@ -29,6 +30,7 @@ export class TARSWebSocketClient {
   private intentionalClose = false;
 
   private tradingEventListeners = new Set<TradingEventListener>();
+  private activeSnapshotListeners = new Set<ActiveSnapshotListener>();
   private assistantMessageListeners = new Set<AssistantMessageListener>();
   private companionStateListeners = new Set<CompanionStateListener>();
   private connectionChangeListeners = new Set<ConnectionChangeListener>();
@@ -98,6 +100,13 @@ export class TARSWebSocketClient {
     };
   }
 
+  public reconnect(): void {
+    this.disconnect();
+    this.intentionalClose = false;
+    this.reconnectAttempts = 0;
+    this.connect();
+  }
+
   public disconnect(): void {
     this.intentionalClose = true;
     this.clearTimers();
@@ -124,7 +133,7 @@ export class TARSWebSocketClient {
     }
   }
 
-  private handleIncomingMessage(rawText: string): void {
+  public handleIncomingMessage(rawText: string): void {
     let parsed: unknown;
     try {
       parsed = JSON.parse(rawText);
@@ -140,7 +149,7 @@ export class TARSWebSocketClient {
 
     const msg = parsed as Record<string, unknown>;
 
-    // Heartbeat pong handling
+    // Heartbeat pong handling from real backend
     if (msg.type === 'pong') {
       if (this.lastPingSentAt > 0) {
         this.currentLatencyMs = Math.max(1, Date.now() - this.lastPingSentAt);
@@ -149,23 +158,26 @@ export class TARSWebSocketClient {
       return;
     }
 
-    // Active snapshot handling from backend on connection
+    // Active snapshot handling from real backend on connection
     if (msg.type === 'active_snapshot' && Array.isArray(msg.events)) {
+      const validEvents: TARSTradingEvent[] = [];
       msg.events.forEach((evt: unknown) => {
         const validation = validateTradingEvent(evt);
         if (validation.success) {
+          validEvents.push(validation.data);
           this.tradingEventListeners.forEach((listener) => listener(validation.data));
+        } else {
+          this.notifyProtocolError('Active Snapshot Item Validation Failed', validation.errors);
         }
       });
+      this.activeSnapshotListeners.forEach((listener) => listener(validEvents));
       return;
     }
 
-    // Direct trading event or wrapped trading event
-    const eventCandidate = msg.type === 'trading_event' && msg.payload ? msg.payload : msg;
-
-    // Check if looks like a trading event
-    if ('state' in (eventCandidate as object) && 'symbol' in (eventCandidate as object)) {
-      const validation = validateTradingEvent(eventCandidate);
+    // Real backend trading event envelope: { type: 'trading_event', event: { ... }, active_state_change: '...' }
+    if (msg.type === 'trading_event') {
+      const rawEvent = msg.event !== undefined ? msg.event : msg.payload !== undefined ? msg.payload : msg;
+      const validation = validateTradingEvent(rawEvent);
       if (validation.success) {
         this.tradingEventListeners.forEach((listener) => listener(validation.data));
       } else {
@@ -174,10 +186,32 @@ export class TARSWebSocketClient {
       return;
     }
 
-    // Direct assistant message or wrapped
-    const assistantCandidate = msg.type === 'assistant_message' && msg.payload ? msg.payload : msg;
-    if ('role' in (assistantCandidate as object) && 'content' in (assistantCandidate as object)) {
-      const validation = validateAssistantMessage(assistantCandidate);
+    // Direct trading event (top-level schema object)
+    if ('state' in msg && 'symbol' in msg && typeof msg.symbol === 'string') {
+      const validation = validateTradingEvent(msg);
+      if (validation.success) {
+        this.tradingEventListeners.forEach((listener) => listener(validation.data));
+      } else {
+        this.notifyProtocolError('Trading Event Schema Validation Failed', validation.errors);
+      }
+      return;
+    }
+
+    // Real backend assistant message envelope or wrapped payload
+    if (msg.type === 'assistant_message') {
+      const rawMsg = msg.message !== undefined ? msg.message : msg.payload !== undefined ? msg.payload : msg;
+      const validation = validateAssistantMessage(rawMsg);
+      if (validation.success) {
+        this.assistantMessageListeners.forEach((listener) => listener(validation.data));
+      } else {
+        this.notifyProtocolError('Assistant Message Schema Validation Failed', validation.errors);
+      }
+      return;
+    }
+
+    // Direct assistant message
+    if ('role' in msg && 'content' in msg && typeof msg.role === 'string') {
+      const validation = validateAssistantMessage(msg);
       if (validation.success) {
         this.assistantMessageListeners.forEach((listener) => listener(validation.data));
       } else {
@@ -257,6 +291,11 @@ export class TARSWebSocketClient {
   public onTradingEvent(listener: TradingEventListener): () => void {
     this.tradingEventListeners.add(listener);
     return () => this.tradingEventListeners.delete(listener);
+  }
+
+  public onActiveSnapshot(listener: ActiveSnapshotListener): () => void {
+    this.activeSnapshotListeners.add(listener);
+    return () => this.activeSnapshotListeners.delete(listener);
   }
 
   public onAssistantMessage(listener: AssistantMessageListener): () => void {
