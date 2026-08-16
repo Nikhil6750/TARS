@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from app.schemas import (
@@ -23,6 +23,9 @@ from assistant.errors import AssistantProviderError
 from assistant.grounding import build_system_context
 from assistant.provider import AssistantProvider, AssistantRequest
 from events.service import EventService
+
+if TYPE_CHECKING:
+    from memory.service import MemoryService
 
 # Deterministic intents are matched by keyword, on purpose: this is the
 # resolver ARCHITECTURE.md means by "deterministic code", not a fuzzy
@@ -51,10 +54,17 @@ class AssistantRouter:
         event_service: EventService,
         conversation_store: ConversationStore,
         provider: AssistantProvider,
+        memory_service: MemoryService | None = None,
     ):
         self._events = event_service
         self._conversations = conversation_store
         self._provider = provider
+        self._memory = memory_service
+
+    async def _save(self, message: AssistantMessage) -> None:
+        await self._conversations.save(message)
+        if self._memory is not None:
+            await self._memory.index_conversation_message(message)
 
     async def handle_text(self, text: str, conversation_id: str | None) -> RouterReply:
         conversation_id = conversation_id or str(uuid4())
@@ -65,7 +75,7 @@ class AssistantRouter:
             content=text,
             input_mode=InputMode.text,
         )
-        await self._conversations.save(user_message)
+        await self._save(user_message)
 
         intent, deterministic_text = await self._try_deterministic(text)
         if deterministic_text is not None:
@@ -80,7 +90,7 @@ class AssistantRouter:
         else:
             assistant_message = await self._call_provider(text, conversation_id)
 
-        await self._conversations.save(assistant_message)
+        await self._save(assistant_message)
         return RouterReply(
             conversation_id=conversation_id,
             user_message=user_message,

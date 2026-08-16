@@ -9,11 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
-from app.routers import assistant, events, health, ws
+from app.routers import assistant, events, health, memory, ws
+from app.scheduler import build_scheduler
 from app.ws_manager import ConnectionManager
 from assistant.factory import build_assistant_provider
 from assistant.providers.mock import MockAssistantProvider
 from events.generator import MockEventGenerator
+from memory.service import MemoryService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tars.app")
@@ -32,6 +34,25 @@ async def lifespan(app: FastAPI):
 
     event_bus = EventBus(db, ws_manager)
     app.state.event_bus = event_bus
+
+    memory_service = MemoryService(
+        db.conn,
+        vault_path=settings.obsidian_vault_path,
+        sqlite_vec_enabled=settings.sqlite_vec_enabled,
+    )
+    app.state.memory_service = memory_service
+    startup_index = await memory_service.reindex_vault()
+    if not startup_index.vault_missing:
+        logger.info(
+            "vault indexed at startup: %d indexed, %d unchanged, %d removed",
+            startup_index.indexed,
+            startup_index.unchanged,
+            startup_index.removed,
+        )
+
+    scheduler = build_scheduler(memory_service, timezone=settings.tars_timezone)
+    scheduler.start()
+    app.state.scheduler = scheduler
 
     try:
         app.state.assistant_provider = build_assistant_provider(settings)
@@ -55,6 +76,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        scheduler.shutdown(wait=False)
         if generator is not None:
             await generator.stop()
         await db.close()
@@ -74,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(events.router)
     app.include_router(assistant.router)
+    app.include_router(memory.router)
     app.include_router(ws.router)
 
     return app
