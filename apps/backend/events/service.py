@@ -14,6 +14,21 @@ CLEARING_VALIDATION_STATUSES = {ValidationStatus.INVALID, ValidationStatus.EXPIR
 INFORMATIONAL_STATES = {EventState.RISK_WARNING, EventState.SYSTEM_WARNING}
 
 
+class DuplicateEventError(RuntimeError):
+    """Raised when a caller-supplied event_id already exists in trading_events.
+
+    trading_events.event_id is the append-only history's primary key. A
+    resubmission of an existing id must be rejected outright — never
+    silently overwritten (the old INSERT OR REPLACE behavior) and never
+    allowed to touch active-setup state, since that would corrupt state
+    derived from a historical row the submitter doesn't actually own.
+    """
+
+    def __init__(self, event_id: str):
+        self.event_id = event_id
+        super().__init__(f"Event {event_id} already exists")
+
+
 @dataclass
 class ActiveStateChange:
     symbol: str
@@ -29,35 +44,39 @@ class EventService:
         return await self._apply_active_state(event)
 
     async def _persist(self, event: TradingEvent) -> None:
-        await self._conn.execute(
-            """
-            INSERT OR REPLACE INTO trading_events (
-                event_id, schema_version, timestamp, source, symbol,
-                strategy_id, state, direction, entry, stop_loss,
-                take_profit, risk_reward, risk_percent, validation_status,
-                reason_codes, warnings, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(event.event_id),
-                event.schema_version,
-                event.timestamp.isoformat(),
-                event.source.value,
-                event.symbol,
-                event.strategy_id,
-                event.state.value,
-                event.direction.value if event.direction else None,
-                event.entry,
-                event.stop_loss,
-                event.take_profit,
-                event.risk_reward,
-                event.risk_percent,
-                event.validation_status.value,
-                json.dumps(event.reason_codes),
-                json.dumps(event.warnings),
-                event.expires_at.isoformat() if event.expires_at else None,
-            ),
-        )
+        try:
+            await self._conn.execute(
+                """
+                INSERT INTO trading_events (
+                    event_id, schema_version, timestamp, source, symbol,
+                    strategy_id, state, direction, entry, stop_loss,
+                    take_profit, risk_reward, risk_percent, validation_status,
+                    reason_codes, warnings, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(event.event_id),
+                    event.schema_version,
+                    event.timestamp.isoformat(),
+                    event.source.value,
+                    event.symbol,
+                    event.strategy_id,
+                    event.state.value,
+                    event.direction.value if event.direction else None,
+                    event.entry,
+                    event.stop_loss,
+                    event.take_profit,
+                    event.risk_reward,
+                    event.risk_percent,
+                    event.validation_status.value,
+                    json.dumps(event.reason_codes),
+                    json.dumps(event.warnings),
+                    event.expires_at.isoformat() if event.expires_at else None,
+                ),
+            )
+        except aiosqlite.IntegrityError as exc:
+            await self._conn.rollback()
+            raise DuplicateEventError(str(event.event_id)) from exc
         await self._conn.commit()
 
     async def _apply_active_state(self, event: TradingEvent) -> ActiveStateChange:
