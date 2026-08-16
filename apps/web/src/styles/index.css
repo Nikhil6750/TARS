@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+:root {
+  --color-bg-void: #03060a;
+  --color-bg-base: #070d18;
+  --color-bg-surface: #0c172a;
+  --color-bg-surface-elevated: #11223e;
+  --color-border-subtle: rgba(0, 240, 255, 0.15);
+  --color-border-focus: rgba(0, 240, 255, 0.5);
+
+  --color-cyan: #00f0ff;
+  --color-cyan-glow: rgba(0, 240, 255, 0.35);
+  --color-emerald: #00ff66;
+  --color-emerald-glow: rgba(0, 255, 102, 0.35);
+  --color-amber: #ffb700;
+  --color-amber-glow: rgba(255, 183, 0, 0.35);
+  --color-ruby: #ff3366;
+  --color-ruby-glow: rgba(255, 51, 102, 0.4);
+
+  --color-text-bright: #f0f6fc;
+  --color-text-muted: #8fa3bf;
+  --color-text-dim: #546b8c;
+
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: 'Chakra Petch', sans-serif;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--color-bg-void);
+  color: var(--color-text-bright);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Glassmorphism & High-tech Cards */
+.glass-panel {
+  background: rgba(10, 19, 36, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 240, 255, 0.2);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.glow-cyan {
+  box-shadow: 0 0 20px rgba(0, 240, 255, 0.35);
+}
+
+.glow-emerald {
+  box-shadow: 0 0 20px rgba(0, 255, 102, 0.35);
+}
+
+.glow-amber {
+  box-shadow: 0 0 20px rgba(255, 183, 0, 0.35);
+}
+
+.glow-ruby {
+  box-shadow: 0 0 20px rgba(255, 51, 102, 0.4);
+}
+
+.bg-grid-pattern {
+  background-image: 
+    linear-gradient(to right, rgba(0, 240, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 240, 255, 0.04) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* Touch Friendly Targets */
+.touch-target {
+  min-height: 48px;
+  min-width: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* iOS Safe Areas */
+.safe-top {
+  padding-top: var(--safe-area-top);
+}
+
+.safe-bottom {
+  padding-bottom: var(--safe-area-bottom);
+}
+
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 0.9; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.01); }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 3s ease-in-out infinite;
+}
