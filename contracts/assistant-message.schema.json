@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tars.local/schemas/assistant-message.schema.json",
+  "title": "TARSAssistantMessage",
+  "description": "Canonical conversation-turn contract between a TARS client (laptop, iPhone, later ESP32) and the TARS backend's assistant surface. Covers both text and voice interaction modes. Shared by backend, frontend, and quality/integration tests.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "message_id",
+    "conversation_id",
+    "timestamp",
+    "role",
+    "content",
+    "input_mode"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "Contract version. Bump on any breaking change and record a new ADR in DECISIONS.md."
+    },
+    "message_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this message."
+    },
+    "conversation_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Identifier grouping messages into a single conversation/session."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when this message was created."
+    },
+    "role": {
+      "type": "string",
+      "enum": ["user", "assistant", "system"],
+      "description": "Who authored this message turn."
+    },
+    "content": {
+      "type": "string",
+      "description": "Text content of the message. For voice input, this is the transcribed text; for voice output, this is the text that was spoken."
+    },
+    "input_mode": {
+      "type": "string",
+      "enum": ["text", "voice"],
+      "description": "How the user supplied this message. Always 'text' for role='system'."
+    },
+    "audio_ref": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Opaque reference (e.g. local file path, storage key) to an associated audio clip, if any. Never a raw audio payload embedded in this message."
+    },
+    "related_event_id": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "event_id of a trading-event (see trading-event.schema.json) this message concerns, if the message is about a specific alert/setup. Null otherwise."
+    },
+    "intent": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Optional coarse intent classification for the message (e.g. 'show_active_setups', 'explain_invalidation', 'attention_summary'). Null when not classified."
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Which provider adapters produced/consumed this message, for debugging and provider-swap verification. All fields null when not applicable (e.g. a text-only, non-voice message).",
+      "properties": {
+        "stt": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "SpeechToTextProvider adapter name used to produce this message's content, if input_mode='voice'."
+        },
+        "assistant": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "AssistantProvider adapter name used to produce this message, if role='assistant'."
+        },
+        "tts": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "TextToSpeechProvider adapter name used to render this message's audio, if audio_ref is set on an assistant message."
+        }
+      }
+    },
+    "error": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Non-null when this message represents a provider/pipeline error surfaced to the user (e.g. STT failure), describing what went wrong."
+    }
+  }
+}
