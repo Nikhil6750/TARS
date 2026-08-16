@@ -94,7 +94,13 @@ def generate(destination: Path) -> None:
 
 
 def _relative_files(directory: Path) -> list[Path]:
-    return sorted(path.relative_to(directory) for path in directory.rglob("*") if path.is_file())
+    return sorted(
+        path.relative_to(directory)
+        for path in directory.rglob("*")
+        if path.is_file()
+        and "__pycache__" not in path.parts
+        and path.suffix not in {".pyc", ".pyo"}
+    )
 
 
 def check_drift(generated: Path) -> None:
