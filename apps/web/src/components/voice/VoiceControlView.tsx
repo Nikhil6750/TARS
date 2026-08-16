@@ -14,12 +14,14 @@ interface VoiceControlViewProps {
   onTogglePushToTalk: () => void;
   audioVolume: number;
   onVoiceTranscribed?: (text: string) => void;
+  apiEndpoint?: string;
 }
 
 export const VoiceControlView: React.FC<VoiceControlViewProps> = ({
   isListening,
   onTogglePushToTalk,
-  audioVolume
+  audioVolume,
+  apiEndpoint = 'http://127.0.0.1:8000'
 }) => {
   const [hasMicPermission, setHasMicPermission] = useState<boolean | null>(null);
 
@@ -28,8 +30,12 @@ export const VoiceControlView: React.FC<VoiceControlViewProps> = ({
     setHasMicPermission(granted);
   };
 
-  const handleTestTTS = () => {
-    audioService.speakText('TARS voice synthesizer online. All quantitative risk parameters nominal.');
+  const handleTestTTS = async () => {
+    try {
+      await audioService.synthesizeAndPlay('TARS voice synthesizer online. All quantitative risk parameters nominal.', apiEndpoint);
+    } catch {
+      audioService.speakText('TARS voice synthesizer online. All quantitative risk parameters nominal.');
+    }
   };
 
   return (

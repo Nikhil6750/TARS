@@ -149,15 +149,20 @@ export const App: React.FC = () => {
 
     if (msg.role === 'assistant') {
       setCompanionState('SPEAKING');
-      if (settings.audioEnabled) {
-        audioService.speakText(msg.content, settings.speechRate, settings.speechVolume).then(() => {
-          setCompanionState('IDLE');
-        });
+      if (settings.audioEnabled && msg.content) {
+        audioService.synthesizeAndPlay(msg.content, settings.apiEndpoint)
+          .catch((ttsErr) => {
+            console.warn('[TARS TTS] Backend synthesis error, fallback to browser synthesis:', ttsErr);
+            return audioService.speakText(msg.content, settings.speechRate, settings.speechVolume);
+          })
+          .finally(() => {
+            setCompanionState('IDLE');
+          });
       } else {
         setTimeout(() => setCompanionState('IDLE'), 2000);
       }
     }
-  }, [settings.audioEnabled, settings.speechRate, settings.speechVolume]);
+  }, [settings.audioEnabled, settings.apiEndpoint, settings.speechRate, settings.speechVolume]);
 
   // Fetch initial state from HTTP backend on mount
   useEffect(() => {
@@ -195,6 +200,9 @@ export const App: React.FC = () => {
     wsClientRef.current = ws;
 
     const unsubEvent = ws.onTradingEvent(handleIncomingTradingEvent);
+    const unsubSnapshot = ws.onActiveSnapshot((events) => {
+      setActiveSetups(events);
+    });
     const unsubMsg = ws.onAssistantMessage(handleIncomingAssistantMessage);
     const unsubComp = ws.onCompanionState((state) => setCompanionState(state));
     const unsubConn = ws.onConnectionChange((status, latency, err) => {
@@ -213,6 +221,7 @@ export const App: React.FC = () => {
 
     return () => {
       unsubEvent();
+      unsubSnapshot();
       unsubMsg();
       unsubComp();
       unsubConn();
@@ -243,45 +252,59 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [settings.mockGeneratorActive, settings.mockIntervalSeconds, activeSetups.length, handleIncomingTradingEvent]);
 
-  // Push to Talk Handler
+  // Certified Push to Talk Handler (Microphone -> Real Audio Blob -> Backend STT -> Assistant -> Backend TTS)
   const handleTogglePushToTalk = async () => {
     if (isListening) {
       setIsListening(false);
-      audioService.stopPushToTalk();
+      const audioBlob = await audioService.stopPushToTalk();
       setCompanionState('THINKING');
 
-      // Transcription & query via backend
-      const convId = 'conv_voice_session';
-      const userVoiceMsg: TARSAssistantMessage = {
-        schema_version: '1.0.0',
-        message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
-        conversation_id: convId,
-        timestamp: new Date().toISOString(),
-        role: 'user',
-        content: 'Show active setups',
-        input_mode: 'voice',
-        providers: { stt: 'faster-whisper' }
-      };
-      handleIncomingAssistantMessage(userVoiceMsg);
+      if (!audioBlob || audioBlob.size === 0) {
+        setCompanionState('IDLE');
+        return;
+      }
 
+      const convId = 'conv_voice_' + Date.now();
       try {
+        // Step 1: Forward actual microphone Blob bytes to backend transcription endpoint
+        const transcript = await audioService.transcribeAudio(audioBlob, settings.apiEndpoint);
+        if (!transcript || !transcript.trim()) {
+          setCompanionState('IDLE');
+          return;
+        }
+
+        // Step 2: Display user message with actual transcribed text
+        const userVoiceMsg: TARSAssistantMessage = {
+          schema_version: '1.0.0',
+          message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
+          conversation_id: convId,
+          timestamp: new Date().toISOString(),
+          role: 'user',
+          content: transcript,
+          input_mode: 'voice',
+          providers: { stt: 'faster-whisper' }
+        };
+        handleIncomingAssistantMessage(userVoiceMsg);
+
+        // Step 3: Query assistant endpoint with transcribed text
         const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: userVoiceMsg.content, conversation_id: convId }),
+          body: JSON.stringify({ text: transcript, conversation_id: convId }),
         });
+
         if (response.ok) {
-          const data = await response.json();
-          handleIncomingAssistantMessage(data);
+          const assistantReply: TARSAssistantMessage = await response.json();
+          handleIncomingAssistantMessage(assistantReply);
           return;
         }
       } catch (err) {
-        console.warn('[TARS Voice PTT] HTTP Assistant fallback:', err);
+        console.warn('[TARS Voice PTT] Voice processing error:', err);
       }
 
       if (settings.mockGeneratorActive) {
         setTimeout(() => {
-          const reply = createMockAssistantReply(userVoiceMsg.content, convId, activeSetups);
+          const reply = createMockAssistantReply('status check', convId, activeSetups);
           handleIncomingAssistantMessage(reply);
         }, 500);
       } else {
@@ -433,6 +456,7 @@ export const App: React.FC = () => {
             isListening={isListening}
             onTogglePushToTalk={handleTogglePushToTalk}
             onInspectSetup={handleInspectSetup}
+            apiEndpoint={settings.apiEndpoint}
           />
         )}
 
@@ -442,12 +466,14 @@ export const App: React.FC = () => {
             onTogglePushToTalk={handleTogglePushToTalk}
             audioVolume={audioVolume}
             onVoiceTranscribed={(text) => handleSendMessage(text, 'voice')}
+            apiEndpoint={settings.apiEndpoint}
           />
         )}
 
         {activeTab === 'memory' && (
           <MemoryView
             apiEndpoint={settings.apiEndpoint}
+            mockModeActive={settings.mockGeneratorActive}
           />
         )}
 
