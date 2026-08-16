@@ -10,13 +10,38 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (TAURI NATIVE VERIFICATION COMPLETE)
+## Latest handoff (NATIVE CERTIFICATION BLOCKERS RESOLVED & VERIFIED)
 
-**Status**: COMPLETE — Native MSVC toolchain, Windows SDK, Cargo, and Tauri 2 compilation verified; standalone Windows executable `tars-companion.exe` compiled and launched successfully; native window creation, Edge WebView2 runtime initialization, compact HUD mode, always-on-top, tray configuration, notifications, and global shortcuts verified; all frontend/unit/integration tests passing (32/32).
-**Branch**: `fix/v1-final-tauri`
+**Status**: COMPLETE — All native Tauri certification blockers identified by independent certification have been fully resolved and runtime verified.
+**Branch**: `fix/v1-native-cert-blockers`
+**Commit SHA**: `3dde45f8e59ea6d942cdd3a6306cb93fba84238e`
 **MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231 (`D:\VSShared\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe`)
 **Windows SDK**: Windows 10.0.26200 x86_64 SDK
-**Executable Path**: `apps/web/src-tauri/target/release/tars-companion.exe` (10,593,280 bytes)
+**Cargo Target**: `apps/web/src-tauri/target/release/tars-companion.exe` (10,600,448 bytes)
+
+**Blocker Resolutions**:
+1. **Tauri Capabilities & ACL Permissions**:
+   - Updated `apps/web/src-tauri/capabilities/default.json` with canonical Tauri 2 core window (`core:window:allow-set-size`, `core:window:allow-set-always-on-top`, `core:window:allow-set-resizable`, `core:window:allow-minimize`, `core:window:allow-maximize`, etc.), webview (`core:webview:allow-create-webview-window`, `core:webview:allow-set-webview-size`, etc.), notification (`notification:default`, `notification:allow-is-permission-granted`, `notification:allow-request-permission`, `notification:allow-notify`, `notification:allow-show`), and global-shortcut permissions (`global-shortcut:default`, `global-shortcut:allow-is-registered`, `global-shortcut:allow-register`, `global-shortcut:allow-unregister`).
+   - Verified that `cargo check` in `apps/web/src-tauri` validates with 0 errors and 0 warnings.
+
+2. **Strict Scoped Native CSP**:
+   - Replaced wildcard CSP in `apps/web/src-tauri/tauri.conf.json` with scoped security policy strictly allowing local TARS backend HTTP and WebSocket communication (`127.0.0.1:8000`, `localhost:8000`, and Vite dev `localhost:5173`) and font/media assets, while explicitly removing `unsafe-eval`.
+
+3. **Window Management & Global Hotkey Handling**:
+   - Implemented native `toggle_compact_mode` and `is_always_on_top` commands in Rust backend (`apps/web/src-tauri/src/lib.rs`) and wired startup shortcut handler via `tauri_plugin_global_shortcut::Builder::with_handler`.
+   - Wired dual in-app keydown listener (`Ctrl+Shift+T` / `Command+Shift+T`) and native global hotkey in `apps/web/src/App.tsx`.
+   - Updated `apps/web/src/services/tauri.ts` to invoke `toggle_compact_mode` directly with logical size fallback.
+   - Updated `apps/web/src/services/notifications.ts` to automatically request permissions if ungranted before native notification dispatch.
+
+4. **Runtime Verification Matrix (Executed against Live Backend & Native Release Binary)**:
+   - `initial_window`: Dimensions verified (1294x878 frame / 1280x840 logical), AlwaysOnTop is `false`.
+   - `compact_mode`: Native toggle verified (434x758 frame / 420x720 logical), AlwaysOnTop is `true`.
+   - `restored_mode`: Native toggle back verified (1294x878 frame / 1280x840 logical), AlwaysOnTop is `false`.
+   - `rest_health` & `rest_active_events`: Verified live REST communication (`/health` status `ok`, `/api/v1/events/active` active events returned).
+   - `websocket_connectivity`: Edge WebView2 connected to `ws://127.0.0.1:8000/ws/events` under the scoped CSP (`WS_CONNECT_SUCCESS`).
+   - `native_notification`: Verified native notification dispatch with granted permission (`window.__TAURI__.notification`).
+   - Automated unit & integration suite: 7 test files, 32/32 tests passed (100%).
+   - Contract consistency check: `tools/generate_contracts.py --check` passed.
 
 **Work completed**:
 1. **WebSocket Protocol Adapter**:
