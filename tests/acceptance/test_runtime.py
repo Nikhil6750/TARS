@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
@@ -12,7 +13,6 @@ from websockets.asyncio.client import connect
 from tools.tars_test_client import ContractViolation, TarsTestClient
 
 from .conftest import poll_until
-
 
 pytestmark = pytest.mark.acceptance
 
@@ -100,6 +100,47 @@ def test_event_lifecycle_reaches_two_clients_and_persists(
             )
 
     asyncio.run(scenario())
+
+
+def test_complete_setup_lifecycle_is_append_only_history(
+    client: TarsTestClient,
+    event_factory: Callable[[str, str, str], dict[str, Any]],
+) -> None:
+    """Invalidation must append a new fact, never rewrite the valid fact."""
+
+    symbol = f"LIFE{uuid4().hex[:8].upper()}"
+    developing = event_factory("SETUP_DEVELOPING", "PENDING", symbol)
+    valid = event_factory("SETUP_VALID", "VALID", symbol)
+
+    client.send_event(developing)
+    client.send_event(valid)
+    invalidated = client.invalidate(valid["event_id"], "CERT_REGRESSION")
+
+    assert invalidated["state"] == "SETUP_INVALIDATED"
+    assert invalidated["event_id"] not in {
+        developing["event_id"],
+        valid["event_id"],
+    }, "invalidation must have its own immutable event_id"
+
+    history = poll_until(
+        lambda: client.history_for_symbol(symbol),
+        lambda events: len(events) >= 3,
+    )
+    lifecycle = {
+        (event["event_id"], event["state"])
+        for event in history
+        if event["symbol"] == symbol
+    }
+    assert (developing["event_id"], "SETUP_DEVELOPING") in lifecycle
+    assert (valid["event_id"], "SETUP_VALID") in lifecycle
+    assert (invalidated["event_id"], "SETUP_INVALIDATED") in lifecycle
+    assert len({event_id for event_id, _ in lifecycle}) >= 3
+
+    active = poll_until(
+        client.active_events,
+        lambda events: not any(event["symbol"] == symbol for event in events),
+    )
+    assert not any(event["symbol"] == symbol for event in active)
 
 
 def test_websocket_disconnect_then_reconnect(

@@ -15,14 +15,13 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from websockets.asyncio.client import connect
-
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS = ROOT / "contracts"
@@ -58,7 +57,7 @@ class Routes:
     websocket: str = "/ws"
 
     @classmethod
-    def from_env(cls) -> "Routes":
+    def from_env(cls) -> Routes:
         return cls(
             health=os.getenv("TARS_HEALTH_PATH", cls.health),
             events=os.getenv("TARS_EVENTS_PATH", cls.events),
@@ -122,7 +121,7 @@ class TarsTestClient:
             timeout=httpx.Timeout(timeout_seconds), transport=transport
         )
 
-    def __enter__(self) -> "TarsTestClient":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -184,6 +183,14 @@ class TarsTestClient:
 
     def history(self) -> list[dict[str, Any]]:
         return self._event_list(self._json(self.http.get(self._url(self.routes.history))))
+
+    def history_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
+        """Query public history with an explicit symbol filter."""
+
+        payload = self._json(
+            self.http.get(self._url(self.routes.history), params={"symbol": symbol})
+        )
+        return self._event_list(payload)
 
     def invalidate(self, event_id: str, reason: str = "MANUAL_INVALIDATION") -> Any:
         path = self.routes.invalidate.format(event_id=event_id)

@@ -13,7 +13,6 @@ from tools.tars_test_client import (
     TarsTestClient,
 )
 
-
 ROOT = Path(__file__).resolve().parents[2]
 VALID_EVENT = json.loads(
     (ROOT / "tests" / "fixtures" / "valid" / "setup_valid.json").read_text(
@@ -34,9 +33,11 @@ def test_send_event_validates_before_network() -> None:
         called = True
         return response({"accepted": True})
 
-    with TarsTestClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ContractViolation):
-            client.send_event({"state": "SETUP_VALID"})
+    with (
+        TarsTestClient(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ContractViolation),
+    ):
+        client.send_event({"state": "SETUP_VALID"})
     assert not called
 
 
@@ -47,6 +48,16 @@ def test_queries_validate_public_event_contracts() -> None:
 
     with TarsTestClient(transport=httpx.MockTransport(handler)) as client:
         assert client.active_events() == [VALID_EVENT]
+
+
+def test_symbol_history_uses_public_query_filter() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/events/history"
+        assert request.url.params["symbol"] == "ES"
+        return response([VALID_EVENT])
+
+    with TarsTestClient(transport=httpx.MockTransport(handler)) as client:
+        assert client.history_for_symbol("ES") == [VALID_EVENT]
 
 
 def test_configurable_routes_do_not_require_backend_imports() -> None:
@@ -74,9 +85,11 @@ def test_grounding_rejects_unknown_numeric_claim() -> None:
             return response([])
         return response(assistant)
 
-    with TarsTestClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(GroundingViolation, match="absent from state"):
-            client.verify_grounded_answer("What is ES entry?", "ES")
+    with (
+        TarsTestClient(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(GroundingViolation, match="absent from state"),
+    ):
+        client.verify_grounded_answer("What is ES entry?", "ES")
 
 
 def test_grounding_requires_uncertainty_when_symbol_is_missing() -> None:
@@ -89,9 +102,11 @@ def test_grounding_requires_uncertainty_when_symbol_is_missing() -> None:
             return response([])
         return response(assistant)
 
-    with TarsTestClient(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(GroundingViolation, match="did not disclose"):
-            client.verify_grounded_answer("What is EURUSD entry?", "EURUSD")
+    with (
+        TarsTestClient(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(GroundingViolation, match="did not disclose"),
+    ):
+        client.verify_grounded_answer("What is EURUSD entry?", "EURUSD")
 
 
 def test_websocket_url_tracks_http_security() -> None:
