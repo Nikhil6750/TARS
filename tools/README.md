@@ -29,9 +29,12 @@ CI/drift verification uses the same environment and runs:
 .\.venv\Scripts\python tools\generate_contracts.py --check
 ```
 
-The check regenerates into a temporary directory and compares the complete
-file set and file bytes against committed output. A schema change, generator
-change, or hand edit therefore fails deterministically.
+The generator canonicalizes every Python and TypeScript artifact to LF, and
+the repository pins LF checkout behavior for only `tools/generated/`. The
+check regenerates into a temporary directory and compares the complete file
+set and content, tolerating only equivalent CRLF/LF encodings in an existing
+checkout. A schema change, generator change, whitespace change, or other hand
+edit therefore still fails deterministically.
 
 ## External test client
 

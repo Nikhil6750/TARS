@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import filecmp
 import shutil
 import subprocess
 import sys
@@ -17,6 +16,20 @@ SCHEMAS = (
     ("assistant-message.schema.json", "assistant_message.py", "assistant-message.d.ts"),
     ("trading-event.schema.json", "trading_event.py", "trading-event.d.ts"),
 )
+
+
+def _canonical_newlines(content: bytes) -> bytes:
+    """Return generated text with the repository's canonical LF endings."""
+    return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _normalize_generated_newlines(directory: Path) -> None:
+    for path in _relative_files(directory):
+        artifact = directory / path
+        content = artifact.read_bytes()
+        normalized = _canonical_newlines(content)
+        if normalized != content:
+            artifact.write_bytes(normalized)
 
 
 def _run(command: list[str]) -> None:
@@ -97,6 +110,10 @@ def generate(destination: Path) -> None:
             ]
         )
 
+    # Both generators choose their host platform's line endings. Canonicalize
+    # their text output so generation is byte-identical on Windows and POSIX.
+    _normalize_generated_newlines(destination)
+
 
 def _relative_files(directory: Path) -> list[Path]:
     return sorted(
@@ -116,10 +133,10 @@ def check_drift(generated: Path) -> None:
     if expected != actual:
         problems.append(f"file set differs: committed={expected!r}, generated={actual!r}")
     for relative_path in sorted(set(expected) & set(actual)):
-        if not filecmp.cmp(
-            COMMITTED_DIR / relative_path,
-            generated / relative_path,
-            shallow=False,
+        committed_content = (COMMITTED_DIR / relative_path).read_bytes()
+        generated_content = (generated / relative_path).read_bytes()
+        if _canonical_newlines(committed_content) != _canonical_newlines(
+            generated_content
         ):
             problems.append(f"content differs: {relative_path.as_posix()}")
 
