@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -9,8 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
-from app.routers import assistant, events, health, memory, ws
+from app.routers import assistant, events, health, memory, voice, ws
 from app.scheduler import build_scheduler
+from app.voice_state import VoiceProviders
 from app.ws_manager import ConnectionManager
 from assistant.factory import build_assistant_provider
 from assistant.providers.mock import MockAssistantProvider
@@ -24,6 +26,17 @@ logger = logging.getLogger("tars.app")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    if settings.effective_host == "0.0.0.0":
+        logger.warning(
+            "binding to 0.0.0.0:%d — reachable from other devices on this "
+            "LAN. Never port-forward this port; use Tailscale Serve for "
+            "private remote access instead.",
+            settings.backend_port,
+        )
+    else:
+        logger.info(
+            "binding to %s:%d (localhost-only)", settings.effective_host, settings.backend_port
+        )
 
     db = build_database(settings)
     await db.connect()
@@ -73,9 +86,15 @@ async def lifespan(app: FastAPI):
         logger.info("mock trading-event generator started")
     app.state.mock_generator = generator
 
+    voice_providers = VoiceProviders()
+    app.state.voice_providers = voice_providers
+    voice_load_task = asyncio.create_task(voice_providers.load(settings))
+    logger.info("voice provider loading started in background")
+
     try:
         yield
     finally:
+        voice_load_task.cancel()
         scheduler.shutdown(wait=False)
         if generator is not None:
             await generator.stop()
@@ -84,10 +103,11 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="TARS Backend", version="0.1.0", lifespan=lifespan)
+    settings = get_settings()
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=settings.cors_origins,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -97,6 +117,7 @@ def create_app() -> FastAPI:
     app.include_router(events.router)
     app.include_router(assistant.router)
     app.include_router(memory.router)
+    app.include_router(voice.router)
     app.include_router(ws.router)
 
     return app

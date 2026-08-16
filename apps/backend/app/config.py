@@ -24,9 +24,13 @@ class Settings(BaseSettings):
 
     # ---- General ----
     tars_env: str = "development"
-    backend_host: str = "0.0.0.0"
+    # Explicit override for the bind address. Leave unset (None) to get the
+    # secure-by-default behavior driven by `bind_lan` below — never publicly
+    # exposed by default, per AGENTS.md.
+    backend_host: str | None = None
     backend_port: int = 8000
     database_url: str = "sqlite:///./tars.db"
+    cors_allow_origins: str = "*"
 
     # ---- Mock trading events ----
     use_mock_trading_events: bool = True
@@ -84,7 +88,21 @@ class Settings(BaseSettings):
     tars_timezone: str = "UTC"
 
     # ---- Connectivity ----
+    # Tailscale Serve is the preferred private path to reach this backend
+    # from another device (e.g. iPhone) — it proxies a localhost-bound
+    # service over the tailnet, so it works with the secure default below
+    # without any LAN exposure. `tailscale_hostname` is informational only
+    # here (surfaced by /api/v1/health-style tooling); actual `tailscale
+    # serve` configuration happens outside this app. Tailscale Funnel
+    # (public exposure) is never used for normal TARS operation — see
+    # ARCHITECTURE.md § Connectivity / ADR-014.
     tailscale_hostname: str | None = None
+    # False (default): bind loopback-only (127.0.0.1) — not reachable from
+    # any other device, including on the same LAN. True: bind 0.0.0.0 so
+    # other devices on the same LAN can reach it (e.g. for local dev on a
+    # phone before Tailscale is set up). Does not, by itself, expose TARS
+    # to the public internet — that requires separately port-forwarding or
+    # using Tailscale Funnel, neither of which this app does automatically.
     bind_lan: bool = False
 
     # ---- Notifications ----
@@ -106,6 +124,22 @@ class Settings(BaseSettings):
         if not path.is_absolute():
             path = REPO_ROOT / path
         return path
+
+    @property
+    def effective_host(self) -> str:
+        """The actual bind address: an explicit `backend_host` always wins;
+        otherwise secure-by-default (127.0.0.1) unless `bind_lan` opts in
+        to 0.0.0.0. See the `bind_lan` field docstring above."""
+        if self.backend_host:
+            return self.backend_host
+        return "0.0.0.0" if self.bind_lan else "127.0.0.1"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        raw = self.cors_allow_origins.strip()
+        if raw == "*":
+            return ["*"]
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
 @lru_cache
