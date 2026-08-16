@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Local Storage Persistence Manager for TARS Companion
  */
 
@@ -10,9 +10,16 @@ const SETTINGS_KEY = 'tars_settings_v1';
 const ALERTS_KEY = 'tars_alerts_history_v1';
 const CHAT_KEY = 'tars_chat_history_v1';
 
+const metaEnv = typeof import.meta !== 'undefined' ? (import.meta as unknown as { env?: Record<string, string> }).env : undefined;
+const envApiUrl = metaEnv?.VITE_TARS_API_URL ? String(metaEnv.VITE_TARS_API_URL) : 'http://127.0.0.1:8000';
+const rawWs = metaEnv?.VITE_TARS_WS_URL ? String(metaEnv.VITE_TARS_WS_URL) : '';
+const envWsUrl = rawWs
+  ? (rawWs.endsWith('/ws/events') ? rawWs : rawWs.replace(/\/$/, '') + '/ws/events')
+  : 'ws://127.0.0.1:8000/ws/events';
+
 export const DEFAULT_SETTINGS: AppSettings = {
-  serverEndpoint: 'ws://127.0.0.1:8000/ws/events',
-  apiEndpoint: 'http://127.0.0.1:8000',
+  serverEndpoint: envWsUrl,
+  apiEndpoint: envApiUrl,
   audioEnabled: true,
   ttsVoice: 'default',
   speechRate: 1.0,

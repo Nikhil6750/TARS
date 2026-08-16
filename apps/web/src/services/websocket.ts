@@ -38,7 +38,28 @@ export class TARSWebSocketClient {
 
   constructor(initialUrl: string) {
     this.url = initialUrl;
+    if (typeof window !== 'undefined') {
+      window.addEventListener('offline', this.handleWindowOffline);
+      window.addEventListener('online', this.handleWindowOnline);
+    }
   }
+
+  private handleWindowOffline = () => {
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.handleCloseOrError('Network offline');
+  };
+
+  private handleWindowOnline = () => {
+    if (!this.intentionalClose && this.status !== 'connected' && this.status !== 'connecting') {
+      this.reconnect();
+    }
+  };
 
   public getStatus(): ConnectionStatus {
     return this.status;
@@ -115,6 +136,14 @@ export class TARSWebSocketClient {
       this.ws = null;
     }
     this.setStatus('offline');
+  }
+
+  public destroy(): void {
+    this.disconnect();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('offline', this.handleWindowOffline);
+      window.removeEventListener('online', this.handleWindowOnline);
+    }
   }
 
   public send(data: Record<string, unknown> | string): boolean {

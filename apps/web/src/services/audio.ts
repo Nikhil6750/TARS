@@ -59,6 +59,8 @@ export class AudioService {
   private audioChunks: Float32Array[] = [];
   private sampleRate = 16000;
   private activeAudioElement: HTMLAudioElement | null = null;
+  private mediaRecorder: MediaRecorder | null = null;
+  private recordedBlobs: Blob[] = [];
 
   public async requestMicrophonePermission(): Promise<boolean> {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
@@ -79,6 +81,7 @@ export class AudioService {
 
     try {
       this.audioChunks = [];
+      this.recordedBlobs = [];
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -86,6 +89,21 @@ export class AudioService {
           autoGainControl: true,
         },
       });
+
+      if (typeof MediaRecorder !== 'undefined') {
+        try {
+          this.mediaRecorder = new MediaRecorder(this.mediaStream);
+          this.mediaRecorder.ondataavailable = (evt: BlobEvent) => {
+            if (evt.data && evt.data.size > 0) {
+              this.recordedBlobs.push(evt.data);
+            }
+          };
+          this.mediaRecorder.start();
+        } catch (err) {
+          console.warn('[TARS Audio] MediaRecorder init error:', err);
+          this.mediaRecorder = null;
+        }
+      }
 
       const AudioContextClass =
         window.AudioContext ||
@@ -152,8 +170,32 @@ export class AudioService {
     }
 
     if (this.processorNode) {
-      this.processorNode.disconnect();
+      try {
+        this.processorNode.disconnect();
+      } catch {
+        // ignore
+      }
       this.processorNode = null;
+    }
+
+    if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+      try {
+        const recorder = this.mediaRecorder;
+        await new Promise<void>((resolve) => {
+          if (recorder.state === 'inactive') {
+            resolve();
+            return;
+          }
+          const prevStop = recorder.onstop;
+          recorder.onstop = (ev: Event) => {
+            if (typeof prevStop === 'function') prevStop.call(recorder, ev);
+            resolve();
+          };
+          recorder.stop();
+        });
+      } catch (err) {
+        console.warn('[TARS Audio] MediaRecorder stop error:', err);
+      }
     }
 
     if (this.mediaStream) {
@@ -168,7 +210,10 @@ export class AudioService {
     }
 
     let recordedBlob: Blob | null = null;
-    if (totalSamples > 0) {
+    if (this.recordedBlobs.length > 0) {
+      const mime = (this.mediaRecorder && this.mediaRecorder.mimeType) || 'audio/wav';
+      recordedBlob = new Blob(this.recordedBlobs, { type: mime });
+    } else if (totalSamples > 0) {
       const mergedSamples = new Float32Array(totalSamples);
       let offset = 0;
       for (const chunk of this.audioChunks) {
@@ -182,6 +227,8 @@ export class AudioService {
     }
 
     this.audioChunks = [];
+    this.recordedBlobs = [];
+    this.mediaRecorder = null;
 
     if (this.audioContext && this.audioContext.state !== 'closed') {
       try {

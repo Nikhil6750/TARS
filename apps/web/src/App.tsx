@@ -264,7 +264,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      const convId = 'conv_voice_' + Date.now();
+      const convId = 'conv_voice_session';
       try {
         // Step 1: Forward actual microphone Blob bytes to backend transcription endpoint
         const transcript = await audioService.transcribeAudio(audioBlob, settings.apiEndpoint);
