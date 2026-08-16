@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryView } from '../components/memory/MemoryView';
 import { ActiveSetupsView } from '../components/setups/ActiveSetupsView';
+import { CompanionHero } from '../components/companion/CompanionHero';
 import { TARSTradingEvent } from '../types/trading-event';
 
 describe('Metrics & Memory Boundaries Verification', () => {
@@ -69,5 +70,32 @@ describe('Metrics & Memory Boundaries Verification', () => {
     // Verify zero fabricated confidence percentages or invented metrics
     expect(screen.queryByText(/AI Confidence/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Win Probability/i)).not.toBeInTheDocument();
+  });
+
+  it('renders CompanionHero without fabricated CUE or HONESTY percentages', () => {
+    render(
+      <CompanionHero
+        companionState="IDLE"
+        connectionStatus="connected"
+        latencyMs={42}
+        activeSetups={[]}
+        criticalWarnings={[]}
+        isListening={false}
+        onTogglePushToTalk={vi.fn()}
+        audioVolume={0}
+        onSendMessage={vi.fn()}
+        onInspectSetup={vi.fn()}
+      />
+    );
+
+    // These were previously hardcoded, fabricated, and never backed by any
+    // quant_brain source (see ADR-004: no AI confidence/probability fields).
+    expect(screen.queryByText(/CUE/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/HONESTY/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('100%')).not.toBeInTheDocument();
+    expect(screen.queryByText('95%')).not.toBeInTheDocument();
+
+    // The real, traceable latency metric must still render.
+    expect(screen.getByText('42ms')).toBeInTheDocument();
   });
 });

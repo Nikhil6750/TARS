@@ -50,3 +50,36 @@ def test_metric_scanner_flags_real_mode_claims_but_ignores_mock_fixture(
 
     assert len(findings) == 1
     assert findings[0].startswith("components/Dashboard.tsx:")
+
+
+def test_metric_scanner_flags_fabricated_cue_and_honesty_badges(
+    tmp_path: Path,
+) -> None:
+    components = tmp_path / "components"
+    components.mkdir()
+    (components / "CompanionHero.tsx").write_text(
+        "<span>CUE: <span className=\"text-cyan-400 font-semibold\">100%</span></span>\n"
+        "<span>HONESTY: <span className=\"text-cyan-400 font-semibold\">95%</span></span>",
+        encoding="utf-8",
+    )
+
+    findings = find_fabricated_metric_claims(tmp_path)
+
+    assert len(findings) == 2
+    assert any("CUE" in finding for finding in findings)
+    assert any("HONESTY" in finding for finding in findings)
+
+
+def test_metric_scanner_ignores_adr_reference_that_is_not_a_labelled_metric(
+    tmp_path: Path,
+) -> None:
+    components = tmp_path / "components"
+    components.mkdir()
+    (components / "trading-event.ts").write_text(
+        "// Never add AI confidence or probability fields (ADR-004).",
+        encoding="utf-8",
+    )
+
+    findings = find_fabricated_metric_claims(tmp_path)
+
+    assert findings == []
