@@ -15,7 +15,7 @@ from app.schemas import (
     TradingEvent,
     ValidationStatus,
 )
-from events.service import EventService
+from events.service import DuplicateEventError, EventService
 
 router = APIRouter(tags=["events"])
 
@@ -68,6 +68,10 @@ async def post_event(
         await bus.emit(event)
     except ContractValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DuplicateEventError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"Event {exc.event_id} already exists"
+        ) from exc
 
     return event.to_contract_dict()
 
@@ -93,11 +97,11 @@ async def invalidate_event(
         pass
 
     # A new, unique event_id — never the original's. `trading_events.event_id`
-    # is the primary key and `EventService._persist` upserts by it, so reusing
-    # the original id would overwrite (destroy) the SETUP_VALID row it is
-    # invalidating instead of appending a new historical event. The original
-    # is preserved for audit/correlation purposes as a reason code instead,
-    # since the frozen trading-event contract has no dedicated field for it.
+    # is the primary key and persistence is plain append-only INSERT, so
+    # reusing the original id would be rejected as a duplicate instead of
+    # appending a new historical event. The original is preserved for
+    # audit/correlation purposes as a reason code instead, since the frozen
+    # trading-event contract has no dedicated field for it.
     invalidated_event = TradingEvent(
         source=EventSource.manual,
         symbol=original["symbol"],
@@ -119,6 +123,10 @@ async def invalidate_event(
         await bus.emit(invalidated_event)
     except ContractValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DuplicateEventError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"Event {exc.event_id} already exists"
+        ) from exc
 
     return invalidated_event.to_contract_dict()
 
@@ -152,4 +160,8 @@ async def create_mock_event(
         await bus.emit(event)
     except ContractValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DuplicateEventError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"Event {exc.event_id} already exists"
+        ) from exc
     return event.to_contract_dict()

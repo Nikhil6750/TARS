@@ -11,7 +11,110 @@ for that).
 
 ---
 
-## Latest handoff — Certification remediation (2026-08-16)
+## Latest handoff — Append-only event history fix (2026-08-16)
+
+**Branch**: `fix/v1-final-lifecycle`
+**Base SHA**: `9f13e09a7c44be27901d34cb885a63ceb8755463`
+**Final SHA**: `bfb39df` (see `git log 9f13e09..bfb39df` for the full diff)
+
+Not merged into `feature/v1-remediation-integration`, `integration/v1`, or
+`main` — that remains a coordinator decision.
+
+**Commits**:
+
+| SHA | Summary |
+|---|---|
+| `224ea47` | Enforce append-only event persistence |
+| `bfb39df` | Add duplicate/concurrency regression tests for event persistence |
+
+**Work completed** — fixed the final backend certification blocker:
+`trading_events` was not genuinely append-only.
+
+**Root cause**: `EventService._persist` (`events/service.py`) wrote every
+event with `INSERT OR REPLACE INTO trading_events ... `, keyed on
+`event_id` (the table's `PRIMARY KEY`, unchanged from Wave 1). `event_id`
+is a required, caller-suppliable field on the public
+`POST /api/v1/events` route (`app/routers/events.py`) — the raw JSON body
+is validated against the frozen contract and passed straight into
+`TradingEvent(**raw)`, which accepts an explicit `event_id`. So any
+resubmission of an existing `event_id` — a retried request, a buggy
+upstream integration, or a malicious caller — silently overwrote
+(destroyed) that historical row instead of being rejected. The mock
+generator and `/dev/mock-event` path were never affected (they always let
+the model's `default_factory=uuid4` mint a fresh id), and the invalidate
+endpoint already minted a fresh id too (fixed in a prior session) — the
+open path was specifically direct callers of `POST /api/v1/events`
+supplying their own `event_id`.
+
+**Persistence change** (`events/service.py`): switched `_persist` to a
+plain `INSERT` and let the existing `PRIMARY KEY` constraint enforce
+uniqueness at the database level (no schema/migration change needed — the
+constraint was already there, just unenforced by the upsert). Added
+`DuplicateEventError(RuntimeError)`, raised when SQLite reports
+`IntegrityError` on the insert, carrying the offending `event_id`. Because
+`record_event` calls `_persist` before `_apply_active_state`, a rejected
+duplicate never reaches the `active_setups` write — no partial-state
+corruption path exists structurally, not just by convention.
+
+**Duplicate behavior**: `app/routers/events.py` catches
+`DuplicateEventError` in all three event-ingestion routes
+(`POST /api/v1/events`, `POST /api/v1/events/{id}/invalidate`,
+`POST /api/v1/dev/mock-event`) and returns **HTTP 409** with
+`{"detail": "Event <id> already exists"}` — no SQLite/DB internals in the
+response. The original historical row is left byte-for-byte unchanged
+(verified in tests below).
+
+**Lifecycle verification**: `tests/test_event_service.py::test_lifecycle_three_events_stay_queryable_and_active_state_clears`
+drives `SETUP_DEVELOPING -> SETUP_VALID -> SETUP_INVALIDATED` directly
+against `EventService` and asserts three distinct `event_id`s, all three
+rows still present in `get_history()`, and `get_active_setups()` empty
+afterward. (The API-level version of this same lifecycle proof already
+existed from a prior session:
+`tests/test_events_api.py::test_invalidation_preserves_prior_history_as_distinct_events`
+— left unmodified, still passing.)
+
+**Concurrency verification**: `tests/test_event_service.py::test_concurrent_duplicate_event_id_only_one_persists`
+fires two `record_event()` calls for the same `event_id` via
+`asyncio.gather(..., return_exceptions=True)`. Because `app/db.py`
+intentionally uses one shared `aiosqlite` connection (documented there as
+the correct scope for this single-user local app, not a pool), concurrent
+writers are serialized through that connection's single worker thread —
+so the database's `PRIMARY KEY` constraint deterministically admits exactly
+one writer and raises `IntegrityError`→`DuplicateEventError` for the
+other, with no TOCTOU window (no check-then-insert; the constraint itself
+is the check). Test asserts exactly one success, one `DuplicateEventError`,
+and exactly one matching row in history afterward.
+
+**Files changed**: `apps/backend/events/service.py`,
+`apps/backend/app/routers/events.py`,
+`apps/backend/tests/test_events_api.py` (added 2 cases),
+`apps/backend/tests/test_event_service.py` (new — 4 cases). No schema
+migration, no change to the frozen trading-event contract, no change to
+already-passing routes/behavior outside the duplicate-id path.
+
+**Tests run**:
+
+- `python -m pytest apps/backend/tests` — **81 passed** (up from 75 at
+  session start; existing tests unmodified except the 2 additions to
+  `test_events_api.py`, none weakened).
+- `ruff check apps/backend` — **clean**.
+- `mypy --config-file apps/backend/pyproject.toml apps/backend` — **clean,
+  57 source files**.
+
+**Known limitations**: none identified for this specific blocker. The
+concurrency proof is deterministic given this app's single-shared-connection
+architecture (see `app/db.py`'s own docstring); if that architecture ever
+changes to a real connection pool, the same `PRIMARY KEY`-constraint
+approach still holds (SQLite enforces it regardless of which connection
+issues the `INSERT`), so no follow-up is required on that account.
+
+**Next recommended action**: re-run final certification against
+`fix/v1-final-lifecycle`. No other backend work is pending from this
+session.
+
+---
+
+## Certification remediation (2026-08-16)
 
 **Branch**: `fix/v1-backend-cert-blockers`
 **Base SHA**: `e8308d82361e6df3c0928c4994ac0505a2e4235f`
