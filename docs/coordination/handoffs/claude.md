@@ -15,7 +15,7 @@ for that).
 
 **Branch**: `fix/v1-backend-cert-blockers`
 **Base SHA**: `e8308d82361e6df3c0928c4994ac0505a2e4235f`
-**Final SHA**: `d611723` (see `git log e8308d8..d611723` for the full diff)
+**Final SHA**: `910c05a` (see `git log e8308d8..910c05a` for the full diff)
 
 **Commits** (each pushed after its own test/lint/type-check pass):
 
@@ -26,6 +26,7 @@ for that).
 | `11d975d` | Memory grounding: source_id now flows into assistant grounding context |
 | `d478172` | Real voice path: STT->assistant->TTS proof test with actual local models |
 | `d611723` | Ruff: resolved remaining `apps/backend/run.py` E402 violations |
+| `910c05a` | This handoff |
 
 Not merged into `feature/v1-integration`, `integration/v1`, or `main` —
 that remains a coordinator/Codex decision.
