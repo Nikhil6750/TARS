@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "00000000-0000-4000-8000-000000000003",
+  "timestamp": "2026-08-16T08:02:00Z",
+  "source": "mock",
+  "symbol": "ES",
+  "strategy_id": "reversal-v2",
+  "state": "SETUP_VALID",
+  "direction": "SHORT",
+  "entry": 6480.25,
+  "stop_loss": 6488.25,
+  "take_profit": 6464.25,
+  "risk_reward": 2,
+  "risk_percent": 0.35,
+  "validation_status": "VALID",
+  "reason_codes": ["STRUCTURE_CONFIRMED"],
+  "warnings": [],
+  "expires_at": "2026-08-16T08:32:00Z"
+}
