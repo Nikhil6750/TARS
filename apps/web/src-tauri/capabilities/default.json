@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/config.schema.json",
+  "identifier": "default",
+  "description": "Default permissions for TARS desktop shell",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "global-shortcut:default"
+  ]
+}
