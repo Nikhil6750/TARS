@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+from opentelemetry.trace import Status, StatusCode
+
+from app.observability import get_tracer
 from app.schemas import (
     AssistantMessage,
     InputMode,
@@ -26,6 +29,8 @@ from events.service import EventService
 
 if TYPE_CHECKING:
     from memory.service import MemoryService
+
+tracer = get_tracer()
 
 # Deterministic intents are matched by keyword, on purpose: this is the
 # resolver ARCHITECTURE.md means by "deterministic code", not a fuzzy
@@ -122,20 +127,26 @@ class AssistantRouter:
             system_context=build_system_context(active),
             history=history,
         )
-        try:
-            reply = await self._provider.respond(request)
-        except AssistantProviderError as exc:
-            return AssistantMessage(
-                conversation_id=UUID(conversation_id),
-                role=MessageRole.assistant,
-                content=(
-                    "I couldn't reach the configured assistant provider "
-                    f"({self._provider.name}) to answer that."
-                ),
-                input_mode=InputMode.text,
-                providers=MessageProviders(assistant=self._provider.name),
-                error=str(exc),
-            )
+        with tracer.start_as_current_span("assistant.request") as span:
+            span.set_attribute("assistant.provider", self._provider.name)
+            span.set_attribute("assistant.history_turns", len(history))
+            span.set_attribute("assistant.grounded_setups", len(active))
+            try:
+                reply = await self._provider.respond(request)
+            except AssistantProviderError as exc:
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
+                return AssistantMessage(
+                    conversation_id=UUID(conversation_id),
+                    role=MessageRole.assistant,
+                    content=(
+                        "I couldn't reach the configured assistant provider "
+                        f"({self._provider.name}) to answer that."
+                    ),
+                    input_mode=InputMode.text,
+                    providers=MessageProviders(assistant=self._provider.name),
+                    error=str(exc),
+                )
 
         return AssistantMessage(
             conversation_id=UUID(conversation_id),

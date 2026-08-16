@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
+from app.observability import configure_tracing
 from app.routers import assistant, events, health, memory, voice, ws
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
@@ -26,6 +27,8 @@ logger = logging.getLogger("tars.app")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    configure_tracing("tars-backend", settings.otel_exporter_otlp_endpoint)
+
     if settings.effective_host == "0.0.0.0":
         logger.warning(
             "binding to 0.0.0.0:%d — reachable from other devices on this "

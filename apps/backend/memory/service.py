@@ -12,9 +12,12 @@ from typing import Any
 
 import aiosqlite
 
+from app.observability import get_tracer
 from app.schemas import AssistantMessage
 from memory import fts
 from memory.vault import VaultIndexResult, reindex_vault
+
+tracer = get_tracer()
 
 
 class MemoryService:
@@ -48,4 +51,14 @@ class MemoryService:
     async def search(
         self, query: str, limit: int = 10, source: str | None = None
     ) -> list[dict[str, Any]]:
-        return await fts.search(self._conn, query=query, limit=limit, source=source)
+        with tracer.start_as_current_span("memory.search") as span:
+            span.set_attribute("memory.query_length", len(query))
+            span.set_attribute("memory.source_filter", source or "any")
+            results = await fts.search(self._conn, query=query, limit=limit, source=source)
+            # Retrieved context identifiers, per ARCHITECTURE.md § Observability —
+            # logs which notes/turns backed an answer, never their content.
+            span.set_attribute(
+                "memory.retrieved_ids", [f"{r['source']}:{r['source_id']}" for r in results]
+            )
+            span.set_attribute("memory.result_count", len(results))
+            return results
