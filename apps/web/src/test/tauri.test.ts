@@ -37,8 +37,15 @@ describe('Tauri 2 Configuration & Service Compatibility', () => {
     // Capabilities
     expect(defaultCap.windows).toContain('main');
     expect(defaultCap.permissions).toContain('core:default');
+    expect(defaultCap.permissions).toContain('core:window:default');
+    expect(defaultCap.permissions).toContain('core:window:allow-set-size');
+    expect(defaultCap.permissions).toContain('core:window:allow-set-always-on-top');
     expect(defaultCap.permissions).toContain('notification:default');
     expect(defaultCap.permissions).toContain('global-shortcut:default');
+
+    // Security & CSP
+    expect(tauriConfig.app.security.csp).toContain("connect-src 'self' http://127.0.0.1:8000 http://localhost:8000 ws://127.0.0.1:8000 ws://localhost:8000");
+    expect(tauriConfig.app.security.csp).not.toContain("unsafe-eval");
   });
 
   it('detects platform correctly when outside Tauri runtime', () => {

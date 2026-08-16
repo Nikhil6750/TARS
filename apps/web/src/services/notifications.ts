@@ -42,8 +42,12 @@ export async function requestNotificationPermission(): Promise<boolean> {
 export async function sendNotification(options: TARSNotificationOptions): Promise<void> {
   if (isTauri()) {
     try {
-      const { sendNotification: tauriSend, isPermissionGranted } = await import('@tauri-apps/plugin-notification');
-      const granted = await isPermissionGranted();
+      const { sendNotification: tauriSend, isPermissionGranted, requestPermission } = await import('@tauri-apps/plugin-notification');
+      let granted = await isPermissionGranted();
+      if (!granted) {
+        const permission = await requestPermission();
+        granted = permission === 'granted';
+      }
       if (granted) {
         tauriSend({
           title: options.title,

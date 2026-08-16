@@ -40,17 +40,22 @@ export async function toggleCompactWindow(isCompact: boolean): Promise<void> {
   }
 
   try {
-    const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
-    const appWindow = getCurrentWindow();
-    if (isCompact) {
-      await appWindow.setSize(new LogicalSize(420, 720));
-      await appWindow.setAlwaysOnTop(true);
-    } else {
-      await appWindow.setSize(new LogicalSize(1280, 840));
-      await appWindow.setAlwaysOnTop(false);
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('toggle_compact_mode', { isCompact });
+  } catch (cmdErr) {
+    try {
+      const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
+      const appWindow = getCurrentWindow();
+      if (isCompact) {
+        await appWindow.setAlwaysOnTop(true);
+        await appWindow.setSize(new LogicalSize(420, 720));
+      } else {
+        await appWindow.setAlwaysOnTop(false);
+        await appWindow.setSize(new LogicalSize(1280, 840));
+      }
+    } catch (err) {
+      console.warn('Failed to resize window in Tauri:', err);
     }
-  } catch (err) {
-    console.warn('Failed to resize window in Tauri:', err);
   }
 }
 
@@ -98,13 +103,20 @@ export async function registerGlobalShortcut(
 
   try {
     const { register, isRegistered } = await import('@tauri-apps/plugin-global-shortcut');
-    const alreadyRegistered = await isRegistered(shortcut);
-    if (!alreadyRegistered) {
-      await register(shortcut, (event) => {
-        if (event.state === 'Pressed') {
-          handler();
+    const shortcuts = Array.from(new Set([shortcut, 'CommandOrControl+Shift+T', 'Ctrl+Shift+T', 'CmdOrControl+Shift+T']));
+    for (const sc of shortcuts) {
+      try {
+        const alreadyRegistered = await isRegistered(sc);
+        if (!alreadyRegistered) {
+          await register(sc, (event) => {
+            if (!event.state || event.state === 'Pressed') {
+              handler();
+            }
+          });
         }
-      });
+      } catch (innerErr) {
+        console.warn(`[Tauri Shortcut] Could not register variant ${sc}:`, innerErr);
+      }
     }
     return true;
   } catch (err) {
@@ -117,7 +129,14 @@ export async function unregisterGlobalShortcut(shortcut: string): Promise<void> 
   if (!isTauri()) return;
   try {
     const { unregister } = await import('@tauri-apps/plugin-global-shortcut');
-    await unregister(shortcut);
+    const shortcuts = Array.from(new Set([shortcut, 'CommandOrControl+Shift+T', 'Ctrl+Shift+T', 'CmdOrControl+Shift+T']));
+    for (const sc of shortcuts) {
+      try {
+        await unregister(sc);
+      } catch {
+        // Ignore unregister errors on cleanup
+      }
+    }
   } catch (err) {
     console.warn(`Failed to unregister global shortcut ${shortcut}:`, err);
   }
