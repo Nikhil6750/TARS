@@ -1,83 +1,115 @@
 # Handoff — Codex
 
-Owned directories: `tests/`, `tools/` (contract and acceptance
-verification, integration/quality harness). Only Codex edits this file. See
-[AGENTS.md](../../../AGENTS.md) for the full handoff protocol.
-
-Update this file at the end of every session, using the template below.
-Keep only the latest handoff at the top; older entries may be kept below a
-`---` separator for history, but are not required reading for the next
-session (`CURRENT_STATE.md` is authoritative for that).
+Owned directories: `tests/`, `tools/` (contract and acceptance verification,
+integration/quality harness). Only Codex edits this file. See
+[`AGENTS.md`](../../../AGENTS.md) for the full handoff protocol.
 
 ---
 
 ## Latest handoff
 
-**Branch**: `feature/v1-quality-contracts`
-**Commit SHA**: `7f4dc79de210ec2c8babe54d677c2ecc1c1dd3b3` (last implementation commit before this handoff)
+**Branch**: `fix/v1-certification-coverage`
+
+**Commit SHA**: `3ec3c845a519c91cc4d27ea1e64234d7703129a8` (last implementation commit
+before this handoff)
+
 **Work completed**:
 
-- Added exact-pinned, reproducible JSON Schema generation for strict Pydantic v2
-  models and TypeScript declarations, plus byte-level drift verification.
-- Added six valid trading lifecycle fixtures and seven focused malformed
-  fixtures covering every requested contract failure.
-- Added a standalone public HTTP/WebSocket client with event, state, history,
-  invalidation, assistant, and grounding actions. It imports no app internals.
-- Added a process-owning acceptance runner with bounded readiness polling,
-  isolated SQLite state, zero paid keys, invalid-vault startup, complete process
-  tree cleanup, and secret-sentinel log scanning.
-- Added 15 black-box acceptance/security checks, including two WebSocket clients,
-  reconnect, iPhone/desktop Chromium viewports, local voice-provider status, and
-  absence of execution endpoints.
-- Recorded BLOCKER/WARNING/PASS evidence in `tests/INDEPENDENT_REVIEW.md`.
+- Expanded the suite from 55 to 77 collected tests and from 15 to 24 external
+  acceptance cases.
+- Added immutable lifecycle-history verification for DEVELOPING → VALID →
+  INVALIDATED, including distinct IDs, retained valid history, separate
+  invalidation history, and active-state removal.
+- Added a browser test that imports the actual TypeScript WebSocket client and
+  runs it against the actual backend for active snapshots, all lifecycle states,
+  heartbeat pong, and reconnect.
+- Added deterministic backend and browser voice-plumbing checks covering audio
+  bytes → STT → arbitrary returned transcript → assistant → backend TTS → audio
+  playback, with an explicit prohibition on `speechSynthesis` substitution.
+- Added Content-Length, HTTP/1.0 no-length, and true chunked streaming payload
+  regressions. Failed streaming cases cannot persist and contaminate later tests.
+- Added Obsidian/FTS source provenance checks at the public API and actual
+  assistant-grounding boundary, plus absent-statistics anti-fabrication checks.
+- Added real-mode source and visible-UI scans for fabricated Sharpe, DSR,
+  expectancy, win-rate, drawdown, profitability, and strategy-performance claims.
+- Added deterministic npm/Cargo/Tauri config/build-metadata validation and
+  optional native `cargo check`/Tauri build execution when Rust tooling exists.
+- Added `tools/run_certification.py`, which always invokes codegen drift,
+  backend pytest/Ruff/MyPy, frontend install/tests/typecheck/lint/build, Tauri,
+  and process-owning external acceptance. Nonzero gate results remain fatal.
+- Hardened the process-owning runner against stale services and moved default
+  certification ports to isolated 8765/5179.
 
-**Files changed**: `tests/` (contracts, fixtures, unit, acceptance, review,
-dependency lock) and `tools/` (code generation, generated models/types,
-standalone client, acceptance runner, security checks); this handoff file only
-under shared coordination docs. Canonical schemas and product source were not
-modified.
+**Files changed**:
+
+- `tests/acceptance/`: lifecycle, WebSocket, voice, payload, memory, metrics,
+  viewport, and security coverage.
+- `tests/integration/`: actual backend voice pipeline and memory-grounding chain.
+- `tests/certification/`: fabricated-metric and Tauri checks.
+- `tests/unit/`: client, runner, scanner, and gate-behavior tests.
+- `tools/`: external client extensions, scanners, acceptance/certification
+  runners, Tauri checks, README, and Ruff-only import cleanup.
+- This handoff file only under shared coordination docs. No product source or
+  canonical contract was modified.
 
 **Interfaces exposed**:
 
-- `python tools/generate_contracts.py [--check]`
-- `python tools/tars_test_client.py {health,send-event,active,history,listen,invalidate,ask,verify-grounded}`
-- `python tools/run_acceptance.py --backend-command ... --frontend-command ...`
-- Route overrides: `TARS_HEALTH_PATH`, `TARS_EVENTS_PATH`, `TARS_ACTIVE_PATH`,
-  `TARS_HISTORY_PATH`, `TARS_INVALIDATE_PATH`, `TARS_ASSISTANT_PATH`,
-  `TARS_WEBSOCKET_PATH`, `TARS_VOICE_STATUS_PATH`.
+- `python tools/run_certification.py`
+- `python tools/tauri_checks.py --cargo-check`
+- `python tools/run_acceptance.py ...` now rejects pre-existing endpoints.
+- `TarsTestClient.history_for_symbol(...)`
+- `TarsTestClient.search_memory(...)`
+- Route override: `TARS_MEMORY_SEARCH_PATH`.
 
 **Tests run**:
 
-- `python tools/generate_contracts.py --check` — PASS.
-- `python -m pytest tests -q` — 40 passed, 15 skipped; skips require live apps.
-- `python -m pip check` — PASS, no broken requirements.
-- `npm audit --prefix tools/codegen --audit-level=high` — PASS, zero vulnerabilities.
-- Playwright Chromium smoke render at 390x844 — PASS.
-- `python -m pytest tests/acceptance --collect-only -q` with acceptance enabled —
-  15 tests collected.
+- `python -m pytest tests --collect-only -q` — 77 collected.
+- `python -m pytest tests/unit -q` — 17 passed.
+- `python -m ruff check tests tools` — passed.
+- Isolated external acceptance on ports 8767/5181 — 19 passed, 5 failed on
+  the intended unmodified product blockers.
+- Backend pytest — 63 passed.
+- Backend MyPy — passed across 55 source files.
+- Frontend Vitest — 12 passed.
+- Frontend TypeScript — passed.
+- Frontend production build — passed.
+- Full certification entry point — correctly nonzero; every mandatory gate ran.
 
-**Known limitations**:
+**Known limitations / current certification blockers**:
 
-- Live backend/frontend acceptance is BLOCKED until both feature branches are
-  integrated; no product PASS is claimed yet.
-- Shared contracts do not define route paths/envelopes or lifecycle semantic
-  relationships; see the warnings in `tests/INDEPENDENT_REVIEW.md`.
-- CI target remains coordinator-PROPOSED, so no workflow file was added.
+- Lifecycle invalidation reuses the valid `event_id`, overwriting valid history.
+- Backend broadcasts `{type, event}` while the real frontend unwraps
+  `{type, payload}`; snapshot works but live lifecycle events do not.
+- Frontend PTT does not send recorded bytes to STT, hard-codes
+  `Show active setups`, and substitutes browser speech synthesis for backend TTS.
+- Chunked payloads bypass the 1 MiB middleware and reach schema handling (422
+  rather than 413). Content-Length and no-length safety cases pass.
+- Public FTS retrieval preserves `source_id`, but assistant grounding drops it.
+- Real-mode Memory UI exposes sample `DSR > 1.8` and `Sharpe 2.12` claims.
+- Tauri Rust/npm minor versions mismatch; `Cargo.lock`, `build.rs`, and the
+  configured tray icon are missing. Rust/Cargo are not installed locally, so the
+  native build was correctly skipped after deterministic checks failed.
+- Ruff fails only in unmodified `apps/backend/run.py` (E402). Codex-owned paths
+  are Ruff-clean.
+- Frontend has no `lint` script, so the mandatory lint gate fails.
+- Generated contract artifacts drift in Python `__init__.py` and both generated
+  TypeScript declarations.
 
 **Exact dependencies required from other agents**:
 
-- Claude Code: expose health, event submit/active/history/invalidate, assistant,
-  WebSocket, voice-status, and OpenAPI surfaces; provide route override values if
-  defaults differ. Invalidation must broadcast a schema-valid
-  `SETUP_INVALIDATED` event correlated by `event_id`; reject >1 MiB requests and
-  avoid secret reflection/logging.
-- Antigravity: provide the frontend launch command/URL; the shared UI must render
-  without console/page errors or horizontal overflow at 390x844 and 1440x900.
-- Coordinator: integrate both branches, choose concrete route mappings and a CI
-  target, then authorize/run the full harness.
+- Claude Code/backend: make invalidation append a new event ID; enforce the body
+  limit while streaming; retain memory `source_id` in grounding; fix Ruff E402 in
+  `apps/backend/run.py`; coordinate the canonical live WebSocket envelope with
+  frontend without changing frozen contracts.
+- Antigravity/frontend: consume the backend live-event envelope; implement actual
+  recorded-audio STT/assistant/backend-TTS playback; remove real-mode sample
+  metrics; add and satisfy lint; align Tauri npm/Cargo versions and add required
+  Rust/Tauri build metadata/assets.
+- Coordinator: decide whether regenerated artifacts should be committed after
+  confirming the pinned codegen output; install Rust/MSVC to execute the native
+  Tauri build after manifest blockers are fixed.
 
-**Next recommended action**: Merge the three Wave 1 branches into an integration
-branch, install the pinned test requirements plus Playwright Chromium, map any
-non-default routes through environment variables, and run
-`tools/run_acceptance.py` with both launch commands. Treat any failed case as an
-integration blocker rather than weakening the check.
+**Next recommended action**: Product owners fix the enumerated backend/frontend
+blockers on their own branches, then rerun `python tools/run_certification.py`.
+Do not weaken the five failing external regressions or the mandatory quality
+gates.
