@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str | None = None
     anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-opus-5"
     claude_code_command: str = "claude"
     claude_code_timeout_seconds: float = 60.0
 

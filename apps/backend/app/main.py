@@ -9,8 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
-from app.routers import events, health, ws
+from app.routers import assistant, events, health, ws
 from app.ws_manager import ConnectionManager
+from assistant.factory import build_assistant_provider
+from assistant.providers.mock import MockAssistantProvider
 from events.generator import MockEventGenerator
 
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +32,16 @@ async def lifespan(app: FastAPI):
 
     event_bus = EventBus(db, ws_manager)
     app.state.event_bus = event_bus
+
+    try:
+        app.state.assistant_provider = build_assistant_provider(settings)
+        logger.info("assistant provider: %s", settings.assistant_provider)
+    except Exception:
+        logger.exception(
+            "failed to construct assistant provider '%s' — falling back to mock",
+            settings.assistant_provider,
+        )
+        app.state.assistant_provider = MockAssistantProvider()
 
     generator: MockEventGenerator | None = None
     if settings.use_mock_trading_events:
@@ -61,6 +73,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(events.router)
+    app.include_router(assistant.router)
     app.include_router(ws.router)
 
     return app

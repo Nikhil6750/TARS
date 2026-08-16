@@ -13,8 +13,10 @@ from app.ws_manager import ConnectionManager
 from events.service import EventService
 
 if TYPE_CHECKING:
-    from assistant.router import AssistantRouter
     from memory.service import MemoryService
+
+    from assistant.provider import AssistantProvider
+    from assistant.router import AssistantRouter
 
 
 def get_db(request: Request) -> Database:
@@ -37,8 +39,20 @@ def get_settings_dep() -> Settings:
     return get_settings()
 
 
+def get_assistant_provider(request: Request) -> AssistantProvider:
+    return request.app.state.assistant_provider
+
+
 def get_assistant_router(request: Request) -> AssistantRouter:
-    return request.app.state.assistant_router
+    from assistant.conversation_store import ConversationStore
+    from assistant.router import AssistantRouter
+
+    db: Database = request.app.state.db
+    return AssistantRouter(
+        event_service=EventService(db.conn),
+        conversation_store=ConversationStore(db.conn),
+        provider=request.app.state.assistant_provider,
+    )
 
 
 def get_memory_service(request: Request) -> MemoryService:

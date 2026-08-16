@@ -1,0 +1,7 @@
+# Optional, paid-provider dependencies — never required for the core
+# free/local-first TARS runtime (see AGENTS.md § Non-negotiable
+# architectural boundaries). Install only if you configure the
+# corresponding provider.
+
+# ANTHROPIC_API_KEY + ASSISTANT_PROVIDER=anthropic_api
+anthropic==0.69.0

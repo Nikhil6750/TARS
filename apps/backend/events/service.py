@@ -134,6 +134,22 @@ class EventService:
         rows = await cursor.fetchall()
         return [_row_to_event_dict(row) for row in rows]
 
+    async def get_recent_warnings(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Most recent RISK_WARNING/SYSTEM_WARNING events — informational
+        broadcasts that never touch active_setups (see INFORMATIONAL_STATES
+        above), so they need their own query rather than a JOIN."""
+        limit = max(1, min(limit, 100))
+        cursor = await self._conn.execute(
+            """
+            SELECT * FROM trading_events
+            WHERE state IN ('RISK_WARNING', 'SYSTEM_WARNING')
+            ORDER BY received_at DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        return [_row_to_event_dict(row) for row in rows]
+
     async def get_active_setups(self) -> list[dict[str, Any]]:
         """Returns current active setups, lazily invalidating any that have
         passed their event's `expires_at` without a new event arriving."""
