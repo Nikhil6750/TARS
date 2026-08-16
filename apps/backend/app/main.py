@@ -4,9 +4,10 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.body_limit import MaxBodySizeMiddleware
 from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
@@ -117,13 +118,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    @app.middleware("http")
-    async def limit_upload_size(request: Request, call_next):
-        content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > MAX_BODY_BYTES:
-            return Response(content="Payload Too Large", status_code=413)
-        return await call_next(request)
+    # Outermost middleware (added last): enforces MAX_BODY_BYTES by
+    # counting bytes as they stream in, so it catches chunked-transfer
+    # bodies (no Content-Length) as well as declared-length ones. See
+    # app/body_limit.py.
+    app.add_middleware(MaxBodySizeMiddleware, max_bytes=MAX_BODY_BYTES)
 
     app.include_router(health.router)
     app.include_router(events.router)
