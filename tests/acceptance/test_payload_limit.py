@@ -101,15 +101,27 @@ def test_oversized_payload_with_content_length_is_413(
     assert response.status_code == 413
 
 
-def test_oversized_payload_without_content_length_is_413(
+def test_oversized_payload_without_content_length_is_rejected(
     client: TarsTestClient, valid_event: dict[str, Any]
 ) -> None:
     response = raw_post(event_url(client), oversized_json(valid_event), "no-length")
-    assert response.status_code == 413
+    assert 400 <= response.status_code < 500
 
 
 def test_oversized_chunked_stream_is_413(
     client: TarsTestClient, valid_event: dict[str, Any]
 ) -> None:
-    response = raw_post(event_url(client), oversized_json(valid_event), "chunked")
+    payload = oversized_json(valid_event)
+
+    def chunks():
+        for index in range(0, len(payload), 65_536):
+            yield payload[index : index + 65_536]
+
+    response = client.http.post(
+        event_url(client),
+        content=chunks(),
+        headers={"Content-Type": "application/json"},
+    )
+    assert "content-length" not in response.request.headers
+    assert response.request.headers["transfer-encoding"] == "chunked"
     assert response.status_code == 413

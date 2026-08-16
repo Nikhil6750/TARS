@@ -14,6 +14,19 @@ FABRICATED_VISIBLE_METRIC = re.compile(
 )
 
 
+def configure_real_backend(context) -> None:
+    base_url = os.environ["TARS_BASE_URL"].rstrip("/")
+    websocket_url = base_url.replace("http://", "ws://", 1).replace(
+        "https://", "wss://", 1
+    ) + "/ws"
+    context.add_init_script(
+        """settings => localStorage.setItem(
+            'tars_settings_v1', JSON.stringify(settings)
+        )""",
+        {"apiEndpoint": base_url, "serverEndpoint": websocket_url},
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "viewport"),
     (
@@ -29,7 +42,9 @@ def test_ui_is_renderable_at_target_viewport(
     page_errors: list[str] = []
     with playwright.sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
-        page = browser.new_page(viewport=viewport)
+        context = browser.new_context(viewport=viewport)
+        configure_real_backend(context)
+        page = context.new_page()
         page.on(
             "console",
             lambda message: console_errors.append(message.text)
@@ -50,6 +65,7 @@ def test_ui_is_renderable_at_target_viewport(
         assert not overflow, f"{name} UI has horizontal viewport overflow"
         assert not page_errors
         assert not console_errors
+        context.close()
         browser.close()
 
 
@@ -57,7 +73,9 @@ def test_real_backend_mode_does_not_present_sample_performance_metrics() -> None
     playwright = pytest.importorskip("playwright.sync_api")
     with playwright.sync_playwright() as runtime:
         browser = runtime.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        configure_real_backend(context)
+        page = context.new_page()
         page.goto(
             os.environ["TARS_FRONTEND_URL"],
             wait_until="domcontentloaded",
@@ -67,4 +85,5 @@ def test_real_backend_mode_does_not_present_sample_performance_metrics() -> None
         visible = page.locator("body").inner_text()
         match = FABRICATED_VISIBLE_METRIC.search(visible)
         assert match is None, f"real mode displayed a sample metric: {match.group(0)!r}"
+        context.close()
         browser.close()
