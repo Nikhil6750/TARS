@@ -78,10 +78,6 @@ export const CompanionHero: React.FC<CompanionHeroProps> = ({
               <Terminal className="w-3.5 h-3.5 text-cyan-400" />
               <span>TARS COMPANION INTERFACE</span>
             </div>
-            <div className="flex items-center gap-3">
-              <span>CUE: <span className="text-cyan-400 font-semibold">100%</span></span>
-              <span>HONESTY: <span className="text-cyan-400 font-semibold">95%</span></span>
-            </div>
           </div>
 
           {/* Interactive Character Face */}

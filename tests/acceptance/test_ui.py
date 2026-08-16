@@ -2,17 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 
 import pytest
 
+from tools.security_checks import FABRICATED_METRIC_PATTERN
+
 pytestmark = pytest.mark.acceptance
 
-FABRICATED_VISIBLE_METRIC = re.compile(
-    r"(?:sharpe|\bdsr\b|expectancy|win\s+rate|drawdown|profitability|"
-    r"strategy\s+performance).{0,120}?(?:[<>]=?\s*)?-?\d+(?:\.\d+)?%?",
-    re.IGNORECASE | re.DOTALL,
-)
+FABRICATED_VISIBLE_METRIC = FABRICATED_METRIC_PATTERN
 
 
 def configure_real_backend(context) -> None:
@@ -82,6 +79,16 @@ def test_real_backend_mode_does_not_present_sample_performance_metrics() -> None
             wait_until="domcontentloaded",
             timeout=10_000,
         )
+
+        # Default landing tab (Companion) must be scanned too - this is where
+        # fabricated CUE/HONESTY badges previously shipped undetected because
+        # this check only ever inspected the Memory & Research tab.
+        default_tab_visible = page.locator("body").inner_text()
+        default_match = FABRICATED_VISIBLE_METRIC.search(default_tab_visible)
+        assert default_match is None, (
+            f"real mode displayed a sample metric on default tab: {default_match.group(0)!r}"
+        )
+
         page.get_by_role("button", name="Memory & Research").click()
         visible = page.locator("body").inner_text()
         match = FABRICATED_VISIBLE_METRIC.search(visible)

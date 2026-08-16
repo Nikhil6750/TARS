@@ -15,8 +15,14 @@ FORBIDDEN_EXECUTION_TERMS = (
 )
 MUTATING_METHODS = {"post", "put", "patch", "delete"}
 FABRICATED_METRIC_PATTERN = re.compile(
+    r"(?:"
     r"(?:sharpe|\bdsr\b|expectancy|win\s+rate|drawdown|profitability|"
-    r"strategy\s+performance).{0,120}?(?:[<>]=?\s*)?-?\d+(?:\.\d+)?%?",
+    r"strategy\s+performance).{0,120}?(?:[<>]=?\s*)?-?\d+(?:\.\d+)?%?"
+    r"|"
+    r"\b(?:honesty|cue|confidence(?:\s*score)?|win\s+probability|probability|"
+    r"validation\s+score|quality\s+score)\b\s*:\s*(?:<[^>]{0,160}>\s*)*"
+    r"-?\d+(?:\.\d+)?%?"
+    r")",
     re.IGNORECASE | re.DOTALL,
 )
 REAL_MODE_SOURCE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx"}
