@@ -161,6 +161,61 @@ def test_invalidate_unknown_event_id_returns_404(client):
     assert resp.status_code == 404
 
 
+def test_duplicate_event_id_rejected_with_409(client):
+    """POST /api/v1/events accepts a caller-supplied event_id (it's a
+    required field per contracts/trading-event.schema.json). Resubmitting
+    an id that already exists in trading_events must be rejected outright,
+    never silently overwritten."""
+    payload = {
+        "schema_version": "1.0.0",
+        "event_id": "11111111-1111-1111-1111-111111111111",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "source": "manual",
+        "symbol": "EURUSD",
+        "state": "SETUP_VALID",
+        "validation_status": "VALID",
+        "reason_codes": [],
+        "warnings": [],
+    }
+    first = client.post("/api/v1/events", json=payload)
+    assert first.status_code == 201
+
+    duplicate = dict(payload, symbol="GBPUSD", state="IDLE", validation_status="EXPIRED")
+    second = client.post("/api/v1/events", json=duplicate)
+    assert second.status_code == 409
+    assert payload["event_id"] in second.json()["detail"]
+
+
+def test_duplicate_event_id_leaves_original_history_row_unchanged(client):
+    payload = {
+        "schema_version": "1.0.0",
+        "event_id": "22222222-2222-2222-2222-222222222222",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "source": "manual",
+        "symbol": "EURUSD",
+        "state": "SETUP_VALID",
+        "validation_status": "VALID",
+        "reason_codes": [],
+        "warnings": [],
+    }
+    client.post("/api/v1/events", json=payload)
+
+    duplicate = dict(payload, symbol="GBPUSD", state="IDLE", validation_status="EXPIRED")
+    resp = client.post("/api/v1/events", json=duplicate)
+    assert resp.status_code == 409
+
+    history = client.get("/api/v1/events").json()
+    assert len(history) == 1
+    assert history[0]["symbol"] == "EURUSD"
+    assert history[0]["state"] == "SETUP_VALID"
+    assert history[0]["validation_status"] == "VALID"
+
+    # No partial/corrupted active-state write from the rejected duplicate.
+    active = client.get("/api/v1/events/active").json()
+    assert len(active) == 1
+    assert active[0]["symbol"] == "EURUSD"
+
+
 def test_rejects_ai_confidence_field(client):
     resp = client.post(
         "/api/v1/dev/mock-event",
