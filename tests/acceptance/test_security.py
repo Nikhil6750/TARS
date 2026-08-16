@@ -7,9 +7,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tools.tars_test_client import TarsTestClient
 from tools.security_checks import find_live_execution_operations
-
+from tools.tars_test_client import TarsTestClient
 
 pytestmark = pytest.mark.acceptance
 

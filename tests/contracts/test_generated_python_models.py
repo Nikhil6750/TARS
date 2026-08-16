@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from tools.generated.python.trading_event import TARSTradingEvent
 
-
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures"
 

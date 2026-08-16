@@ -26,6 +26,7 @@ class Gate:
 def default_gates(args: argparse.Namespace) -> list[Gate]:
     python = sys.executable
     gates = [
+        Gate("codegen npm install", ("npm", "ci"), ROOT / "tools" / "codegen"),
         Gate(
             "contracts and certification tests",
             (
@@ -123,23 +124,23 @@ def parse_args() -> argparse.Namespace:
         "--backend-command",
         default=os.getenv(
             "TARS_BACKEND_COMMAND",
-            "python -m uvicorn app.main:app --host 127.0.0.1 --port 8000",
+            "python -m uvicorn app.main:app --host 127.0.0.1 --port 8765",
         ),
     )
     parser.add_argument(
         "--frontend-command",
         default=os.getenv(
-            "TARS_FRONTEND_COMMAND", "npm run dev -- --host 127.0.0.1 --port 5173"
+            "TARS_FRONTEND_COMMAND", "npm run dev -- --host 127.0.0.1 --port 5179"
         ),
     )
     parser.add_argument("--backend-cwd", type=Path, default=BACKEND)
     parser.add_argument("--frontend-cwd", type=Path, default=WEB)
     parser.add_argument(
-        "--base-url", default=os.getenv("TARS_BASE_URL", "http://127.0.0.1:8000")
+        "--base-url", default=os.getenv("TARS_BASE_URL", "http://127.0.0.1:8765")
     )
     parser.add_argument(
         "--frontend-url",
-        default=os.getenv("TARS_FRONTEND_URL", "http://127.0.0.1:5173"),
+        default=os.getenv("TARS_FRONTEND_URL", "http://127.0.0.1:5179"),
     )
     parser.add_argument("--startup-timeout", type=float, default=30.0)
     return parser.parse_args()

@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 
-
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests" / "fixtures"
 SCHEMA_PATH = ROOT / "contracts" / "trading-event.schema.json"

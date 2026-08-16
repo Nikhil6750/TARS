@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from tools.run_acceptance import PAID_KEY_NAMES, scan_logs, scrubbed_environment
+from tools.run_acceptance import (
+    PAID_KEY_NAMES,
+    assert_endpoint_unused,
+    scan_logs,
+    scrubbed_environment,
+)
 
 
 def test_acceptance_environment_removes_paid_keys_and_builds_provenance_vault(
@@ -33,3 +38,12 @@ def test_log_scanner_detects_secret_sentinel(tmp_path: Path) -> None:
     scan_logs([clean], "secret-value")
     with pytest.raises(RuntimeError, match="leaked"):
         scan_logs([clean, leaked], "secret-value")
+
+
+def test_process_owning_run_rejects_preexisting_service(monkeypatch) -> None:
+    class ExistingResponse:
+        status_code = 200
+
+    monkeypatch.setattr("tools.run_acceptance.httpx.get", lambda *args, **kwargs: ExistingResponse())
+    with pytest.raises(RuntimeError, match="existing service"):
+        assert_endpoint_unused("http://127.0.0.1:8000/health")

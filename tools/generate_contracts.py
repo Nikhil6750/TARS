@@ -10,7 +10,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_DIR = ROOT / "contracts"
 COMMITTED_DIR = ROOT / "tools" / "generated"

@@ -114,6 +114,19 @@ def wait_for_http(
     raise TimeoutError(f"Timed out waiting for {url}: {last_error}")
 
 
+def assert_endpoint_unused(url: str) -> None:
+    """Refuse a process-owning run when a stale service already owns the URL."""
+
+    try:
+        response = httpx.get(url, timeout=0.5)
+    except httpx.HTTPError:
+        return
+    raise RuntimeError(
+        f"Refusing to launch over an existing service at {url} "
+        f"(HTTP {response.status_code})"
+    )
+
+
 def scrubbed_environment(temp_dir: Path, sentinel: str) -> dict[str, str]:
     environment = os.environ.copy()
     for name in PAID_KEY_NAMES:
@@ -207,6 +220,11 @@ def main() -> None:
         log_paths = [temp_dir / "backend.log", temp_dir / "frontend.log"]
         try:
             if not args.use_running_services:
+                health_path = os.getenv("TARS_HEALTH_PATH", "/health")
+                assert_endpoint_unused(
+                    args.base_url.rstrip("/") + "/" + health_path.lstrip("/")
+                )
+                assert_endpoint_unused(args.frontend_url)
                 backend = ManagedProcess(
                     "backend",
                     args.backend_command,
@@ -216,7 +234,6 @@ def main() -> None:
                 )
                 backend.start()
                 processes.append(backend)
-                health_path = os.getenv("TARS_HEALTH_PATH", "/health")
                 wait_for_http(
                     args.base_url.rstrip("/") + "/" + health_path.lstrip("/"),
                     backend,
