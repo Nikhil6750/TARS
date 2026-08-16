@@ -149,6 +149,17 @@ export class TARSWebSocketClient {
       return;
     }
 
+    // Active snapshot handling from backend on connection
+    if (msg.type === 'active_snapshot' && Array.isArray(msg.events)) {
+      msg.events.forEach((evt: unknown) => {
+        const validation = validateTradingEvent(evt);
+        if (validation.success) {
+          this.tradingEventListeners.forEach((listener) => listener(validation.data));
+        }
+      });
+      return;
+    }
+
     // Direct trading event or wrapped trading event
     const eventCandidate = msg.type === 'trading_event' && msg.payload ? msg.payload : msg;
 
@@ -232,9 +243,9 @@ export class TARSWebSocketClient {
   }
 
   private notifyConnectionChange(errorMsg?: string): void {
-    this.connectionChangeListeners.forEach((listener) =>
-      listener(this.status, this.currentLatencyMs, errorMsg)
-    );
+    this.connectionChangeListeners.forEach((listener) => {
+      listener(this.status, this.currentLatencyMs, errorMsg);
+    });
   }
 
   private notifyProtocolError(title: string, errors: string[]): void {
@@ -242,29 +253,29 @@ export class TARSWebSocketClient {
     this.protocolErrorListeners.forEach((listener) => listener(title, errors));
   }
 
-  // Listener registration
-  public onTradingEvent(cb: TradingEventListener): () => void {
-    this.tradingEventListeners.add(cb);
-    return () => this.tradingEventListeners.delete(cb);
+  // Subscription methods
+  public onTradingEvent(listener: TradingEventListener): () => void {
+    this.tradingEventListeners.add(listener);
+    return () => this.tradingEventListeners.delete(listener);
   }
 
-  public onAssistantMessage(cb: AssistantMessageListener): () => void {
-    this.assistantMessageListeners.add(cb);
-    return () => this.assistantMessageListeners.delete(cb);
+  public onAssistantMessage(listener: AssistantMessageListener): () => void {
+    this.assistantMessageListeners.add(listener);
+    return () => this.assistantMessageListeners.delete(listener);
   }
 
-  public onCompanionState(cb: CompanionStateListener): () => void {
-    this.companionStateListeners.add(cb);
-    return () => this.companionStateListeners.delete(cb);
+  public onCompanionState(listener: CompanionStateListener): () => void {
+    this.companionStateListeners.add(listener);
+    return () => this.companionStateListeners.delete(listener);
   }
 
-  public onConnectionChange(cb: ConnectionChangeListener): () => void {
-    this.connectionChangeListeners.add(cb);
-    return () => this.connectionChangeListeners.delete(cb);
+  public onConnectionChange(listener: ConnectionChangeListener): () => void {
+    this.connectionChangeListeners.add(listener);
+    return () => this.connectionChangeListeners.delete(listener);
   }
 
-  public onProtocolError(cb: ProtocolErrorListener): () => void {
-    this.protocolErrorListeners.add(cb);
-    return () => this.protocolErrorListeners.delete(cb);
+  public onProtocolError(listener: ProtocolErrorListener): () => void {
+    this.protocolErrorListeners.add(listener);
+    return () => this.protocolErrorListeners.delete(listener);
   }
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,17 @@ class ManagedProcess:
         arguments = shlex.split(self.command, posix=os.name != "nt")
         if not arguments:
             raise ValueError(f"{self.name} command is empty")
+        cmd_path = shutil.which(arguments[0])
+        if cmd_path is None and os.name == "nt":
+            for ext in (".cmd", ".bat", ".exe", ".ps1"):
+                found = shutil.which(arguments[0] + ext)
+                if found:
+                    cmd_path = found
+                    break
+        if cmd_path:
+            arguments[0] = cmd_path
+        if os.name == "nt" and str(arguments[0]).lower().endswith((".cmd", ".bat")):
+            arguments = [os.environ.get("COMSPEC", "cmd.exe"), "/c", *arguments]
         self._log_handle = self.log_path.open("wb")
         self.process = subprocess.Popen(
             arguments,
@@ -80,7 +92,11 @@ class ManagedProcess:
                 self.process.kill()
             self.process.wait(timeout=3.0)
         if self._log_handle is not None:
-            self._log_handle.close()
+            try:
+                self._log_handle.close()
+            except Exception:
+                pass
+            self._log_handle = None
 
 
 def wait_for_http(

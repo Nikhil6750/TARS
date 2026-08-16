@@ -1,4 +1,4 @@
-"""Loads the frozen, shared JSON Schemas from `contracts/` and validates
+﻿"""Loads the frozen, shared JSON Schemas from `contracts/` and validates
 against them directly — the canonical source of truth per AGENTS.md (backend
 must never fork its own copy of a schema `contracts/` already owns).
 """
@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import Any
 
 import jsonschema
+from jsonschema import FormatChecker
 
 from app.config import REPO_ROOT
 
@@ -35,13 +36,17 @@ class ContractValidationError(ValueError):
 
 def validate_trading_event(payload: dict[str, Any]) -> None:
     try:
-        jsonschema.validate(payload, trading_event_schema())
+        jsonschema.validate(
+            payload, trading_event_schema(), format_checker=FormatChecker()
+        )
     except jsonschema.ValidationError as exc:
         raise ContractValidationError(str(exc.message)) from exc
 
 
 def validate_assistant_message(payload: dict[str, Any]) -> None:
     try:
-        jsonschema.validate(payload, assistant_message_schema())
+        jsonschema.validate(
+            payload, assistant_message_schema(), format_checker=FormatChecker()
+        )
     except jsonschema.ValidationError as exc:
         raise ContractValidationError(str(exc.message)) from exc

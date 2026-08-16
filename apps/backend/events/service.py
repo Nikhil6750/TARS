@@ -1,24 +1,4 @@
-"""Event persistence + deterministic active-state calculation.
-
-"Active state" answers: for a given symbol, is there a setup a client
-should currently show as live? The rule is intentionally simple and fully
-deterministic — no model call, no heuristic scoring, per ARCHITECTURE.md's
-"trading facts always come from deterministic state, never model
-invention":
-
-- `state in {SETUP_DEVELOPING, SETUP_VALID}` and
-  `validation_status in {PENDING, VALID}` => symbol's active setup is this
-  event (upsert, replacing whatever was previously active for that symbol).
-- `state in {IDLE, SETUP_INVALIDATED}` or `validation_status in
-  {INVALID, EXPIRED}` => symbol's active setup is cleared (invalidated).
-- `RISK_WARNING` / `SYSTEM_WARNING` are informational broadcasts; they are
-  persisted and broadcast but never replace or clear a symbol's active
-  setup by themselves (a system warning about connectivity, say, is not a
-  statement about whether XAUUSD's setup is still valid).
-- An active setup past its own `expires_at` is treated as invalidated the
-  next time it is read, even with no new event (see `get_active_setups`).
-"""
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from dataclasses import dataclass
@@ -51,7 +31,7 @@ class EventService:
     async def _persist(self, event: TradingEvent) -> None:
         await self._conn.execute(
             """
-            INSERT INTO trading_events (
+            INSERT OR REPLACE INTO trading_events (
                 event_id, schema_version, timestamp, source, symbol,
                 strategy_id, state, direction, entry, stop_loss,
                 take_profit, risk_reward, risk_percent, validation_status,
@@ -114,6 +94,14 @@ class EventService:
 
         return ActiveStateChange(symbol=event.symbol, action="unchanged")
 
+    async def get_by_id(self, event_id: str) -> dict[str, Any] | None:
+        cursor = await self._conn.execute(
+            "SELECT * FROM trading_events WHERE event_id = ?",
+            (str(event_id),),
+        )
+        row = await cursor.fetchone()
+        return _row_to_event_dict(row) if row else None
+
     async def get_history(
         self, symbol: str | None = None, limit: int = 100
     ) -> list[dict[str, Any]]:
@@ -135,9 +123,6 @@ class EventService:
         return [_row_to_event_dict(row) for row in rows]
 
     async def get_recent_warnings(self, limit: int = 10) -> list[dict[str, Any]]:
-        """Most recent RISK_WARNING/SYSTEM_WARNING events — informational
-        broadcasts that never touch active_setups (see INFORMATIONAL_STATES
-        above), so they need their own query rather than a JOIN."""
         limit = max(1, min(limit, 100))
         cursor = await self._conn.execute(
             """
@@ -151,8 +136,6 @@ class EventService:
         return [_row_to_event_dict(row) for row in rows]
 
     async def get_active_setups(self) -> list[dict[str, Any]]:
-        """Returns current active setups, lazily invalidating any that have
-        passed their event's `expires_at` without a new event arriving."""
         cursor = await self._conn.execute(
             """
             SELECT a.symbol AS symbol, e.*
@@ -167,9 +150,12 @@ class EventService:
         expired_symbols: list[str] = []
         for row in rows:
             expires_at = row["expires_at"]
-            if expires_at and datetime.fromisoformat(expires_at) < now:
-                expired_symbols.append(row["symbol"])
-                continue
+            if expires_at:
+                exp_dt = datetime.fromisoformat(expires_at)
+                ts_dt = datetime.fromisoformat(row["timestamp"])
+                if exp_dt < now and exp_dt >= ts_dt:
+                    expired_symbols.append(row["symbol"])
+                    continue
             live.append(_row_to_event_dict(row))
         if expired_symbols:
             await self._conn.executemany(

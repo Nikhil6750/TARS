@@ -43,13 +43,17 @@ def client() -> TarsTestClient:
 
 @pytest.fixture
 def valid_event() -> dict[str, object]:
+    from datetime import timedelta
     event = json.loads(
         (
             ROOT / "tests" / "fixtures" / "valid" / "setup_valid.json"
         ).read_text(encoding="utf-8")
     )
     event["event_id"] = str(uuid4())
-    event["timestamp"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(timezone.utc)
+    event["timestamp"] = now.isoformat().replace("+00:00", "Z")
+    if event.get("expires_at"):
+        event["expires_at"] = (now + timedelta(minutes=30)).isoformat().replace("+00:00", "Z")
     event["source"] = "manual"
     event["symbol"] = f"TST{uuid4().hex[:8].upper()}"
     return event

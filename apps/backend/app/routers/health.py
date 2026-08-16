@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Literal
 
@@ -9,9 +9,10 @@ from app.db import Database
 from app.deps import get_db
 from app.schemas import HealthResponse
 
-router = APIRouter(prefix="/api/v1", tags=["health"])
+router = APIRouter(tags=["health"])
 
 
+@router.get("/api/v1/health", response_model=HealthResponse)
 @router.get("/health", response_model=HealthResponse)
 async def health(
     db: Database = Depends(get_db), settings: Settings = Depends(get_settings)

@@ -1,11 +1,4 @@
-"""Deterministic-vs-model routing, per ARCHITECTURE.md § Assistant
-architecture: deterministic command/state requests resolve in deterministic
-code and never touch a model call. Only queries that don't match a
-deterministic intent reach the configured AssistantProvider, and even then
-with deterministic state as grounding (assistant/grounding.py) — never as
-the sole source of trading facts.
-"""
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from dataclasses import dataclass
@@ -32,16 +25,15 @@ if TYPE_CHECKING:
 
 tracer = get_tracer()
 
-# Deterministic intents are matched by keyword, on purpose: this is the
-# resolver ARCHITECTURE.md means by "deterministic code", not a fuzzy
-# classifier — false negatives fall through to the model (safe, just less
-# snappy); false positives would wrongly skip the model, so keep these
-# patterns narrow and specific rather than broad.
 _ACTIVE_SETUPS_PATTERN = re.compile(
     r"\bactive\s+setups?\b|\bwhat'?s\s+active\b|\bshow\s+active\b", re.IGNORECASE
 )
 _ATTENTION_PATTERN = re.compile(
     r"\battention\b|\bneeds?\s+(my\s+)?attention\b|\brequires?\s+(my\s+)?attention\b",
+    re.IGNORECASE,
+)
+_INVALIDATION_PATTERN = re.compile(
+    r"\bwhy\s+was\s+(the\s+)?(last\s+)?setup\s+invalidated\b|\blast\s+invalidation\b|\binvalidation\s+reason\b|\bwhy\s+invalidated\b",
     re.IGNORECASE,
 )
 
@@ -110,6 +102,12 @@ class AssistantRouter:
             active = await self._events.get_active_setups()
             warnings = await self._events.get_recent_warnings(limit=5)
             return "attention_summary", _format_attention_summary(active, warnings)
+        if _INVALIDATION_PATTERN.search(text):
+            history = await self._events.get_history(limit=50)
+            invalidated = next(
+                (e for e in history if e.get("state") == "SETUP_INVALIDATED"), None
+            )
+            return "last_invalidation_reason", _format_invalidation_summary(invalidated)
         return None, None
 
     async def _call_provider(self, text: str, conversation_id: str) -> AssistantMessage:
@@ -121,16 +119,24 @@ class AssistantRouter:
             if row["role"] in ("user", "assistant")
         ]
 
+        memory_notes: list[dict[str, Any]] = []
+        if self._memory is not None:
+            try:
+                memory_notes = await self._memory.search(text, limit=3)
+            except Exception:
+                pass
+
         request = AssistantRequest(
             text=text,
             conversation_id=conversation_id,
-            system_context=build_system_context(active),
+            system_context=build_system_context(active, memory_notes=memory_notes),
             history=history,
         )
         with tracer.start_as_current_span("assistant.request") as span:
             span.set_attribute("assistant.provider", self._provider.name)
             span.set_attribute("assistant.history_turns", len(history))
             span.set_attribute("assistant.grounded_setups", len(active))
+            span.set_attribute("assistant.grounded_notes", len(memory_notes))
             try:
                 reply = await self._provider.respond(request)
             except AssistantProviderError as exc:
@@ -195,3 +201,12 @@ def _format_attention_summary(
     if not lines:
         return "Nothing currently requires your attention."
     return "\n".join(lines)
+
+
+def _format_invalidation_summary(invalidated: dict[str, Any] | None) -> str:
+    if not invalidated:
+        return "There are no recorded setup invalidations in history."
+    symbol = invalidated.get("symbol", "unknown symbol")
+    reasons = invalidated.get("reason_codes", [])
+    reason_str = ", ".join(reasons) if reasons else "Manual / rule invalidation"
+    return f"The last invalidated setup was {symbol}. Reason: {reason_str}."

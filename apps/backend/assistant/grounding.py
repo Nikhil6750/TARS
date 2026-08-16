@@ -1,11 +1,8 @@
-"""Builds the grounding text handed to every AssistantProvider alongside a
+﻿"""Builds the grounding text handed to every AssistantProvider alongside a
 user query — the mechanism behind ARCHITECTURE.md's "trading facts always
 come from deterministic state, never model invention". The provider is
 told plainly that this block is the only source of trading facts and to
-say so when asked about something outside it; this is a prompting
-guarantee, not a code-enforced one, which is why the deterministic router
-(assistant/router.py) never lets simple factual queries reach a model at
-all — see DETERMINISTIC_INTENTS there.
+say so when asked about something outside it.
 """
 from __future__ import annotations
 
@@ -24,6 +21,18 @@ SYSTEM_PROMPT_PREAMBLE = (
 )
 
 
-def build_system_context(active_setups: list[dict[str, Any]]) -> str:
-    state_json = json.dumps({"active_setups": active_setups}, indent=2, default=str)
+def build_system_context(
+    active_setups: list[dict[str, Any]],
+    memory_notes: list[dict[str, Any]] | None = None,
+) -> str:
+    payload: dict[str, Any] = {"active_setups": active_setups}
+    if memory_notes:
+        payload["retrieved_memory_notes"] = [
+            {
+                "source": note.get("source"),
+                "snippet": note.get("snippet", note.get("content", "")),
+            }
+            for note in memory_notes
+        ]
+    state_json = json.dumps(payload, indent=2, default=str)
     return f"{SYSTEM_PROMPT_PREAMBLE}\n\nCURRENT STATE:\n{state_json}"

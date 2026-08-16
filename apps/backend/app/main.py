@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
@@ -22,6 +22,8 @@ from memory.service import MemoryService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tars.app")
+
+MAX_BODY_BYTES = 1_048_576  # 1 MiB ceiling per security review
 
 
 @asynccontextmanager
@@ -115,6 +117,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def limit_upload_size(request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_BODY_BYTES:
+            return Response(content="Payload Too Large", status_code=413)
+        return await call_next(request)
 
     app.include_router(health.router)
     app.include_router(events.router)

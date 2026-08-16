@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Database,
   Search,
@@ -36,13 +36,54 @@ const SAMPLE_MEMORY_ITEMS: MemoryItem[] = [
   }
 ];
 
-export const MemoryView: React.FC = () => {
+interface MemoryViewProps {
+  apiEndpoint?: string;
+}
+
+export const MemoryView: React.FC<MemoryViewProps> = ({ apiEndpoint = 'http://127.0.0.1:8000' }) => {
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<string>('ALL');
+  const [backendItems, setBackendItems] = useState<MemoryItem[]>([]);
 
-  const filteredItems = SAMPLE_MEMORY_ITEMS.filter((item) => {
+  useEffect(() => {
+    if (!search.trim()) {
+      setBackendItems([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const sourceParam = activeCategory === 'operational_state' ? '&source=conversation' : activeCategory === 'research_knowledge' ? '&source=vault' : '';
+        const res = await fetch(`${apiEndpoint}/api/v1/memory/search?q=${encodeURIComponent(search.trim())}${sourceParam}`);
+        if (res.ok) {
+          const results = await res.json();
+          if (Array.isArray(results) && results.length > 0) {
+            const mapped: MemoryItem[] = results.map((r: any, idx: number) => ({
+              id: `be_mem_${idx}`,
+              type: r.source === 'vault' ? 'research_knowledge' : 'operational_state',
+              title: r.source === 'vault' ? `Obsidian: ${r.path || 'Vault Note'}` : 'Conversation Memory',
+              content: r.snippet || r.content || '',
+              source: r.source === 'vault' ? `Vault / ${r.path || ''}` : 'SQLite / conversation_history',
+              timestamp: new Date().toISOString(),
+              tags: ['Retrieved', r.source || 'memory']
+            }));
+            setBackendItems(mapped);
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('[TARS Memory Search] Query error:', err);
+      }
+      setBackendItems([]);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [search, activeCategory, apiEndpoint]);
+
+  const itemsToDisplay = backendItems.length > 0 ? backendItems : SAMPLE_MEMORY_ITEMS;
+
+  const filteredItems = itemsToDisplay.filter((item) => {
     if (activeCategory !== 'ALL' && item.type !== activeCategory) return false;
-    if (search) {
+    if (search && backendItems.length === 0) {
       const q = search.toLowerCase();
       return (
         item.title.toLowerCase().includes(q) ||

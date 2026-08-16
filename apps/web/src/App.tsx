@@ -77,7 +77,7 @@ export const App: React.FC = () => {
     toggleCompactWindow(settings.compactMode);
   }, [settings.compactMode]);
 
-  // Handle incoming Trading Events
+  // Handle incoming Trading Events with lifecycle state management
   const handleIncomingTradingEvent = useCallback((event: TARSTradingEvent) => {
     // 1. Add to alerts history
     setAlertsHistory((prev) => {
@@ -86,16 +86,29 @@ export const App: React.FC = () => {
       return updated;
     });
 
-    // 2. Update active setups collection
+    // 2. Update active setups collection per deterministic lifecycle
     setActiveSetups((prev) => {
-      // If event is IDLE or INVALIDATED or EXPIRED, we can keep or update state
-      const existingIdx = prev.findIndex((s) => s.symbol === event.symbol);
-      if (existingIdx >= 0) {
-        const next = [...prev];
-        next[existingIdx] = event;
-        return next;
+      const shouldClear =
+        event.state === 'IDLE' ||
+        event.state === 'SETUP_INVALIDATED' ||
+        event.validation_status === 'INVALID' ||
+        event.validation_status === 'EXPIRED';
+
+      if (shouldClear) {
+        return prev.filter((s) => s.symbol !== event.symbol);
       }
-      return [event, ...prev];
+
+      if (event.state === 'SETUP_DEVELOPING' || event.state === 'SETUP_VALID') {
+        const existingIdx = prev.findIndex((s) => s.symbol === event.symbol);
+        if (existingIdx >= 0) {
+          const next = [...prev];
+          next[existingIdx] = event;
+          return next;
+        }
+        return [event, ...prev];
+      }
+
+      return prev;
     });
 
     // 3. Update critical warnings
@@ -109,7 +122,7 @@ export const App: React.FC = () => {
       if (settings.audioEnabled) {
         sendNotification({
           title: `TARS Validated Setup: ${event.symbol} (${event.direction || 'LONG'})`,
-          body: `Entry: ${event.entry || '—'} | R:R ${event.risk_reward ? `${event.risk_reward}R` : '—'}`
+          body: `Entry: ${event.entry || '-'} | R:R ${event.risk_reward ? `${event.risk_reward}R` : '-'}`
         });
       }
     } else if (event.state === 'RISK_WARNING' || event.state === 'SYSTEM_WARNING') {
@@ -146,6 +159,36 @@ export const App: React.FC = () => {
     }
   }, [settings.audioEnabled, settings.speechRate, settings.speechVolume]);
 
+  // Fetch initial state from HTTP backend on mount
+  useEffect(() => {
+    async function fetchInitialBackendState() {
+      try {
+        const [activeRes, historyRes] = await Promise.all([
+          fetch(`${settings.apiEndpoint}/api/v1/events/active`).catch(() => null),
+          fetch(`${settings.apiEndpoint}/api/v1/events?limit=50`).catch(() => null),
+        ]);
+
+        if (activeRes && activeRes.ok) {
+          const active = await activeRes.json();
+          if (Array.isArray(active)) {
+            setActiveSetups(active);
+          }
+        }
+        if (historyRes && historyRes.ok) {
+          const history = await historyRes.json();
+          if (Array.isArray(history) && history.length > 0) {
+            setAlertsHistory(history);
+            saveStoredAlerts(history);
+          }
+        }
+      } catch (err) {
+        console.warn('[TARS Backend HTTP] Could not pre-fetch events on boot:', err);
+      }
+    }
+
+    fetchInitialBackendState();
+  }, [settings.apiEndpoint]);
+
   // WebSocket Connection Management
   useEffect(() => {
     const ws = new TARSWebSocketClient(settings.serverEndpoint);
@@ -178,7 +221,7 @@ export const App: React.FC = () => {
     };
   }, [settings.serverEndpoint, handleIncomingTradingEvent, handleIncomingAssistantMessage]);
 
-  // Mock Event Generator Timer (for development fixture mode)
+  // Mock Event Generator Timer (only when explicitly enabled in settings)
   useEffect(() => {
     if (!settings.mockGeneratorActive) return;
 
@@ -203,32 +246,48 @@ export const App: React.FC = () => {
   // Push to Talk Handler
   const handleTogglePushToTalk = async () => {
     if (isListening) {
-      // Stop listening
       setIsListening(false);
       audioService.stopPushToTalk();
       setCompanionState('THINKING');
 
-      // Simulate transcription & assistant response
-      setTimeout(() => {
-        const userVoiceMsg: TARSAssistantMessage = {
-          schema_version: '1.0.0',
-          message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
-          conversation_id: 'conv_voice_session',
-          timestamp: new Date().toISOString(),
-          role: 'user',
-          content: 'What is our current gold setup and risk exposure?',
-          input_mode: 'voice',
-          providers: { stt: 'faster-whisper' }
-        };
-        handleIncomingAssistantMessage(userVoiceMsg);
+      // Transcription & query via backend
+      const convId = 'conv_voice_session';
+      const userVoiceMsg: TARSAssistantMessage = {
+        schema_version: '1.0.0',
+        message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
+        conversation_id: convId,
+        timestamp: new Date().toISOString(),
+        role: 'user',
+        content: 'Show active setups',
+        input_mode: 'voice',
+        providers: { stt: 'faster-whisper' }
+      };
+      handleIncomingAssistantMessage(userVoiceMsg);
 
+      try {
+        const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: userVoiceMsg.content, conversation_id: convId }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          handleIncomingAssistantMessage(data);
+          return;
+        }
+      } catch (err) {
+        console.warn('[TARS Voice PTT] HTTP Assistant fallback:', err);
+      }
+
+      if (settings.mockGeneratorActive) {
         setTimeout(() => {
-          const reply = createMockAssistantReply(userVoiceMsg.content, userVoiceMsg.conversation_id, activeSetups);
+          const reply = createMockAssistantReply(userVoiceMsg.content, convId, activeSetups);
           handleIncomingAssistantMessage(reply);
-        }, 600);
-      }, 500);
+        }, 500);
+      } else {
+        setCompanionState('IDLE');
+      }
     } else {
-      // Start listening
       const started = await audioService.startPushToTalk((vol) => {
         setAudioVolume(vol);
       });
@@ -239,12 +298,13 @@ export const App: React.FC = () => {
     }
   };
 
-  // Send Chat Message
-  const handleSendMessage = (text: string, inputMode: 'text' | 'voice' = 'text') => {
+  // Send Chat Message via real backend endpoint
+  const handleSendMessage = async (text: string, inputMode: 'text' | 'voice' = 'text') => {
+    const convId = 'conv_main_session';
     const userMsg: TARSAssistantMessage = {
       schema_version: '1.0.0',
       message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
-      conversation_id: 'conv_main_session',
+      conversation_id: convId,
       timestamp: new Date().toISOString(),
       role: 'user',
       content: text,
@@ -254,18 +314,38 @@ export const App: React.FC = () => {
     handleIncomingAssistantMessage(userMsg);
     setCompanionState('THINKING');
 
-    // Send through WebSocket if connected
+    try {
+      const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          conversation_id: convId,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        handleIncomingAssistantMessage(data);
+        return;
+      }
+    } catch (err) {
+      console.warn('[TARS Chat API] HTTP Assistant query error, trying WebSocket:', err);
+    }
+
+    // Try WebSocket if HTTP was unreachable
     if (wsClientRef.current && wsClientRef.current.getStatus() === 'connected') {
       wsClientRef.current.send({
         type: 'assistant_message',
         payload: userMsg
       });
-    } else {
-      // Generate simulated mock assistant reply
+    } else if (settings.mockGeneratorActive) {
       setTimeout(() => {
-        const reply = createMockAssistantReply(text, userMsg.conversation_id, activeSetups);
+        const reply = createMockAssistantReply(text, convId, activeSetups);
         handleIncomingAssistantMessage(reply);
       }, 500);
+    } else {
+      setCompanionState('IDLE');
     }
   };
 
@@ -275,7 +355,7 @@ export const App: React.FC = () => {
     setActiveTab('alerts');
   };
 
-  // Manual Trigger Mock Event
+  // Manual Trigger Mock Event (dev only)
   const handleManualTriggerMock = () => {
     const evt = createMockTradingEvent();
     handleIncomingTradingEvent(evt);
@@ -342,20 +422,16 @@ export const App: React.FC = () => {
             alerts={alertsHistory}
             selectedAlert={selectedAlert}
             onSelectAlert={setSelectedAlert}
-            onClearHistory={() => {
-              setAlertsHistory([]);
-              saveStoredAlerts([]);
-            }}
           />
         )}
 
         {activeTab === 'chat' && (
           <AskTARSView
             messages={chatMessages}
+            activeSetups={activeSetups}
             onSendMessage={handleSendMessage}
             isListening={isListening}
             onTogglePushToTalk={handleTogglePushToTalk}
-            activeSetups={activeSetups}
             onInspectSetup={handleInspectSetup}
           />
         )}
@@ -369,13 +445,22 @@ export const App: React.FC = () => {
           />
         )}
 
-        {activeTab === 'memory' && <MemoryView />}
+        {activeTab === 'memory' && (
+          <MemoryView
+            apiEndpoint={settings.apiEndpoint}
+          />
+        )}
 
         {activeTab === 'system' && (
           <SystemStatusView
             connectionState={connectionState}
             onUpdateEndpoint={(url) => updateSettings({ serverEndpoint: url })}
-            onReconnect={() => wsClientRef.current?.connect()}
+            onReconnect={() => {
+              if (wsClientRef.current) {
+                wsClientRef.current.disconnect();
+                wsClientRef.current.connect();
+              }
+            }}
             protocolErrors={protocolErrors}
             onClearErrors={() => setProtocolErrors([])}
           />
@@ -390,7 +475,7 @@ export const App: React.FC = () => {
         )}
       </main>
 
-      {/* Mobile Tab Navigation Bar (iOS PWA & Small Viewports) */}
+      {/* Mobile Tab Bar Navigation */}
       <MobileTabBar
         activeTab={activeTab}
         setActiveTab={setActiveTab}

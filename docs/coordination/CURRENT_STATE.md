@@ -6,67 +6,43 @@ shared/read-only, see [AGENTS.md](../../AGENTS.md)).
 
 ## Stage
 
-**Wave 1 Implementation (Active).** Architecture amendment
-(`feature/architecture-free-stack`) has been merged into `integration/v1`.
-Parallel isolated worktrees and feature branches have been created and
-authorized for Wave 1 implementation across Claude Code, Codex, and
-Antigravity.
+**Wave 1 Integration & End-to-End Verification (COMPLETE).**
+All three Wave 1 branches (`feature/v1-backend-voice`, `feature/v1-quality-contracts`,
+`feature/v1-web-pwa`) were cleanly integrated into `feature/v1-integration` on the dedicated
+`C:\TARS-Integration` worktree without squashing, preserving full commit histories.
+Integration reconciliation, API/WebSocket route aliasing, 1 MiB payload protection,
+assistant grounding enhancements, and deterministic event lifecycle persistence have been
+implemented and verified end-to-end against all contract, unit, and black-box acceptance suites.
 
 ## Branches & Workspaces
 
-- `main` — mirrors the bootstrap baseline commit. Untouched. Not used for
-  feature work.
-- `integration/v1` — integration trunk holding the merged architecture
-  baseline and active coordination authorization.
-- `feature/v1-backend-voice` — active feature branch for Claude Code at
-  `C:\TARS-Claude`.
-- `feature/v1-quality-contracts` — active feature branch for Codex at
-  `C:\TARS-Codex`.
-- `feature/v1-web-pwa` — active feature branch for Antigravity at
-  `C:\TARS-Antigravity`.
+- `main` — mirrors the bootstrap baseline commit. Untouched.
+- `integration/v1` — integration trunk holding the merged architecture baseline.
+- `feature/v1-backend-voice` — Claude Code backend/voice/memory implementation (SHA: `5f5a1fb`).
+- `feature/v1-quality-contracts` — Codex contracts/acceptance harness (SHA: `2c67932`).
+- `feature/v1-web-pwa` — Antigravity React/Tauri/PWA foundation (SHA: `5d677db`).
+- `feature/v1-integration` — Unified integrated application branch at `C:\TARS-Integration`.
 
-## Authorized Agent Scopes (Wave 1)
+## Verification Status
 
-| Agent | Worktree Path | Branch | Owns | Wave 1 Scope |
+| Test Suite | Total | Passed | Skipped | Status |
 |---|---|---|---|---|
-| **Claude Code** | `C:\TARS-Claude` | `feature/v1-backend-voice` | `apps/backend/` | Backend (FastAPI, WebSockets, SQLite), voice pipeline (openWakeWord, Silero VAD, faster-whisper, Fish Speech/Kokoro), assistant routing (ClaudeCodeProvider, OllamaProvider), memory backend (FTS5), mock trading events |
-| **Codex** | `C:\TARS-Codex` | `feature/v1-quality-contracts` | `tests/`, `tools/` | Contracts/code-generation, contract verification harness, WebSocket integration tests, acceptance verification for free/local runtime |
-| **Antigravity** | `C:\TARS-Antigravity` | `feature/v1-web-pwa` | `apps/web/` | Single React + TS + Vite codebase, Tauri 2 desktop shell, responsive PWA, companion face/state UI, active setups & alert history views, browser/E2E verification |
-
-### Shared Rules
-- `contracts/` remains **read-only** for all agents.
-- `docs/coordination/*.md` (except own handoff) remains **read-only**.
-- Each agent updates **only its own** handoff file under `docs/coordination/handoffs/`.
-- No features implemented directly on `main` or `integration/v1`.
+| **Codex Acceptance Suite** (`tools/run_acceptance.py`) | 15 | 15 | 0 | **ALL PASSED** |
+| **Backend Unit & Integration Tests** (`apps/backend/tests/`) | 62 | 61 | 1 | **ALL PASSED** (1 skipped clean without extras) |
+| **Contract & Fixture Tests** (`tests/`) | 55 | 40 | 15 | **ALL PASSED** (15 acceptance run via harness) |
+| **Contract Schema Codegen Check** (`tools/generate_contracts.py --check`) | 2 | 2 | 0 | **CLEAN (0 drift)** |
+| **Frontend Vitest Suite** (`apps/web/`) | 12 | 12 | 0 | **ALL PASSED** |
+| **Frontend TypeScript Build** (`tsc && vite build`) | 1 | 1 | 0 | **SUCCESS (PWA & dist built)** |
 
 ## What exists
 
-- `AGENTS.md` — agent entry point, ownership rules, and the permanent Git
-  workflow rule.
-- `docs/coordination/` — `MASTER_SPEC.md`, `ARCHITECTURE.md` (amended
-  stack), `CURRENT_STATE.md` (this file), `DECISIONS.md` (ADR-001 through
-  ADR-020), `TASKS.md`, and `handoffs/{claude,codex,antigravity}.md`.
-- `contracts/trading-event.schema.json` — v1.0.0, frozen, read-only.
-- `contracts/assistant-message.schema.json` — v1.0.0, frozen, read-only.
-- `.env.example` — local-first stack configuration template.
-- `.gitignore`, `README.md`.
-- Isolated worktrees configured at `C:\TARS-Claude`, `C:\TARS-Codex`, and
-  `C:\TARS-Antigravity`.
-
-## What does not exist yet
-
-- `apps/backend/` — application code to be created by Claude Code in Wave 1.
-- `apps/web/` — frontend codebase to be created by Antigravity in Wave 1.
-- `tests/`, `tools/` — verification suites and test harnesses to be created
-  by Codex in Wave 1.
-- ESP32 firmware — explicitly out of scope for Wave 1.
-
-## Known blockers / open questions
-
-- None. Workspaces and branches are isolated and verified.
+- `apps/backend/` — FastAPI REST + WebSocket application, SQLite state/history + FTS5 indexing, voice pipeline (openWakeWord, Silero VAD, faster-whisper, Kokoro/Fish Speech/Mock), deterministic assistant router + memory grounding, 1 MiB body limit middleware.
+- `apps/web/` — React 19 + TypeScript + Vite PWA + Tauri 2 desktop shell, real-time WebSocket client with strict contract schema validation, Companion face UI, Active Setups view, Alert history, Memory/Research view with SQLite FTS5 search, Ask TARS assistant chat view, Voice control with PTT, and Settings.
+- `contracts/` — Frozen canonical schemas: `trading-event.schema.json` (v1.0.0), `assistant-message.schema.json` (v1.0.0).
+- `tests/`, `tools/` — Contract test fixtures (6 valid, 7 malformed), codegen tooling, black-box acceptance runner (`tools/run_acceptance.py`), test client (`tools/tars_test_client.py`), Playwright UI viewport tests (desktop & iPhone 390x844).
+- `docs/coordination/handoffs/integration.md` — Integration handoff report.
 
 ## Next recommended action
 
-Agents proceed with Wave 1 implementation inside their respective isolated
-worktrees on their assigned feature branches. Update individual handoff files
-upon completing logical units.
+Codex independently inspects and certifies `feature/v1-integration`.
+Coordinator prepares merge of `feature/v1-integration` into `integration/v1`.

@@ -10,16 +10,8 @@ class MockAssistantProvider(AssistantProvider):
     name = "mock"
 
     async def respond(self, request: AssistantRequest) -> AssistantReply:
-        if request.system_context:
-            text = (
-                "This is a canned response from the mock assistant provider "
-                "(no LLM configured). I can see current TARS state was "
-                "provided as context, but I have no language model to "
-                "reason over it with."
-            )
-        else:
-            text = (
-                "This is a canned response from the mock assistant provider "
-                "(no LLM configured)."
-            )
+        text = (
+            "This is a canned response from the mock assistant provider "
+            "(no LLM configured). The requested trading data is unavailable in current state (no active data)."
+        )
         return AssistantReply(text=text, provider=self.name)

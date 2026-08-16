@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Local Storage Persistence Manager for TARS Companion
  */
 
@@ -19,7 +19,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   speechVolume: 0.9,
   compactMode: false,
   hapticFeedback: true,
-  mockGeneratorActive: true, // Active by default for standalone demo & testing
+  mockGeneratorActive: false, // Default connected to real backend
   mockIntervalSeconds: 8,
   theme: 'dark-terminal'
 };
