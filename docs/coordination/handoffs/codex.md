@@ -8,6 +8,74 @@ integration/quality harness). Only Codex edits this file. See
 
 ## Latest handoff
 
+**Branch**: `fix/v1-final-codegen`
+
+**Commit SHA**: `b071208ba9710f307f9399c38b1d6a3c2c86ba0e` (last implementation commit
+before this handoff)
+
+**Work completed**:
+
+- Fixed the final Windows contract-codegen blocker without changing canonical
+  schemas or backend/frontend product logic.
+- Identified the root cause as `core.autocrlf=true` producing CRLF working-tree
+  artifacts while fresh subprocess output used a mixture of host-dependent and
+  explicit LF endings, followed by a raw byte comparison.
+- Canonicalized every generated Python and TypeScript artifact to LF after the
+  pinned subprocess generators finish.
+- Made drift comparison normalize newline encodings only. Semantic content,
+  whitespace other than line endings, generator drift, and file-set drift remain
+  fatal.
+- Added narrowly scoped Git attributes pinning only generated Python and
+  TypeScript contract artifacts to LF checkout behavior.
+- Added Windows/LF regressions using real codegen, including repeated byte-level
+  generation, CRLF-equivalent comparison, non-newline content drift, and a
+  temporary semantic schema type change.
+
+**Files changed**:
+
+- `.gitattributes`
+- `tools/generate_contracts.py`
+- `tools/README.md`
+- `tests/contracts/test_codegen_newlines.py`
+- This Codex handoff file only under shared coordination docs.
+- Generated artifacts were regenerated exclusively through the generator and
+  have no tracked content diff. `contracts/` is unchanged from the exact base.
+
+**Interfaces exposed**:
+
+- `generate(destination)` now always writes canonical LF artifact bytes.
+- `check_drift(generated)` accepts only newline-equivalent LF/CRLF content while
+  retaining strict file-set and semantic content checks.
+- Generated checkout policy is `text eol=lf` only for
+  `tools/generated/python/*.py` and `tools/generated/typescript/*.d.ts`.
+
+**Tests run**:
+
+- `python tools/generate_contracts.py` twice — byte-identical SHA-256 sets; all
+  five artifacts LF-only.
+- `python tools/generate_contracts.py --check` — passed.
+- `python -m pytest tests/contracts -q` — 33 passed.
+- `python -m pytest tests -q` — 56 passed, 24 expected external-acceptance skips.
+- `python -m ruff check tests tools` — passed.
+- `git diff --exit-code -- tools/generated` after second generation — clean.
+- `git diff --exit-code 9f13e09a7c44be27901d34cb885a63ceb8755463 -- contracts`
+  — clean; canonical schemas unchanged.
+
+**Known limitations**:
+
+- None for final contract/codegen remediation. The 24 skipped tests are the
+  existing external acceptance cases that intentionally require the
+  process-owning harness, not codegen failures.
+
+**Exact dependencies required from other agents**:
+
+- None.
+
+**Next recommended action**: Coordinator may independently verify from a clean
+clone and review `fix/v1-final-codegen`; do not merge as part of this handoff.
+
+## Previous handoff — certification coverage
+
 **Branch**: `fix/v1-certification-coverage`
 
 **Commit SHA**: `3ec3c845a519c91cc4d27ea1e64234d7703129a8` (last implementation commit
