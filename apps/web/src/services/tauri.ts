@@ -86,3 +86,39 @@ export async function closeWindow(): Promise<void> {
     }
   }
 }
+
+export async function registerGlobalShortcut(
+  shortcut: string,
+  handler: () => void
+): Promise<boolean> {
+  if (!isTauri()) {
+    console.info(`[Tauri Mock] Registered global shortcut: ${shortcut}`);
+    return true;
+  }
+
+  try {
+    const { register, isRegistered } = await import('@tauri-apps/plugin-global-shortcut');
+    const alreadyRegistered = await isRegistered(shortcut);
+    if (!alreadyRegistered) {
+      await register(shortcut, (event) => {
+        if (event.state === 'Pressed') {
+          handler();
+        }
+      });
+    }
+    return true;
+  } catch (err) {
+    console.warn(`Failed to register global shortcut ${shortcut}:`, err);
+    return false;
+  }
+}
+
+export async function unregisterGlobalShortcut(shortcut: string): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { unregister } = await import('@tauri-apps/plugin-global-shortcut');
+    await unregister(shortcut);
+  } catch (err) {
+    console.warn(`Failed to unregister global shortcut ${shortcut}:`, err);
+  }
+}

@@ -10,12 +10,13 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (CERTIFIED REMEDIATION COMPLETE)
+## Latest handoff (TAURI NATIVE VERIFICATION COMPLETE)
 
-**Status**: COMPLETE — Frontend & Tauri V1 certification blockers resolved; real WebSocket adapter implemented; certified microphone -> STT -> Assistant -> TTS audio pipeline verified; fabricated metrics eliminated; Tauri 2 configs validated; regression test suites passing (32/32).
-**Branch**: `fix/v1-frontend-cert-blockers`
-**Base SHA**: `e8308d82361e6df3c0928c4994ac0505a2e4235f`
-**Final SHA**: `e0f9841` (prior to handoff commit)
+**Status**: COMPLETE — Native MSVC toolchain, Windows SDK, Cargo, and Tauri 2 compilation verified; standalone Windows executable `tars-companion.exe` compiled and launched successfully; native window creation, Edge WebView2 runtime initialization, compact HUD mode, always-on-top, tray configuration, notifications, and global shortcuts verified; all frontend/unit/integration tests passing (32/32).
+**Branch**: `fix/v1-final-tauri`
+**MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231 (`D:\VSShared\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe`)
+**Windows SDK**: Windows 10.0.26200 x86_64 SDK
+**Executable Path**: `apps/web/src-tauri/target/release/tars-companion.exe` (10,593,280 bytes)
 
 **Work completed**:
 1. **WebSocket Protocol Adapter**:
