@@ -1,3 +1,4 @@
+#[cfg(debug_assertions)]
 use tauri::Manager;
 
 #[tauri::command]
@@ -11,12 +12,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![greet])
-        .setup(|app| {
+        .setup(|_app| {
             #[cfg(debug_assertions)]
             {
-                let window = app.get_webview_window("main").unwrap();
+                let _window = _app.get_webview_window("main").unwrap();
                 // Optionally open devtools in debug
-                // window.open_devtools();
+                // _window.open_devtools();
             }
             Ok(())
         })

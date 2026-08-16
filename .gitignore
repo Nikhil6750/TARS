@@ -23,6 +23,8 @@ dist-ssr/
 # Tauri / Rust (apps/web/src-tauri)
 src-tauri/target/
 target/
+src-tauri/gen/
+apps/web/src-tauri/gen/
 
 # Local model weights / voice model artifacts (faster-whisper, Fish Speech, Kokoro, openWakeWord)
 *.onnx
@@ -35,6 +37,8 @@ models/
 
 # SQLite data
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 

@@ -18,7 +18,7 @@ import {
 import { TARSWebSocketClient } from './services/websocket';
 import { audioService } from './services/audio';
 import { sendNotification } from './services/notifications';
-import { toggleCompactWindow } from './services/tauri';
+import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut } from './services/tauri';
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
 
 import { DesktopHeader } from './components/navigation/DesktopHeader';
@@ -76,6 +76,22 @@ export const App: React.FC = () => {
   useEffect(() => {
     toggleCompactWindow(settings.compactMode);
   }, [settings.compactMode]);
+
+  // Register Global Shortcut (CommandOrControl+Shift+T) to toggle compact HUD
+  useEffect(() => {
+    const shortcut = 'CommandOrControl+Shift+T';
+    registerGlobalShortcut(shortcut, () => {
+      setSettings((prev) => {
+        const next = { ...prev, compactMode: !prev.compactMode };
+        saveSettings(next);
+        return next;
+      });
+    });
+
+    return () => {
+      unregisterGlobalShortcut(shortcut);
+    };
+  }, []);
 
   // Handle incoming Trading Events with lifecycle state management
   const handleIncomingTradingEvent = useCallback((event: TARSTradingEvent) => {
