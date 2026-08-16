@@ -4,15 +4,15 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Any, TypeVar
 from uuid import uuid4
 
 import pytest
 
 from tools.tars_test_client import TarsTestClient
-
 
 ROOT = Path(__file__).resolve().parents[2]
 T = TypeVar("T")
@@ -57,6 +57,47 @@ def valid_event() -> dict[str, object]:
     event["source"] = "manual"
     event["symbol"] = f"TST{uuid4().hex[:8].upper()}"
     return event
+
+
+@pytest.fixture
+def event_factory() -> Callable[[str, str, str], dict[str, Any]]:
+    """Build independent lifecycle events from the canonical fixture shape."""
+
+    template = json.loads(
+        (ROOT / "tests" / "fixtures" / "valid" / "setup_valid.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    def build(state: str, validation_status: str, symbol: str) -> dict[str, Any]:
+        event = dict(template)
+        event.update(
+            {
+                "event_id": str(uuid4()),
+                "timestamp": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "source": "manual",
+                "symbol": symbol,
+                "state": state,
+                "validation_status": validation_status,
+            }
+        )
+        if state == "SETUP_DEVELOPING":
+            event.update(
+                {
+                    "direction": None,
+                    "entry": None,
+                    "stop_loss": None,
+                    "take_profit": None,
+                    "risk_reward": None,
+                    "risk_percent": None,
+                    "expires_at": None,
+                }
+            )
+        return event
+
+    return build
 
 
 def poll_until(

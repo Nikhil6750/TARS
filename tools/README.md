@@ -51,8 +51,8 @@ canonical schemas and supports `health`, `send-event`, `active`, `history`,
 Because shared contracts do not freeze URL paths, each route can be overridden
 without changing the client: `TARS_HEALTH_PATH`, `TARS_EVENTS_PATH`,
 `TARS_ACTIVE_PATH`, `TARS_HISTORY_PATH`, `TARS_INVALIDATE_PATH`,
-`TARS_ASSISTANT_PATH`, and `TARS_WEBSOCKET_PATH`. The invalidation path may use
-an `{event_id}` placeholder.
+`TARS_ASSISTANT_PATH`, `TARS_MEMORY_SEARCH_PATH`, and `TARS_WEBSOCKET_PATH`.
+The invalidation path may use an `{event_id}` placeholder.
 
 ## Full acceptance harness
 
@@ -70,8 +70,23 @@ commands for the integrated backend and frontend:
 ```
 
 The runner removes all paid-provider keys, uses an isolated SQLite database,
-supplies a deliberately invalid vault path, starts both process trees, polls
-readiness with deadlines, executes `tests/acceptance/`, scans captured logs for
-a secret sentinel, and always tears down descendants. `--use-running-services`
-is available for partial diagnostics, but intentionally fails the explicit
-"processes started by this harness" acceptance check.
+creates a deterministic Obsidian provenance fixture, starts both process trees,
+polls readiness with deadlines, executes `tests/acceptance/`, scans captured
+logs for a secret sentinel, and always tears down descendants.
+`--use-running-services` is available for partial diagnostics, but
+intentionally fails the explicit "processes started by this harness"
+acceptance check.
+
+## V1 certification
+
+The certification entry point runs every mandatory gate and returns nonzero if
+any gate fails. It covers contract/codegen checks, backend pytest/Ruff/MyPy,
+frontend tests/typecheck/lint/production build, Tauri compatibility (plus a
+native build when Rust tooling exists), and process-owning external acceptance:
+
+```powershell
+python tools\run_certification.py
+```
+
+`tools/tauri_checks.py --cargo-check` can be run separately for deterministic
+npm/Cargo version, configuration, and Rust build-metadata diagnostics.

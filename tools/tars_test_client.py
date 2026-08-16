@@ -15,14 +15,13 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from uuid import uuid4
 
 import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from websockets.asyncio.client import connect
-
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS = ROOT / "contracts"
@@ -55,10 +54,11 @@ class Routes:
     history: str = "/api/events/history"
     invalidate: str = "/api/events/{event_id}/invalidate"
     assistant: str = "/api/assistant/messages"
+    memory_search: str = "/api/v1/memory/search"
     websocket: str = "/ws"
 
     @classmethod
-    def from_env(cls) -> "Routes":
+    def from_env(cls) -> Routes:
         return cls(
             health=os.getenv("TARS_HEALTH_PATH", cls.health),
             events=os.getenv("TARS_EVENTS_PATH", cls.events),
@@ -66,6 +66,7 @@ class Routes:
             history=os.getenv("TARS_HISTORY_PATH", cls.history),
             invalidate=os.getenv("TARS_INVALIDATE_PATH", cls.invalidate),
             assistant=os.getenv("TARS_ASSISTANT_PATH", cls.assistant),
+            memory_search=os.getenv("TARS_MEMORY_SEARCH_PATH", cls.memory_search),
             websocket=os.getenv("TARS_WEBSOCKET_PATH", cls.websocket),
         )
 
@@ -122,7 +123,7 @@ class TarsTestClient:
             timeout=httpx.Timeout(timeout_seconds), transport=transport
         )
 
-    def __enter__(self) -> "TarsTestClient":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -185,6 +186,14 @@ class TarsTestClient:
     def history(self) -> list[dict[str, Any]]:
         return self._event_list(self._json(self.http.get(self._url(self.routes.history))))
 
+    def history_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
+        """Query public history with an explicit symbol filter."""
+
+        payload = self._json(
+            self.http.get(self._url(self.routes.history), params={"symbol": symbol})
+        )
+        return self._event_list(payload)
+
     def invalidate(self, event_id: str, reason: str = "MANUAL_INVALIDATION") -> Any:
         path = self.routes.invalidate.format(event_id=event_id)
         return self._json(
@@ -230,6 +239,21 @@ class TarsTestClient:
         if message["role"] != "assistant":
             raise ContractViolation("Assistant endpoint did not return role='assistant'")
         return message
+
+    def search_memory(
+        self, query: str, *, source: str | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if source is not None:
+            params["source"] = source
+        payload = self._json(
+            self.http.get(self._url(self.routes.memory_search), params=params)
+        )
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) for item in payload
+        ):
+            raise ContractViolation("Memory search response must be a list of objects")
+        return payload
 
     async def websocket_messages(
         self, count: int = 1, timeout_seconds: float | None = None

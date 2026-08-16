@@ -17,7 +17,6 @@ from pathlib import Path
 import httpx
 import psutil
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PAID_KEY_NAMES = (
     "ANTHROPIC_API_KEY",
@@ -92,10 +91,7 @@ class ManagedProcess:
                 self.process.kill()
             self.process.wait(timeout=3.0)
         if self._log_handle is not None:
-            try:
-                self._log_handle.close()
-            except Exception:
-                pass
+            self._log_handle.close()
             self._log_handle = None
 
 
@@ -118,12 +114,32 @@ def wait_for_http(
     raise TimeoutError(f"Timed out waiting for {url}: {last_error}")
 
 
+def assert_endpoint_unused(url: str) -> None:
+    """Refuse a process-owning run when a stale service already owns the URL."""
+
+    try:
+        response = httpx.get(url, timeout=0.5)
+    except httpx.HTTPError:
+        return
+    raise RuntimeError(
+        f"Refusing to launch over an existing service at {url} "
+        f"(HTTP {response.status_code})"
+    )
+
+
 def scrubbed_environment(temp_dir: Path, sentinel: str) -> dict[str, str]:
     environment = os.environ.copy()
     for name in PAID_KEY_NAMES:
         environment[name] = ""
-    invalid_vault = temp_dir / "not-a-vault"
-    invalid_vault.write_text("This is a file, not a vault directory.\n", encoding="utf-8")
+    vault = temp_dir / "vault"
+    note = vault / "Certification" / "Provenance.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "# Certification provenance anchor\n\n"
+        "Project AURORA carries marker TARS_PROVENANCE_ANCHOR.\n"
+        "No verified statistical performance facts are recorded here.\n",
+        encoding="utf-8",
+    )
     environment.update(
         {
             "TARS_ENV": "test",
@@ -133,10 +149,10 @@ def scrubbed_environment(temp_dir: Path, sentinel: str) -> dict[str, str]:
             "WAKE_WORD_PROVIDER": "mock",
             "STT_PROVIDER": "mock",
             "TTS_PROVIDER": "mock",
-            "OBSIDIAN_VAULT_PATH": str(invalid_vault),
+            "OBSIDIAN_VAULT_PATH": str(vault),
             "TARS_SECRET_SENTINEL": sentinel,
             "TARS_ACCEPTANCE_ZERO_PAID_KEYS": "1",
-            "TARS_ACCEPTANCE_INVALID_VAULT_PATH": "1",
+            "TARS_ACCEPTANCE_VAULT_SOURCE_ID": "Certification/Provenance.md",
         }
     )
     return environment
@@ -204,6 +220,11 @@ def main() -> None:
         log_paths = [temp_dir / "backend.log", temp_dir / "frontend.log"]
         try:
             if not args.use_running_services:
+                health_path = os.getenv("TARS_HEALTH_PATH", "/health")
+                assert_endpoint_unused(
+                    args.base_url.rstrip("/") + "/" + health_path.lstrip("/")
+                )
+                assert_endpoint_unused(args.frontend_url)
                 backend = ManagedProcess(
                     "backend",
                     args.backend_command,
@@ -213,7 +234,6 @@ def main() -> None:
                 )
                 backend.start()
                 processes.append(backend)
-                health_path = os.getenv("TARS_HEALTH_PATH", "/health")
                 wait_for_http(
                     args.base_url.rstrip("/") + "/" + health_path.lstrip("/"),
                     backend,
