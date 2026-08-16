@@ -41,6 +41,11 @@ def load_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("schema_path", sorted((ROOT / "contracts").glob("*.schema.json")))
+def test_canonical_schema_is_valid_draft_2020_12(schema_path: Path) -> None:
+    Draft202012Validator.check_schema(json.loads(schema_path.read_text(encoding="utf-8")))
+
+
 @pytest.mark.parametrize(("filename", "state"), VALID_STATES.items())
 def test_valid_lifecycle_fixture(filename: str, state: str) -> None:
     instance = load_json(FIXTURES / "valid" / filename)

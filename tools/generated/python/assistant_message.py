@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictStr
 
 
 class Role(StrEnum):
@@ -25,15 +25,15 @@ class Providers(BaseModel):
     model_config = ConfigDict(
         extra='forbid',
     )
-    stt: str | None = Field(
+    stt: StrictStr | None = Field(
         None,
         description="SpeechToTextProvider adapter name used to produce this message's content, if input_mode='voice'.",
     )
-    assistant: str | None = Field(
+    assistant: StrictStr | None = Field(
         None,
         description="AssistantProvider adapter name used to produce this message, if role='assistant'.",
     )
-    tts: str | None = Field(
+    tts: StrictStr | None = Field(
         None,
         description="TextToSpeechProvider adapter name used to render this message's audio, if audio_ref is set on an assistant message.",
     )
@@ -56,7 +56,7 @@ class TARSAssistantMessage(BaseModel):
         ..., description='ISO 8601 timestamp of when this message was created.'
     )
     role: Role = Field(..., description='Who authored this message turn.')
-    content: str = Field(
+    content: StrictStr = Field(
         ...,
         description='Text content of the message. For voice input, this is the transcribed text; for voice output, this is the text that was spoken.',
     )
@@ -64,15 +64,15 @@ class TARSAssistantMessage(BaseModel):
         ...,
         description="How the user supplied this message. Always 'text' for role='system'.",
     )
-    audio_ref: str | None = Field(
+    audio_ref: StrictStr | None = Field(
         None,
         description='Opaque reference (e.g. local file path, storage key) to an associated audio clip, if any. Never a raw audio payload embedded in this message.',
     )
-    related_event_id: str | None = Field(
+    related_event_id: StrictStr | None = Field(
         None,
         description='event_id of a trading-event (see trading-event.schema.json) this message concerns, if the message is about a specific alert/setup. Null otherwise.',
     )
-    intent: str | None = Field(
+    intent: StrictStr | None = Field(
         None,
         description="Optional coarse intent classification for the message (e.g. 'show_active_setups', 'explain_invalidation', 'attention_summary'). Null when not classified.",
     )
@@ -80,7 +80,7 @@ class TARSAssistantMessage(BaseModel):
         None,
         description='Which provider adapters produced/consumed this message, for debugging and provider-swap verification. All fields null when not applicable (e.g. a text-only, non-voice message).',
     )
-    error: str | None = Field(
+    error: StrictStr | None = Field(
         None,
         description='Non-null when this message represents a provider/pipeline error surfaced to the user (e.g. STT failure), describing what went wrong.',
     )

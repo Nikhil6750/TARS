@@ -7,7 +7,16 @@ from enum import Enum, StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, confloat, constr
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictStr,
+    confloat,
+    constr,
+)
 
 
 class Source(StrEnum):
@@ -57,10 +66,10 @@ class TARSTradingEvent(BaseModel):
         ...,
         description="Origin of the event. V1 uses 'mock' exclusively; 'quant_brain' is reserved for the future real integration; 'manual' is reserved for user/coordinator-authored test events.",
     )
-    symbol: constr(min_length=1) = Field(
+    symbol: constr(min_length=1, strict=True) = Field(
         ..., description="Instrument symbol this event concerns, e.g. 'XAUUSD', 'ES'."
     )
-    strategy_id: str | None = Field(
+    strategy_id: StrictStr | None = Field(
         None,
         description='Identifier of the strategy that produced this event, if applicable. Null for system-level events (e.g. SYSTEM_WARNING).',
     )
@@ -69,17 +78,19 @@ class TARSTradingEvent(BaseModel):
         None,
         description='Directional bias of the setup, if any. Null/NONE for non-directional or system-level events.',
     )
-    entry: float | None = Field(
+    entry: StrictFloat | None = Field(
         None, description='Proposed entry price, if applicable.'
     )
-    stop_loss: float | None = Field(None, description='Stop loss price, if applicable.')
-    take_profit: float | None = Field(
+    stop_loss: StrictFloat | None = Field(
+        None, description='Stop loss price, if applicable.'
+    )
+    take_profit: StrictFloat | None = Field(
         None, description='Take profit price, if applicable.'
     )
-    risk_reward: float | None = Field(
+    risk_reward: StrictFloat | None = Field(
         None, description='Risk:reward ratio for the setup, if applicable.'
     )
-    risk_percent: confloat(ge=0.0) | None = Field(
+    risk_percent: confloat(ge=0.0, strict=True) | None = Field(
         None,
         description='Risk expressed as a percentage of account/reference size, if applicable. Informational only; TARS never sizes or places trades.',
     )
@@ -87,11 +98,11 @@ class TARSTradingEvent(BaseModel):
         ...,
         description="Validation status of this event's underlying setup, distinct from lifecycle 'state'.",
     )
-    reason_codes: list[str] | None = Field(
+    reason_codes: list[StrictStr] | None = Field(
         [],
         description='Machine-readable codes explaining why this event/state was produced (e.g. why a setup was invalidated).',
     )
-    warnings: list[str] | None = Field(
+    warnings: list[StrictStr] | None = Field(
         [],
         description='Human-readable warning strings associated with this event, e.g. risk or data-quality warnings.',
     )
