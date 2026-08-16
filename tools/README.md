@@ -53,3 +53,25 @@ without changing the client: `TARS_HEALTH_PATH`, `TARS_EVENTS_PATH`,
 `TARS_ACTIVE_PATH`, `TARS_HISTORY_PATH`, `TARS_INVALIDATE_PATH`,
 `TARS_ASSISTANT_PATH`, and `TARS_WEBSOCKET_PATH`. The invalidation path may use
 an `{event_id}` placeholder.
+
+## Full acceptance harness
+
+Install the pinned test dependencies and Chromium once, then supply process
+commands for the integrated backend and frontend:
+
+```powershell
+.\.venv\Scripts\python -m pip install -r tests\requirements.lock
+.\.venv\Scripts\playwright install chromium
+.\.venv\Scripts\python tools\run_acceptance.py `
+  --backend-command "python -m uvicorn app.main:app --port 8000" `
+  --backend-cwd apps\backend `
+  --frontend-command "npm run dev -- --host 127.0.0.1" `
+  --frontend-cwd apps\web
+```
+
+The runner removes all paid-provider keys, uses an isolated SQLite database,
+supplies a deliberately invalid vault path, starts both process trees, polls
+readiness with deadlines, executes `tests/acceptance/`, scans captured logs for
+a secret sentinel, and always tears down descendants. `--use-running-services`
+is available for partial diagnostics, but intentionally fails the explicit
+"processes started by this harness" acceptance check.
