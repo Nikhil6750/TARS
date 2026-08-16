@@ -11,7 +11,201 @@ for that).
 
 ---
 
-## Latest handoff — Wave 1 backend implementation (2026-08-16)
+## Latest handoff — Certification remediation (2026-08-16)
+
+**Branch**: `fix/v1-backend-cert-blockers`
+**Base SHA**: `e8308d82361e6df3c0928c4994ac0505a2e4235f`
+**Final SHA**: `910c05a` (see `git log e8308d8..910c05a` for the full diff)
+
+**Commits** (each pushed after its own test/lint/type-check pass):
+
+| SHA | Summary |
+|---|---|
+| `76ed328` | Event lifecycle: SETUP_INVALIDATED no longer overwrites SETUP_VALID history |
+| `45b548b` | Payload security: real streaming body-size limit, not Content-Length-only |
+| `11d975d` | Memory grounding: source_id now flows into assistant grounding context |
+| `d478172` | Real voice path: STT->assistant->TTS proof test with actual local models |
+| `d611723` | Ruff: resolved remaining `apps/backend/run.py` E402 violations |
+| `910c05a` | This handoff |
+
+Not merged into `feature/v1-integration`, `integration/v1`, or `main` —
+that remains a coordinator/Codex decision.
+
+**Work completed** — fixed five Codex-identified backend certification
+blockers, scoped strictly to `apps/backend/` plus the two shared-test call
+sites that encoded the bugs being fixed (see below):
+
+1. **Event lifecycle / invalidation** (`app/routers/events.py`). The
+   invalidate endpoint reused the original event's `event_id`; since
+   `trading_events.event_id` is the primary key behind an
+   `INSERT OR REPLACE` upsert, invalidating a setup silently destroyed its
+   `SETUP_VALID` row. Fixed by letting the invalidated event get its own
+   unique `event_id` (the model default), correlating back to the original
+   via an `ORIGINAL_EVENT_ID:<uuid>` reason code (the frozen trading-event
+   contract has no dedicated correlation field — not touched).
+   Regression test: `tests/test_events_api.py::test_invalidation_preserves_prior_history_as_distinct_events`
+   drives `SETUP_DEVELOPING -> SETUP_VALID -> SETUP_INVALIDATED` over the
+   real HTTP API and asserts three distinct `event_id`s, all three still
+   present in history, and active state cleared.
+   `tests/acceptance/test_runtime.py::test_event_lifecycle_reaches_two_clients_and_persists`
+   (Codex-owned, shared) asserted the old, buggy id-reuse behavior; updated
+   it to match by symbol instead of a pre-known id (the new id is
+   server-generated) and added an explicit "SETUP_VALID still in history"
+   check. Verified against a live `python apps/backend/run.py` process with
+   `TARS_ACCEPTANCE=1`.
+
+2. **Payload security** (`app/body_limit.py`, `app/main.py`). The old
+   middleware only compared the declared `Content-Length` header against
+   1 MiB — a no-op for chunked transfer encoding, which never sends that
+   header. Replaced with `MaxBodySizeMiddleware`, a raw ASGI middleware
+   that counts bytes as uvicorn delivers them via `receive()` (the same
+   representation for Content-Length- and chunked-framed bodies) and
+   aborts as soon as the running total exceeds the cap, without ever
+   buffering the oversized body. The abort signal (`RequestBodyTooLarge`)
+   is a `BaseException`, not `Exception`, subclass so it can't be silently
+   swallowed by a route's broad `except Exception` around body reading
+   (confirmed this actually happens in `events.py`'s JSON-parse handler
+   during testing — an `Exception` subclass got turned into an unrelated
+   422). Verified against both `TestClient` and a live uvicorn process
+   with a real chunked-transfer request (no `Content-Length` header sent).
+   Regression tests: `tests/test_payload_limit.py` (normal payload passes,
+   Content-Length-declared oversized payload rejected, chunked oversized
+   payload rejected, chunked under-limit payload reaches the route).
+
+3. **Memory grounding / source traceability** (`assistant/grounding.py`).
+   `build_system_context` dropped `source_id` (the vault file path /
+   conversation `message_id`) from retrieved FTS notes before handing them
+   to the assistant provider — only the generic `source` type
+   ("vault"/"conversation") survived, so a grounded answer could never be
+   attributed to which specific note backed it. Fixed by passing
+   `source_id` through and instructing the provider to cite it. No change
+   to the frozen assistant-message contract (no field exists for
+   memory-note citations; traceability lives in the grounding text, not
+   response metadata — this was evaluated and doesn't rise to "genuine
+   blocker" for a contract change). Regression tests:
+   `tests/test_assistant_grounding.py` — `source_id` survives into the
+   context payload sent to the provider (verified with a stub provider
+   that echoes back what it received), and absent-information disclosure
+   for both empty and irrelevant retrieval.
+
+4. **Real voice backend path** (`tests/test_voice_end_to_end_real.py`).
+   The existing implementation (`voice/pipeline.py`,
+   `voice/pipecat_bridge.py`, `voice/pipecat_services.py`,
+   `voice/providers/faster_whisper_stt.py`,
+   `voice/providers/kokoro_tts.py`) was already architecturally correct —
+   real STT -> `AssistantRouter` -> real TTS, no canned phrases — so no
+   production code changed here. Added a proof test using actual model
+   weights: Kokoro synthesizes "What setups require my attention?" into a
+   real WAV fixture, faster-whisper independently transcribes it, the
+   transcription (not the hardcoded phrase) is sent through
+   `AssistantRouter` over the real `/api/v1/assistant/query` HTTP
+   endpoint, and the reply is synthesized back to playable audio. A
+   second, distinct control phrase must decode to distinct text — a
+   bypassed/canned STT stage would return identical text regardless of
+   audio, so the test fails in that case. **Executed with real models in
+   this environment**: `faster-whisper==1.2.1` and `kokoro-onnx==0.5.0`
+   installed successfully and both model weights downloaded and ran (CPU,
+   `base`/`af_heart`). `pipecat-ai` (the realtime WebSocket voice session)
+   was *not* installed/exercised this session — heavier dependency, and
+   the proof requirement only concerns the STT->assistant->TTS data path,
+   not the realtime transport; `voice/pipeline.py` etc. were reviewed by
+   inspection only, not executed. `scipy` added to
+   `requirements-voice.txt` as a test-only dependency (resamples Kokoro's
+   24kHz output to whisper's 16kHz input).
+
+5. **Ruff**: `apps/backend/run.py` had 2 pre-existing E402 violations
+   (sys.path manipulation before `import uvicorn`/`app.config`, which is
+   necessary when run as a script). Fixed with targeted `# noqa: E402` on
+   those two lines rather than disabling the rule project-wide.
+   `ruff check .` from `apps/backend/` is now clean.
+
+**Files changed**: `apps/backend/app/main.py`, `apps/backend/app/body_limit.py`
+(new), `apps/backend/app/routers/events.py`, `apps/backend/assistant/grounding.py`,
+`apps/backend/run.py`, `apps/backend/requirements-voice.txt`,
+`apps/backend/tests/test_events_api.py`, `apps/backend/tests/test_payload_limit.py`
+(new), `apps/backend/tests/test_assistant_grounding.py` (new),
+`apps/backend/tests/test_voice_end_to_end_real.py` (new); plus
+`tests/acceptance/test_runtime.py` (Codex-owned — edited only to correct
+an assertion that encoded the event-lifecycle bug being fixed; flagged
+here rather than left silently unowned). This handoff file only under
+shared coordination docs.
+
+**Tests run**:
+
+- `python -m pytest apps/backend/tests` — **75 passed, 0 skipped** (up
+  from 61 passed/1 skipped at session start — the previously-optional
+  `test_voice_real_adapters.py` cases now execute for real since
+  faster-whisper/kokoro-onnx are installed in this environment).
+- `ruff check .` (from `apps/backend/`) — **clean**.
+- `mypy .` (from `apps/backend/`, using its own `pyproject.toml`) —
+  **clean, 57 source files**. (Note: running `mypy apps/backend` from the
+  repo root instead picks up no config and reports ~20 spurious
+  `import-untyped`/`import-not-found` errors for packages the project
+  deliberately leaves untyped/optional, e.g. `pipecat`, `openwakeword`,
+  `jsonschema` — always run mypy from `apps/backend/` or with
+  `--config-file apps/backend/pyproject.toml`.)
+- `python -m pytest tests -q` (Codex's contract/unit suite) —
+  **39 passed, 15 skipped, 1 failed**. The one failure
+  (`tests/contracts/test_codegen_drift.py::test_generated_contracts_have_no_drift`)
+  is a pre-environment gap unrelated to this session's changes: it shells
+  out to `npm ci --prefix tools/codegen`, and `tools/codegen/node_modules`
+  was never installed in this workspace. Confirmed pre-existing via
+  `git stash` before investigating further — not a regression.
+- Targeted acceptance tests against a manually-started live
+  `python apps/backend/run.py` process with `TARS_ACCEPTANCE=1`:
+  `test_event_lifecycle_reaches_two_clients_and_persists`,
+  `test_websocket_disconnect_then_reconnect`,
+  `test_unexpected_event_field_is_rejected`,
+  `test_oversized_payload_is_rejected`, `test_no_live_trade_execution_surface`,
+  `test_voice_reports_real_local_provider_path`,
+  `test_assistant_refuses_to_invent_missing_trading_data`,
+  `test_public_event_response_cannot_bypass_contract` — **all passed**.
+  The *full* `tools/run_acceptance.py` suite (15/15) was not re-run:
+  `apps/web/node_modules` is not installed in this workspace, and
+  installing/running the frontend is out of scope for a backend-only
+  remediation session per the task's "do not modify frontend files"
+  instruction.
+
+**Known limitations**:
+
+- **Python version**: this machine has Python 3.13.3 and 3.7 installed,
+  no 3.12 (`py -0p` confirms). All validation above ran under **3.13.3**.
+  The project's `pyproject.toml` target (`py312`/mypy `python_version =
+  "3.12"`) was left unchanged. This is *not* a certification of Python
+  3.12 compatibility — someone with a 3.12 interpreter should re-run
+  `pytest`/`ruff`/`mypy` before treating this as 3.12-verified.
+  faster-whisper/kokoro-onnx/scipy installed successfully on 3.13 in this
+  environment; that says nothing about 3.12 specifically.
+- `pipecat-ai` (realtime voice WebSocket session) remains uninstalled and
+  unexercised this session — `voice/pipeline.py`,
+  `voice/pipecat_bridge.py`, `voice/pipecat_services.py` were reviewed by
+  code inspection only, found architecturally correct (no canned
+  phrases/faked success anywhere in the chain), but not run.
+- `tools/codegen` npm deps and `apps/web` npm deps are both uninstalled in
+  this workspace, so the codegen-drift test and the full black-box
+  acceptance suite (which needs a live frontend) could not be run this
+  session. Backend-only acceptance checks were run individually against a
+  manually-started backend instead (see Tests run above).
+
+**Exact dependencies required from other agents**: none — this was a
+backend-only remediation pass against blockers Codex already identified.
+If Codex re-certifies, the event-lifecycle broadcast for an invalidated
+setup now carries a **new** `event_id` (not the original's); any external
+consumer/tooling that assumed id-reuse (as `tests/acceptance/test_runtime.py`
+did) should match by symbol instead, per the fix in commit `76ed328`.
+
+**Next recommended action**: Codex re-certifies against
+`fix/v1-backend-cert-blockers`. Before merging toward `integration/v1`,
+someone should (a) validate under an actual Python 3.12 interpreter, (b)
+install `apps/web` and `tools/codegen` npm deps and run the full
+`tools/run_acceptance.py` 15-case suite plus the codegen-drift check, and
+(c) optionally install `pipecat-ai` and exercise the realtime voice
+WebSocket session directly (this session only proved the STT->assistant->TTS
+data path, not the realtime transport around it).
+
+---
+
+## Wave 1 backend implementation (2026-08-16)
 
 **Branch**: `feature/v1-backend-voice`
 **Base SHA**: `ad6f4bf6bd4dcb5c4039450dc8b8540ce63108e7` (tip of `integration/v1` at session start)

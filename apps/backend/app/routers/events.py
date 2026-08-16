@@ -1,7 +1,6 @@
 ﻿from __future__ import annotations
 
 from typing import Any
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -93,8 +92,13 @@ async def invalidate_event(
     except Exception:
         pass
 
+    # A new, unique event_id — never the original's. `trading_events.event_id`
+    # is the primary key and `EventService._persist` upserts by it, so reusing
+    # the original id would overwrite (destroy) the SETUP_VALID row it is
+    # invalidating instead of appending a new historical event. The original
+    # is preserved for audit/correlation purposes as a reason code instead,
+    # since the frozen trading-event contract has no dedicated field for it.
     invalidated_event = TradingEvent(
-        event_id=UUID(original["event_id"]),
         source=EventSource.manual,
         symbol=original["symbol"],
         strategy_id=original.get("strategy_id"),
@@ -106,7 +110,7 @@ async def invalidate_event(
         risk_reward=original.get("risk_reward"),
         risk_percent=original.get("risk_percent"),
         validation_status=ValidationStatus.INVALID,
-        reason_codes=reason_codes,
+        reason_codes=[*reason_codes, f"ORIGINAL_EVENT_ID:{original['event_id']}"],
         warnings=original.get("warnings", []),
         expires_at=original.get("expires_at"),
     )
