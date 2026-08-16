@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -19,11 +20,11 @@ def configure_real_backend(context) -> None:
     websocket_url = base_url.replace("http://", "ws://", 1).replace(
         "https://", "wss://", 1
     ) + "/ws"
+    settings = json.dumps(
+        {"apiEndpoint": base_url, "serverEndpoint": websocket_url}
+    )
     context.add_init_script(
-        """settings => localStorage.setItem(
-            'tars_settings_v1', JSON.stringify(settings)
-        )""",
-        {"apiEndpoint": base_url, "serverEndpoint": websocket_url},
+        f"localStorage.setItem('tars_settings_v1', JSON.stringify({settings}));"
     )
 
 

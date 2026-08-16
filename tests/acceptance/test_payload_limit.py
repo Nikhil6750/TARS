@@ -22,6 +22,9 @@ class RawResponse:
 
 def oversized_json(event: dict[str, Any]) -> bytes:
     event["warnings"] = ["PAYLOAD-LIMIT-REGRESSION-" + "X" * ONE_MIB]
+    # If the byte limiter is broken, strict schema validation must still keep
+    # this request from persisting and polluting later acceptance scenarios.
+    event["certification_extra_field"] = True
     payload = json.dumps(event, separators=(",", ":")).encode("utf-8")
     assert len(payload) > ONE_MIB
     return payload
