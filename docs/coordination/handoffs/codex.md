@@ -1,7 +1,7 @@
 # Handoff — Codex
 
-Owned directories: `tests/`, `scripts/` (contract verification + automated
-quality/integration harness). Only Codex edits this file. See
+Owned directories: `tests/`, `tools/` (contract and acceptance
+verification, integration/quality harness). Only Codex edits this file. See
 [AGENTS.md](../../../AGENTS.md) for the full handoff protocol.
 
 Update this file at the end of every session, using the template below.

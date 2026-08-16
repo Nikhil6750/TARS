@@ -97,10 +97,14 @@ redesign — only a new event source.
 
 ## Recommended V1 architecture (summary)
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for full detail.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full detail; this stack was
+amended after bootstrap (see [DECISIONS.md](DECISIONS.md) ADR-010 onward) to
+make the required core path entirely free/local.
 
-- Python 3.12, FastAPI backend
-- React + TypeScript frontend, Vite, responsive/mobile-first, PWA-ready
+- Python 3.12, FastAPI backend (Pydantic models, WebSocket for live events)
+- One React + TypeScript + Vite frontend, wrapped by Tauri 2 for desktop and
+  shipped as an installable/responsive PWA for iPhone — not two separate UI
+  codebases
 - WebSocket for live events
 - SQLite only, for lightweight TARS state/history (not for strategy
   research data — that belongs to `quant_brain`)
@@ -115,21 +119,20 @@ Voice architecture must be provider-neutral, defined behind interfaces:
 - `AssistantProvider`
 - `TextToSpeechProvider`
 
-Planned implementations:
+Full implementation detail (Pipecat orchestration, openWakeWord, Silero VAD,
+faster-whisper, Fish Speech/Kokoro) lives in
+[ARCHITECTURE.md](ARCHITECTURE.md#voice-orchestration). Product-level
+constraints, unchanged by the stack amendment:
 
-- **Wake word**: "TARS". Laptop: openWakeWord or another local provider via
-  an adapter. If a reliable custom "TARS" wake-word model cannot be produced
-  immediately, retain a push-to-talk/hotkey fallback — never block V1 on a
-  perfect wake-word model.
+- **Wake word**: "TARS". Push-to-talk and keyboard activation are
+  guaranteed fallbacks regardless of wake-word reliability — never block V1
+  on a perfect wake-word model.
 - **iPhone**: do NOT claim background wake-word listening works — iOS
   restricts this. V1 iPhone support is push-to-talk and/or in-app listening
   while the web app is foregrounded, plus spoken responses.
-- **Speech-to-text**: provider adapter; OpenAI transcription is the initial
-  implementation.
-- **Assistant**: Claude/Anthropic adapter.
-- **TTS**: Fish Audio adapter.
-- Every external voice service must have a mock/local fallback so the
-  application runs fully without any API keys.
+- Every external/paid voice service must have a mock/local fallback so the
+  application runs fully without any API keys — the default STT/TTS/wake-word
+  path is local, not merely mock.
 
 ## Trading event contract (summary)
 

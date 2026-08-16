@@ -1,9 +1,9 @@
 # Handoff — Antigravity
 
-Owned directory: `frontend/`. Only Antigravity edits this file. See
+Owned directory: `apps/web/`. Only Antigravity edits this file. See
 [AGENTS.md](../../../AGENTS.md) for the full handoff protocol.
 
-Update this file at the end of every session working on `frontend/`, using
+Update this file at the end of every session working on `apps/web/`, using
 the template below. Keep only the latest handoff at the top; older entries
 may be kept below a `---` separator for history, but are not required
 reading for the next session (`CURRENT_STATE.md` is authoritative for that).

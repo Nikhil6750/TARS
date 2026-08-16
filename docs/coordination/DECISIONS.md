@@ -115,3 +115,205 @@ scaffolding) is committed directly to a new `integration/v1` branch, since
 from once parallel implementation begins, without prematurely deciding
 `main`'s trunk contents.
 **Status**: Accepted.
+
+---
+
+## Architecture amendment (2026-08-16) — free/local-first production stack
+
+A deeper tool audit, performed after the bootstrap was approved but before
+parallel implementation began, changed several implementation choices
+below. This amendment was committed on branch
+`feature/architecture-free-stack`, branched from `integration/v1` at
+`bd7b745927a35b7b2ae11d2facae3ac6a685e1e7`. It does not reverse any
+non-negotiable boundary from ADR-001, ADR-003, ADR-004, ADR-006, or ADR-007
+— those stand unchanged. It supersedes implementation-level specifics in
+ADR-002, ADR-005, and ADR-008, as noted per-ADR below.
+
+## ADR-010: Desktop ships as Tauri 2 wrapping one shared React codebase; supersedes part of ADR-002
+
+**Date**: 2026-08-16
+**Decision**: Desktop is React + TypeScript + Vite wrapped by **Tauri 2**.
+iPhone is the *same* React application, shipped as an installable/responsive
+PWA. There is exactly one frontend codebase — never two independent UI
+implementations for desktop vs. iPhone. Backend stack (Python 3.12,
+FastAPI, WebSocket, SQLite) is unchanged from ADR-002; Pydantic models are
+now explicit.
+**Why**: A plain browser-only frontend under-serves the laptop experience
+(no native notifications, no offline packaging); building a second native
+desktop UI would violate "one source of truth" and double frontend
+maintenance. Tauri gives a native shell around the same React app the
+iPhone already needs.
+**Status**: Accepted. Supersedes ADR-002's "React + TypeScript frontend...
+responsive/mobile-first, PWA-ready" insofar as it now explicitly includes a
+Tauri 2 desktop shell around that same codebase; the backend portion of
+ADR-002 is unchanged.
+
+## ADR-011: Voice stack is Pipecat + openWakeWord + Silero VAD + faster-whisper + Fish Speech/Kokoro; supersedes ADR-005's adapter list
+
+**Date**: 2026-08-16
+**Decision**: Real-time conversational voice is orchestrated by **Pipecat**
+over WebRTC / a Pipecat-supported self-hosted transport. Wake word is
+**openWakeWord** (phrase: "TARS"), VAD is **Silero VAD**, STT is
+**faster-whisper** running locally, TTS's primary candidate is **Fish
+Speech** running locally with **Kokoro** as a lightweight
+alternative/fallback. Push-to-talk and keyboard activation remain
+guaranteed fallbacks regardless of wake-word reliability. Hosted adapters
+(OpenAI STT, Fish Audio hosted TTS) may exist later as optional, non-default
+providers. The `WakeWordProvider`, `SpeechToTextProvider`,
+`TextToSpeechProvider` interfaces from ADR-005 are retained unchanged; only
+the concrete default adapters change.
+**Why**: The prior default adapters (OpenAI STT, Fish Audio hosted TTS)
+required paid API keys for the core voice loop, contradicting the
+requirement that the core runtime work free/local. Pipecat gives a
+maintained orchestration layer instead of hand-rolling one.
+**Status**: Accepted. Supersedes ADR-005's specific adapter choices for STT
+and TTS (OpenAI, Fish Audio hosted) as the *default* path — those become
+optional adapters. ADR-005's interface list and "every interface must ship a
+mock/local implementation" requirement are unchanged and reaffirmed.
+
+## ADR-012: Assistant providers are ClaudeCodeProvider, OllamaProvider, optional AnthropicAPIProvider; supersedes ADR-005's assistant adapter
+
+**Date**: 2026-08-16
+**Decision**: `AssistantProvider` implementations are `ClaudeCodeProvider`
+(rides the user's own authenticated Claude Code environment — a
+high-intelligence option for personal installs, not an Anthropic API call),
+`OllamaProvider` (local/offline runtime for open-weight models — Claude does
+**not** run inside Ollama, the two are independent adapters), and an
+optional `AnthropicAPIProvider` for installs that choose to configure a
+paid key. Routing is conceptual, not literal LLM-for-everything: deterministic
+command/state requests resolve in deterministic code; simple language
+transformation may use the local model; complex research/reasoning goes to
+the stronger configured provider. Trading facts always come from
+deterministic TARS/quant_brain state, never model invention.
+**Why**: ADR-005 named a single "Claude/Anthropic adapter" without
+distinguishing a free path (Claude Code, Ollama) from a paid one (direct
+Anthropic API), and without stating that not every command needs a model
+call at all. This ADR makes the free/local path the default and the paid
+path explicitly optional.
+**Status**: Accepted. Supersedes ADR-005's "Claude/Anthropic adapter
+(initial)" language for `AssistantProvider`; the `AssistantProvider`
+interface itself is unchanged.
+
+## ADR-013: Memory architecture — SQLite + Obsidian vault + FTS5, with explicit boundaries
+
+**Date**: 2026-08-16
+**Decision**: Operational truth lives in SQLite. Human-readable knowledge
+lives in an Obsidian-compatible Markdown vault. Search is SQLite FTS5, plus
+optional local semantic retrieval via `sqlite-vec` or an equivalent
+lightweight local extension, added only if justified by measurement — no
+standalone vector database introduced speculatively. Embedding models used
+for semantic retrieval must be local and provider-neutral. Explicit
+boundaries are maintained between: operational state, research knowledge,
+conversation memory, trading journal, and strategy/experiment records (the
+latter two remain `quant_brain`'s domain, referenced not duplicated). Memory
+text is never used as proof of trading performance.
+**Why**: Without an explicit boundary model, conversation memory or
+free-text notes could get treated as if they were validated trading
+history, which would violate ADR-001's quant_brain boundary. Naming the
+boundary now, before implementation, prevents that drift.
+**Status**: Accepted. New decision, not a supersession — ADR-002's "SQLite
+for lightweight TARS state/history only" is the operational-state layer of
+this fuller model.
+
+## ADR-014: Connectivity via Tailscale Serve, not Funnel
+
+**Date**: 2026-08-16
+**Decision**: Tailscale Serve is the preferred private method for reaching
+the laptop-hosted TARS instance from the user's iPhone. Tailscale Funnel
+(public exposure) is not used for normal TARS operation. LAN-based
+development access remains supported.
+**Why**: TARS holds trading-related information and should not be reachable
+from the public internet by default; Tailscale Serve gives private
+device-to-device access without requiring any public exposure or a hosted
+relay TARS would need to trust.
+**Status**: Accepted.
+
+## ADR-015: Notifications are outputs only — Tauri native + PWA Web Push
+
+**Date**: 2026-08-16
+**Decision**: Windows notifications go through the Tauri/native notification
+layer; iPhone notifications go through PWA Web Push where supported.
+Notifications are strictly outputs of the event-driven trading-event
+stream — never a mechanism that decides trading logic.
+**Why**: Keeps the notification layer thin and prevents it from becoming a
+second, informal decision path outside `quant_brain`/the event contract.
+**Status**: Accepted.
+
+## ADR-016: APScheduler for housekeeping only; event-driven stays primary for live setups
+
+**Date**: 2026-08-16
+**Decision**: A lightweight local scheduler (APScheduler or an equivalently
+stable alternative) handles periodic non-live work: morning/end-of-day
+summaries, research housekeeping, journal tasks, maintenance. Scheduled
+polling is not used as the primary mechanism for live trade setups when an
+event-driven source (the WebSocket trading-event stream) already exists.
+**Why**: Prevents polling from silently becoming the real setup-detection
+mechanism by accretion — the event-driven contract is the source of truth
+for live setups.
+**Status**: Accepted.
+
+## ADR-017: OpenTelemetry required (lightweight), Langfuse optional, no secrets logged
+
+**Date**: 2026-08-16
+**Decision**: Backend is instrumented with OpenTelemetry. Langfuse
+integration is optional, not required for V1. No large self-hosted
+observability infrastructure is required for V1. TARS must be able to log
+assistant requests, retrieved context identifiers, tool calls, tool result
+metadata, latency, and errors — and must never log secrets.
+**Why**: Debuggability of the assistant/voice pipeline matters from day
+one, but standing up a heavy observability stack would contradict the
+free/local-first, low-infrastructure goal of V1.
+**Status**: Accepted.
+
+## ADR-018: ESP32 future architecture — ESP32-S3, MQTT, LVGL; no firmware this stage
+
+**Date**: 2026-08-16
+**Decision**: The planned physical client is an ESP32-S3 board with
+integrated display (no touchscreen required; physical buttons/encoder may
+be added later; no breadboard required for the core device — breadboards
+are optional prototyping tools for external peripherals only). Transport is
+MQTT via Mosquitto or a compatible broker. GUI is LVGL. It consumes the same
+`contracts/trading-event.schema.json` events as other clients. Firmware is
+not implemented in this or the prior stage.
+**Why**: Names the target hardware/transport/GUI stack now so the event
+contract and backend are never designed in a way that assumes a browser,
+without pulling ESP32 work forward into active scope.
+**Status**: Accepted, deferred implementation.
+
+## ADR-019: Repository layout renamed to apps/backend/ and apps/web/; Codex ownership includes tests/ and tools/; supersedes ADR-008's directory names
+
+**Date**: 2026-08-16
+**Decision**: Source directories are renamed: `backend/` → `apps/backend/`
+(Claude Code), `frontend/` → `apps/web/` (Antigravity, containing the
+shared React app plus its Tauri 2 shell). Codex's owned directories are
+`tests/` and `tools/`. The ownership *principle* from ADR-008 — one agent
+per directory, no two agents share a directory, contracts/docs read-only
+during parallel work — is unchanged.
+**Why**: `apps/` groups the two deployable applications (backend, web)
+under one parent now that web includes both a PWA and a Tauri desktop
+shell; `tools/` gives Codex a home for harness scripts distinct from
+`tests/` itself.
+**Status**: Accepted. Supersedes only the directory *names* in ADR-008; the
+ownership principle and read-only rule for `contracts/`/`docs/coordination/`
+are reaffirmed unchanged.
+
+## ADR-020: Permanent Git workflow rules
+
+**Date**: 2026-08-16
+**Decision**: From this point forward: never implement features directly on
+`main`; never implement features directly on `integration/v1` except
+explicit integration work; every feature/phase/meaningful sub-feature/
+architectural change gets its own feature branch off `integration/v1`; each
+completed logical unit gets one meaningful commit; push after the unit
+passes its relevant validation; no empty/noise commits; do not squash
+development history when merging `integration/v1` into `main` unless the
+user explicitly requests it; never modify git `user.name`/`user.email`;
+never fabricate authorship; every handoff entry must contain branch +
+commit SHA.
+**Why**: Once three agents work in parallel, undisciplined branching or
+direct commits to shared branches produce merge conflicts and unclear
+history; these rules were made explicit and permanent before parallel work
+starts, not after the first conflict.
+**Status**: Accepted, permanent. Recorded in full in `AGENTS.md` § Git
+workflow, which is the operational copy agents should follow day-to-day —
+this ADR is the decision record for *why*.

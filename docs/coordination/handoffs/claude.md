@@ -1,9 +1,9 @@
 # Handoff — Claude Code
 
-Owned directory: `backend/`. Only Claude Code edits this file. See
+Owned directory: `apps/backend/`. Only Claude Code edits this file. See
 [AGENTS.md](../../../AGENTS.md) for the full handoff protocol.
 
-Update this file at the end of every session working on `backend/`, using
+Update this file at the end of every session working on `apps/backend/`, using
 the template below. Keep only the latest handoff at the top; older entries
 may be kept below a `---` separator if useful for history, but are not
 required reading for the next session (`CURRENT_STATE.md` is authoritative

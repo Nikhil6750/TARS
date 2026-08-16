@@ -20,6 +20,19 @@ dist-ssr/
 .vite/
 *.local.js
 
+# Tauri / Rust (apps/web/src-tauri)
+src-tauri/target/
+target/
+
+# Local model weights / voice model artifacts (faster-whisper, Fish Speech, Kokoro, openWakeWord)
+*.onnx
+*.gguf
+*.bin
+models/
+
+# Obsidian-compatible knowledge vault (personal data, not source)
+/vault/
+
 # SQLite data
 *.db
 *.sqlite
