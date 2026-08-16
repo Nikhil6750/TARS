@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "00000000-0000-4000-8000-000000000004",
+  "timestamp": "2026-08-16T08:03:00Z",
+  "source": "mock",
+  "symbol": "XAUUSD",
+  "strategy_id": "breakout-v1",
+  "state": "SETUP_INVALIDATED",
+  "direction": "LONG",
+  "entry": 2450.5,
+  "stop_loss": 2442.25,
+  "take_profit": 2467.0,
+  "risk_reward": 2.0,
+  "risk_percent": 0.5,
+  "validation_status": "INVALID",
+  "reason_codes": ["STRUCTURE_BROKEN"],
+  "warnings": ["Setup is no longer actionable."],
+  "expires_at": null
+}

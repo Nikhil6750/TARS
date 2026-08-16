@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "00000000-0000-4000-8000-000000000001",
+  "timestamp": "2026-08-16T08:00:00Z",
+  "source": "mock",
+  "symbol": "TARS",
+  "strategy_id": null,
+  "state": "IDLE",
+  "direction": "NONE",
+  "entry": null,
+  "stop_loss": null,
+  "take_profit": null,
+  "risk_reward": null,
+  "risk_percent": null,
+  "validation_status": "EXPIRED",
+  "reason_codes": [],
+  "warnings": [],
+  "expires_at": null
+}
