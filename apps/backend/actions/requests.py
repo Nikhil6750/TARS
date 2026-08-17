@@ -20,8 +20,14 @@ _ALLOWED_CONTEXT_FIELDS = {
     "window_title",
     "window_bounds",
     "captured_at",
+    "window_state",
+    "monitor",
+    "focused_control",
+    "source",
 }
 _ALLOWED_BOUNDS_FIELDS = {"x", "y", "width", "height"}
+_ALLOWED_MONITOR_FIELDS = {"x", "y", "width", "height", "is_primary"}
+_ALLOWED_FOCUSED_CONTROL_FIELDS = {"control_type", "name", "automation_id", "class_name"}
 _FOCUS = re.compile(r"^\s*focus\s+(?:the\s+)?(?P<target>[\w .()-]+?)\s*$", re.I)
 _LAUNCH = re.compile(r"^\s*(?:launch|start)\s+(?:the\s+)?(?P<target>[\w .()\\:-]+?)\s*$", re.I)
 _OPEN_URL = re.compile(r"^\s*open\s+(?P<url>https?://\S+)\s*$", re.I)
@@ -141,4 +147,19 @@ def _validate_context_shape(active_context: Any) -> None:
         if not isinstance(bounds, dict) or set(bounds) != _ALLOWED_BOUNDS_FIELDS:
             raise AssistantActionError(
                 "window_bounds must contain x, y, width and height only"
+            )
+    monitor = active_context.get("monitor")
+    if monitor is not None:
+        if not isinstance(monitor, dict) or set(monitor) != _ALLOWED_MONITOR_FIELDS:
+            raise AssistantActionError(
+                "monitor must contain x, y, width, height and is_primary only"
+            )
+    focused_control = active_context.get("focused_control")
+    if focused_control is not None:
+        if not isinstance(focused_control, dict) or set(
+            focused_control
+        ) - _ALLOWED_FOCUSED_CONTROL_FIELDS:
+            raise AssistantActionError(
+                "focused_control has forbidden fields; only control_type, name, "
+                "automation_id and class_name are allowed"
             )
