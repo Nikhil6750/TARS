@@ -4,7 +4,7 @@
   "stream": "native_shell",
   "agent": "Antigravity",
   "branch": "feature/wave2-native-shell",
-  "commit_sha": "7f47480a26e4930eabd3ccd521ac25c1429a3555",
+  "commit_sha": "d725ee56f993f1e4f11327453d9d37623849ce71",
   "features": {
     "background_persistence": {
       "status": "IMPLEMENTED",

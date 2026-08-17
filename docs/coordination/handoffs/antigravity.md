@@ -14,7 +14,7 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 **Status**: COMPLETE — Windows-native desktop shell, system tray lifecycle, Win32 active foreground window bridge, compact HUD overlay, Action Runtime client, confirmation/deny cards, and real ActionResult rendering fully built and verified.
 **Branch**: `feature/wave2-native-shell`
-**Commit SHA**: `7f47480a26e4930eabd3ccd521ac25c1429a3555`
+**Commit SHA**: `d725ee56f993f1e4f11327453d9d37623849ce71`
 **MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231
 **Windows SDK**: Windows 10.0.26200 x86_64 SDK
 **Cargo Target**: `D:\TARS-cache\cargo-target\release\tars-companion.exe`
