@@ -19,7 +19,7 @@ export const ActionConfirmationCard: React.FC<ActionConfirmationCardProps> = ({
   const [showDenyInput, setShowDenyInput] = useState(false);
 
   const commandArg = request.arguments.command ? String(request.arguments.command) : null;
-  const appArg = request.arguments.app_name ? String(request.arguments.app_name) : null;
+  const appArg = request.arguments.target ? String(request.arguments.target) : null;
   const urlArg = request.arguments.url ? String(request.arguments.url) : null;
 
   return (

@@ -13,6 +13,7 @@ import {
   RiskLevel,
 } from '../types/actions';
 import { validateActionRequest, validateActionResult } from '../contracts/action-validator';
+import { isTauri } from './tauri';
 
 export class ActionRuntimeClient {
   private apiEndpoint: string;
@@ -81,7 +82,7 @@ export class ActionRuntimeClient {
       return this.createRequest({
         skill: 'windows_app',
         action: 'focus',
-        arguments: { app_name: appName },
+        arguments: { target: appName },
         source,
         activeContext,
       });
@@ -95,7 +96,7 @@ export class ActionRuntimeClient {
       return this.createRequest({
         skill: 'windows_app',
         action: 'launch',
-        arguments: { app_name: appName },
+        arguments: { target: appName },
         source,
         activeContext,
       });
@@ -119,8 +120,11 @@ export class ActionRuntimeClient {
     if (fileSearchMatch) {
       return this.createRequest({
         skill: 'filesystem',
+        // The backend resolves a relative 'path' against the user's home
+        // directory (the only allowed search root), so '.' searches the
+        // whole home tree when the phrase doesn't name a directory.
         action: 'search',
-        arguments: { query: fileSearchMatch[1].trim() },
+        arguments: { path: '.', query: fileSearchMatch[1].trim() },
         source,
         activeContext,
       });
@@ -183,36 +187,119 @@ export class ActionRuntimeClient {
         } else {
           console.warn('[ActionRuntime] Received invalid ActionResult from backend:', resVal.errors);
         }
+      } else {
+        // The backend was reached and it rejected the request (e.g. 422 malformed
+        // request, 409 duplicate id) -- surface its real reason. This is not the
+        // "unreachable" case below and must never be relabeled as one.
+        const rejected = await this.resultFromHttpError(
+          request.id,
+          res,
+          `Action ${request.skill}.${request.action}() was rejected by the backend`
+        );
+        this.notifyResult(rejected, request);
+        return rejected;
       }
     } catch (err) {
-      console.info('[ActionRuntime] Backend action runtime not directly reachable, resolving via local runtime dispatch:', err);
+      console.info('[ActionRuntime] Backend action runtime not directly reachable:', err);
     }
 
-    // Grounded local resolution for offline/demo/native shell fallback
+    // The backend Action Runtime is the sole execution and permission authority.
+    // In the real native shell there is no safe local substitute for it: a skipped
+    // backend must never be reported to the user as executed, blocked, or approved,
+    // since none of that would have actually happened. Only the browser/PWA preview
+    // build (no native shell, used for UI development without a backend) may fall
+    // back to a simulated result.
+    if (isTauri()) {
+      const unreachable = this.backendUnreachableResult(request);
+      this.notifyResult(unreachable, request);
+      return unreachable;
+    }
+
     const localResult = this.resolveLocalAction(request);
     this.notifyResult(localResult, request);
     return localResult;
   }
 
   /**
-   * Confirm or Deny an action requiring user confirmation
+   * Truthful failure result used only when the native shell cannot reach the
+   * backend Action Runtime. Never claims execution, approval, or blocking occurred.
+   */
+  private backendUnreachableResult(request: ActionRequest): ActionResult {
+    const now = new Date().toISOString();
+    const result: ActionResult = {
+      schema_version: '1.0.0',
+      request_id: request.id,
+      status: 'FAILED',
+      risk_level: null,
+      summary: `Could not reach the backend Action Runtime for ${request.skill}.${request.action}(); nothing was executed.`,
+      data: {},
+      error: 'Backend action runtime unreachable',
+      started_at: now,
+      completed_at: now,
+    };
+    const val = validateActionResult(result);
+    if (!val.success) {
+      console.error('[ActionRuntime] Built invalid backend-unreachable result:', val.errors);
+    }
+    return result;
+  }
+
+  /**
+   * Truthful failure result built from a real (non-2xx) HTTP response, so a
+   * reachable-but-rejecting backend is never relabeled as "unreachable".
+   */
+  private async resultFromHttpError(
+    requestId: string,
+    res: Response,
+    fallbackSummary: string
+  ): Promise<ActionResult> {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body && typeof body.detail === 'string') detail = body.detail;
+    } catch {
+      // Non-JSON error body -- keep the generic HTTP status detail above.
+    }
+    const now = new Date().toISOString();
+    const result: ActionResult = {
+      schema_version: '1.0.0',
+      request_id: requestId,
+      status: res.status === 409 ? 'DENIED' : 'FAILED',
+      risk_level: null,
+      summary: `${fallbackSummary}: ${detail}`,
+      data: {},
+      error: detail,
+      started_at: now,
+      completed_at: now,
+    };
+    const validated = validateActionResult(result);
+    if (!validated.success) {
+      console.error('[ActionRuntime] Built invalid HTTP-error result:', validated.errors);
+    }
+    return result;
+  }
+
+  /**
+   * Confirm or deny an action awaiting confirmation. `confirmationToken` must be
+   * the token the backend issued in the CONFIRMATION_REQUIRED result's
+   * `data.confirmation_token` -- there is only one backend endpoint for both
+   * confirm and deny (`POST /actions/{id}/confirm` with `approved: boolean`);
+   * it accepts no other fields, so any `reason` is local-preview-only and never
+   * sent over the wire.
    */
   public async respondToConfirmation(
     requestId: string,
+    confirmationToken: string,
     approved: boolean,
     reason?: string
   ): Promise<ActionResult> {
     const originalRequest = this.inFlightRequests.get(requestId);
 
     try {
-      const endpoint = approved
-        ? `${this.apiEndpoint}/api/v1/actions/${requestId}/confirm`
-        : `${this.apiEndpoint}/api/v1/actions/${requestId}/deny`;
-
-      const res = await fetch(endpoint, {
+      const res = await fetch(`${this.apiEndpoint}/api/v1/actions/${requestId}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({ confirmation_token: confirmationToken, approved }),
       });
 
       if (res.ok) {
@@ -222,12 +309,39 @@ export class ActionRuntimeClient {
           this.notifyResult(resVal.data, originalRequest);
           return resVal.data;
         }
+      } else {
+        const rejected = await this.resultFromHttpError(
+          requestId,
+          res,
+          `Confirmation for action ${requestId.substring(0, 8)} was rejected by the backend`
+        );
+        this.notifyResult(rejected, originalRequest);
+        return rejected;
       }
     } catch (err) {
-      console.info('[ActionRuntime] Backend confirm/deny endpoint unreachable, applying local resolution:', err);
+      console.info('[ActionRuntime] Backend confirm endpoint unreachable:', err);
     }
 
-    // Local resolution for confirmation response
+    // The backend alone can revalidate and execute a confirmed action. In the real
+    // native shell, an unreachable backend must surface as a failure, never as a
+    // fabricated confirmed execution.
+    if (isTauri()) {
+      const unreachable: ActionResult = {
+        schema_version: '1.0.0',
+        request_id: requestId,
+        status: 'FAILED',
+        risk_level: null,
+        summary: `Could not reach the backend Action Runtime to resolve confirmation for action ${requestId.substring(0, 8)}; nothing was executed.`,
+        data: {},
+        error: 'Backend action runtime unreachable',
+        started_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+      };
+      this.notifyResult(unreachable, originalRequest);
+      return unreachable;
+    }
+
+    // Local resolution for confirmation response (browser/PWA preview only)
     const status: ActionStatus = approved ? 'SUCCEEDED' : 'DENIED';
     const error: string | null = approved ? null : (reason || 'User denied action confirmation');
     const summary = approved
@@ -311,7 +425,9 @@ export class ActionRuntimeClient {
   }
 
   /**
-   * Local grounded deterministic risk classification & simulation for offline/test environments
+   * Simulated result for the browser/PWA preview build only (no native shell, no
+   * backend expected). Never reached when running inside the real desktop shell —
+   * see the isTauri() guard in submitAction/respondToConfirmation above.
    */
   private resolveLocalAction(request: ActionRequest): ActionResult {
     const startedAt = new Date().toISOString();
@@ -325,11 +441,11 @@ export class ActionRuntimeClient {
       case 'windows_app':
         riskLevel = 'LOW_RISK';
         if (request.action === 'focus') {
-          const app = String(request.arguments.app_name || 'application');
+          const app = String(request.arguments.target || 'application');
           summary = `Focused application "${app}"`;
           data.focused_app = app;
         } else if (request.action === 'launch') {
-          const app = String(request.arguments.app_name || 'application');
+          const app = String(request.arguments.target || 'application');
           summary = `Launched application "${app}"`;
           data.launched_app = app;
         }

@@ -58,6 +58,9 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
 
   // Action Runtime States
   const [pendingConfirmation, setPendingConfirmation] = useState<ActionRequest | null>(null);
+  // The backend-issued token that must be presented back to confirm/deny --
+  // there is no other way to prove which pending confirmation this is.
+  const [pendingConfirmationToken, setPendingConfirmationToken] = useState<string | null>(null);
   const [latestResult, setLatestResult] = useState<ActionResult | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -91,9 +94,12 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
       setLatestResult(result);
       if (result.status === 'CONFIRMATION_REQUIRED' && request) {
         setPendingConfirmation(request);
+        const token = result.data?.confirmation_token;
+        setPendingConfirmationToken(typeof token === 'string' ? token : null);
       } else if (result.status !== 'CONFIRMATION_REQUIRED' && result.status !== 'PENDING') {
         if (pendingConfirmation && pendingConfirmation.id === result.request_id) {
           setPendingConfirmation(null);
+          setPendingConfirmationToken(null);
         }
       }
     });
@@ -126,6 +132,8 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
         const res = await actionRuntimeClient.submitAction(deterministicReq);
         if (res.status === 'CONFIRMATION_REQUIRED') {
           setPendingConfirmation(deterministicReq);
+          const token = res.data?.confirmation_token;
+          setPendingConfirmationToken(typeof token === 'string' ? token : null);
         }
       } else {
         // 2. Natural language query or prompt
@@ -154,18 +162,28 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
 
   // Handle Action Confirmation / Denial
   const handleConfirmAction = async (requestId: string) => {
+    if (!pendingConfirmationToken) {
+      console.error('[HUDOverlay] Confirm error: no confirmation token available for', requestId);
+      return;
+    }
     try {
-      await actionRuntimeClient.respondToConfirmation(requestId, true);
+      await actionRuntimeClient.respondToConfirmation(requestId, pendingConfirmationToken, true);
       setPendingConfirmation(null);
+      setPendingConfirmationToken(null);
     } catch (err) {
       console.error('[HUDOverlay] Confirm error:', err);
     }
   };
 
   const handleDenyAction = async (requestId: string, reason?: string) => {
+    if (!pendingConfirmationToken) {
+      console.error('[HUDOverlay] Deny error: no confirmation token available for', requestId);
+      return;
+    }
     try {
-      await actionRuntimeClient.respondToConfirmation(requestId, false, reason);
+      await actionRuntimeClient.respondToConfirmation(requestId, pendingConfirmationToken, false, reason);
       setPendingConfirmation(null);
+      setPendingConfirmationToken(null);
     } catch (err) {
       console.error('[HUDOverlay] Deny error:', err);
     }
@@ -282,7 +300,7 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
       {/* Quick Skill Action Pills */}
       <div className="grid grid-cols-4 gap-1.5 mb-2 shrink-0">
         <button
-          onClick={() => handleQuickSkill('windows_app', 'focus', { app_name: 'Notepad' })}
+          onClick={() => handleQuickSkill('windows_app', 'focus', { target: 'Notepad' })}
           className="flex items-center justify-center gap-1 py-1 px-1.5 bg-[#09111e] hover:bg-cyan-950/40 text-slate-300 hover:text-cyan-300 border border-slate-800 hover:border-cyan-500/40 rounded text-[10px] font-mono transition-colors truncate"
           title="Focus Notepad"
         >

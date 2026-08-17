@@ -13,14 +13,14 @@ describe('Wave 2A ActionRuntimeClient', () => {
     const req = client.createRequest({
       skill: 'windows_app',
       action: 'launch',
-      arguments: { app_name: 'calc.exe' },
+      arguments: { target: 'calc.exe' },
       source: 'hud',
     });
 
     expect(req.schema_version).toBe('1.0.0');
     expect(req.skill).toBe('windows_app');
     expect(req.action).toBe('launch');
-    expect(req.arguments.app_name).toBe('calc.exe');
+    expect(req.arguments.target).toBe('calc.exe');
     expect(req.source).toBe('hud');
     expect(typeof req.id).toBe('string');
   });
@@ -31,7 +31,7 @@ describe('Wave 2A ActionRuntimeClient', () => {
       expect(req).not.toBeNull();
       expect(req?.skill).toBe('windows_app');
       expect(req?.action).toBe('focus');
-      expect(req?.arguments.app_name).toBe('Notepad');
+      expect(req?.arguments.target).toBe('Notepad');
       expect(req?.source).toBe('deterministic');
     });
 
@@ -40,7 +40,7 @@ describe('Wave 2A ActionRuntimeClient', () => {
       expect(req).not.toBeNull();
       expect(req?.skill).toBe('windows_app');
       expect(req?.action).toBe('launch');
-      expect(req?.arguments.app_name).toBe('Calculator');
+      expect(req?.arguments.target).toBe('Calculator');
     });
 
     it('parses "open url https://tradingview.com" into deterministic browser.open_url ActionRequest', () => {
@@ -95,7 +95,7 @@ describe('Wave 2A ActionRuntimeClient', () => {
       expect(initialResult.completed_at).toBeNull();
 
       // User confirms execution
-      const confirmedResult = await client.respondToConfirmation(req.id, true);
+      const confirmedResult = await client.respondToConfirmation(req.id, 'test-token', true);
       expect(confirmedResult.status).toBe('SUCCEEDED');
       expect(confirmedResult.risk_level).toBe('CONFIRM_REQUIRED');
       expect(confirmedResult.completed_at).not.toBeNull();
@@ -110,7 +110,7 @@ describe('Wave 2A ActionRuntimeClient', () => {
 
       await client.submitAction(req);
 
-      const deniedResult = await client.respondToConfirmation(req.id, false, 'Command not authorized by user');
+      const deniedResult = await client.respondToConfirmation(req.id, 'test-token', false, 'Command not authorized by user');
       expect(deniedResult.status).toBe('DENIED');
       expect(deniedResult.error).toContain('not authorized');
       expect(deniedResult.completed_at).not.toBeNull();

@@ -13,7 +13,7 @@ describe('Wave 2A Action Contracts Validator', () => {
       id: '550e8400-e29b-41d4-a716-446655440000',
       skill: 'windows_app',
       action: 'focus',
-      arguments: { app_name: 'Notepad' },
+      arguments: { target: 'Notepad' },
       source: 'hud',
       active_context: {
         executable: 'notepad.exe',
