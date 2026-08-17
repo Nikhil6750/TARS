@@ -11,6 +11,255 @@ for that).
 
 ---
 
+## Latest handoff — Wave 2B: Windows context + desktop-control skills (2026-08-17)
+
+**Branch**: `feature/wave2b-context-windows`
+**Base SHA**: `877dde0bd5f93817b78566eb4c8e0f9a58106c4f` (`integration/wave2`,
+post Wave 2A/M2A merge, ADR-022)
+**Final SHA**: `644fbe4` (implementation+tests commit; this handoff and
+`docs/coordination/wave2/m2b/claude.done.json` land in a follow-up
+docs-only commit on the same branch — same convention as prior entries in
+this file).
+
+This is a **continuation of the Wave 2A architecture**, not a new one —
+`User/Voice/HUD/Context -> ActionRequest -> Action Runtime -> Permission
+Engine -> Skill Registry -> Windows skill -> ActionResult + Audit` is
+unchanged. Nothing in this session bypasses the Action Runtime or
+Permission Engine; there is no independent agent loop (Codex still owns
+orchestration/control runtime).
+
+**Work completed**:
+
+1. **Rich active-window context** — `app.action_contracts.ActiveWindowContext`
+   (and its mirror, `contracts/action-request.schema.json`'s
+   `$defs/active_window_context`) gained four new **optional** fields:
+   `window_state` (normal/minimized/maximized/unknown, via
+   `win32gui.IsIconic`/`IsZoomed`), `monitor` (geometry + `is_primary`, via
+   `win32api.MonitorFromWindow`/`GetMonitorInfo` — geometry only, no pixel
+   data), `focused_control` (identity metadata only — control type/name/
+   automation id/class name, **no value/content**, and `name` is omitted
+   entirely when the focused control `IsPassword`), and `source`
+   (`win32`/`ui_automation`, which capture path produced the context).
+   This is purely additive — `additionalProperties: false` blocks were
+   extended, not loosened, and `actions/requests.py`'s
+   `_ALLOWED_CONTEXT_FIELDS`/`_ALLOWED_MONITOR_FIELDS`/
+   `_ALLOWED_FOCUSED_CONTROL_FIELDS` allowlists moved in lockstep with the
+   schema and Pydantic model, per the existing "these three things drift
+   together or not at all" pattern the M2A explore report flagged.
+   **Deliberately excluded**: `selected_text` and clipboard content are
+   **not** fields on `ActiveWindowContext` — see point 4 below for why.
+2. **Windows UI Automation layer** — new `skills/_desktop_automation.py`.
+   Real UIA via the `uiautomation` package (comtypes-based COM interop,
+   not a mock/simulation layer): `resolve_window()` (reuses
+   `windows_app._find_window` for executable/title matching, or the
+   foreground window for "current"), `control_from_hwnd()`
+   (`auto.ControlFromHandle`), `walk_actionable_controls()` (bounded
+   BFS — depth-capped, count-capped, and separately visit-capped so a
+   pathological tree like File Explorer with thousands of items can't
+   cause unbounded work), `serialize_control()` (type/name/automation-id/
+   class-name/bounds/enabled/password-flag — `IsPassword` controls have
+   `name` redacted to `null`), and the actual pattern-driving functions:
+   `do_focus`/`do_invoke`/`do_type`/`do_select`/`do_scroll`, each calling
+   a real UIA pattern (`InvokePattern`/`TogglePattern`/
+   `LegacyIAccessiblePattern` for invoke; `ValuePattern`/
+   `LegacyIAccessiblePattern` for type; `SelectionItemPattern`/
+   `LegacyIAccessiblePattern` for select; `ScrollPattern` for scroll) —
+   **no blind-coordinate clicking, no keystroke simulation**, per the spec.
+   `read_selected_text()` uses `TextPattern.GetSelection()` and refuses
+   (raises) on a password control rather than reading it.
+   `read_clipboard_text()` uses `win32clipboard`'s `CF_UNICODETEXT` format
+   only, returning `None` (not an error) when the clipboard holds no text.
+3. **Control identity / `ControlHandleCache`** — UIA `Control` objects
+   aren't JSON-serializable or independently re-derivable by pointer, so
+   `list_controls`/`inspect_current_window` hand back an opaque
+   `control_id` (a random `uuid4().hex` token, not a pointer/runtime-id
+   encoding) that resolves through a small in-process cache: TTL 180s,
+   capped at 400 entries (oldest evicted first on overflow). This is
+   short-lived actionability state, not indefinite raw-UI-tree retention —
+   satisfies the "do not retain raw UI trees indefinitely" requirement
+   while still letting a follow-up `focus_control`/`invoke_control`/etc.
+   target the exact element it was just shown. An unknown/expired
+   `control_id` fails loudly (`SkillExecutionError` -> a real `FAILED`
+   `ActionResult`, "call list_controls again"), never silently no-ops.
+4. **`skills/desktop_control.py` (`DesktopControlSkill`)** — 9 actions:
+   `inspect_current_window`, `list_controls`, `focus_control`,
+   `invoke_control`, `type_into_control`, `select_control`,
+   `scroll_control`, `read_selected_text`, `read_clipboard`.
+   `inspect_current_window` **is** the "context snapshot" primitive from
+   the spec (active app, window title, up to `max_controls` visible
+   actionable controls [default 20, hard-capped 50], best-effort selected
+   text, and clipboard text **only** when `include_clipboard=true` is
+   explicitly passed) — bounded, ephemeral (returned in `ActionResult.data`,
+   not cached server-side), and clipboard/selected-text are opt-in per
+   call rather than silently attached, matching the spec's "clipboard
+   context through an explicit read action" and "do not silently scrape...
+   protected desktop content" requirements. `type_into_control` refuses
+   `mode="append"` on a password field (reading its current value to
+   concatenate would be exactly the scraping this is meant to prevent);
+   `mode="replace"` is allowed (the user directing the assistant to type
+   into a field they're looking at is a normal, one-directional action,
+   not a read).
+5. **Risk classification** — wired into `actions/permissions.py`'s
+   `_KNOWN_ACTION_POLICY["desktop_control"]`: `inspect_current_window`/
+   `list_controls`/`read_selected_text`/`read_clipboard` = `READ_ONLY`;
+   `focus_control`/`scroll_control` = `LOW_RISK`; `invoke_control`/
+   `type_into_control`/`select_control` = `CONFIRM_REQUIRED`. This is a
+   **required** explicit policy, not a convenience one — the permission
+   engine's generic verb-name fallback (`_STATE_CHANGING_ACTION` regex:
+   run/execute/write/create/update/install/uninstall/move/rename/copy/
+   send/post/upload/download) does **not** match `invoke_control`,
+   `type_into_control`, or `select_control`, so without this entry those
+   three would default to `READ_ONLY` — exactly the "typing/changing
+   application state must NOT be READ_ONLY" failure mode the spec warned
+   about. Verified directly (see Tests).
+6. **`skills/registry.py`** — `desktop_control` added to the eager
+   `SKILLS` dict (stateless aside from its own bounded control cache, same
+   category as the other four DB-independent skills).
+
+**Real Windows verification** (Windows 11, this sandbox — not mocked):
+launched a real `notepad.exe` against a uniquely-named temp file (modern
+Windows 11 Notepad is a single shared-process, multi-tab MSIX app — a
+plain `Popen(...).kill()` on the launcher stub does **not** close the tab,
+since the stub exits immediately after activating the shared host; test
+teardown closes precisely that test's own tab via its real "Close Tab" UIA
+button, never the shared process, so it can't disturb the user's other,
+unrelated open Notepad tabs — confirmed by re-diffing the window list
+before/after). Against that real window: `list_controls` found its actual
+`DocumentControl` ("Text editor" / `RichEditD2DPT`) and its real "Add New
+Tab" button (`AutomationId="AddButton"`); `type_into_control` genuinely
+set the editor's text via `ValuePattern.SetValue` (confirmed via
+`vp.Value` readback during exploration); `invoke_control` genuinely
+clicked "Add New Tab" via `InvokePattern.Invoke()` and a real new tab
+appeared (then cleaned up); `select_control` genuinely selected a real
+`TabItemControl` via `SelectionItemPattern.Select()`; `scroll_control`
+genuinely scrolled the editor via `ScrollPattern.Scroll()` after filling
+it with 500 lines (confirmed `VerticallyScrollable=True` first);
+`read_selected_text`/`read_clipboard` returned real, honest empty/present
+state, not fabricated data. **A real bug was caught this way**: an early
+draft called `win32gui.GetWindowThreadProcessId`, which doesn't exist —
+that API is `win32process.GetWindowThreadProcessId` — and this only
+surfaced because the exploration script crashed against a real window;
+a mock would not have caught it. Fixed in
+`skills/_desktop_automation.py`.
+
+**Files changed**: `apps/backend/skills/_desktop_automation.py` (new),
+`apps/backend/skills/desktop_control.py` (new),
+`apps/backend/tests/test_skill_desktop_control.py` (new, 20 cases),
+`apps/backend/skills/registry.py`, `apps/backend/actions/permissions.py`,
+`apps/backend/actions/requests.py`, `apps/backend/app/action_contracts.py`,
+`apps/backend/tests/test_skill_registry.py` (updated expected skill set),
+`apps/backend/requirements.txt` (additive: `comtypes==1.4.16`,
+`uiautomation==2.0.29`), `contracts/action-request.schema.json` (additive
+schema extension — see point 1 above; this is normally
+read-only-without-coordinator-sign-off per `AGENTS.md`, flagging
+explicitly since the Wave 2B task itself directed this extension).
+
+**Tests run** (from `apps/backend/`):
+
+- `python -m pytest tests/test_skill_desktop_control.py -v` — **20
+  passed** (real Notepad interaction, see above).
+- Full suite, `python -m pytest -q` — **270 passed** on one run; a second
+  full run showed **269 passed, 1 failed**
+  (`test_skill_windows_app.py::test_execute_focus_finds_and_focuses_real_window`,
+  `SetForegroundWindow` timing out — this is the **same pre-existing,
+  environment-dependent Windows foreground-lock flake** Wave 2A's own
+  `claude.done.json` already flagged for that exact test; nothing in this
+  session touches `windows_app.py`, and the failure is intermittent based
+  on which process last had OS input focus, not a regression).
+- `python -m ruff check skills/ actions/ app/action_contracts.py
+  tests/test_skill_desktop_control.py tests/test_skill_registry.py` —
+  **clean** (two real `B023` loop-variable-capture findings caught and
+  fixed with the standard default-argument binding pattern, not suppressed).
+- `python -m mypy --config-file pyproject.toml skills` — **clean, 10
+  source files** (one real finding fixed: a branched `Control | None` vs
+  `Control` assignment in `_execute_read_selected_text`, restructured with
+  an explicit `Control | None` local and a None-check before use).
+
+**Known gaps**:
+
+- **Rust/native-shell side is untouched by design.** `apps/web/src-tauri/`
+  is Antigravity's ownership per `AGENTS.md`; `get_active_window_context()`
+  there still only captures executable/title/bounds. The new
+  `window_state`/`monitor`/`focused_control`/`source` schema fields are
+  additive and safe to send from Rust once wired, but nothing currently
+  populates them on the passive per-`ActionRequest` `active_context` path
+  — only the backend's own `inspect_current_window` action (which queries
+  live Windows state directly, independent of whatever the HUD attaches)
+  populates them today. Wiring the Tauri side is a natural Antigravity
+  follow-up, not attempted here (would cross ownership boundaries).
+- **`invoke_control`'s InvokePattern/TogglePattern/LegacyIAccessiblePattern
+  fallback chain does not include a coordinate-click fallback**, by design
+  (spec: "do not use blind coordinates when a semantic UI Automation
+  target exists") — a control that genuinely exposes none of those three
+  patterns will fail honestly (`SkillExecutionError`) rather than falling
+  back to a click simulation. Not exercised against such a control in this
+  session (Notepad's controls all support at least one).
+- **`type_into_control` has no keystroke-simulation fallback** — only
+  `ValuePattern`/`LegacyIAccessiblePattern.SetValue`. A control that
+  exposes neither (some custom-drawn/game-engine UI, rare in normal
+  Windows apps) will fail honestly rather than simulating keypresses.
+  Scope was intentionally kept to real UIA patterns, per the spec's
+  semantic-target requirement.
+- **`select_control`'s `LegacyIAccessiblePattern` fallback path
+  (`SELFLAG_TAKESELECTION | SELFLAG_TAKEFOCUS`) was not exercised in this
+  session** — Notepad's tabs all support `SelectionItemPattern` directly,
+  so the fallback branch is implemented per the pattern's documented
+  contract but not independently verified against a control that lacks
+  `SelectionItemPattern`.
+- **File Explorer and Settings were not verified this session** — Notepad
+  covered enumeration/focus/invoke/type/select/scroll/read-text/
+  read-clipboard end-to-end; File Explorer/Settings were reviewed as
+  targets during design (both expose standard UIA trees) but not
+  separately exercised. Recommend a follow-up targeted check if
+  File-Explorer-specific quirks (e.g. its list-view virtualization) matter
+  for a near-term use case.
+- **No multi-step workflow orchestration was built**, intentionally — the
+  spec is explicit that Codex owns orchestration/control runtime and this
+  session must not create an independent agent loop. The primitives
+  (`inspect_current_window`/`list_controls` for inspect+select-target,
+  `focus_control` for focus, `invoke_control`/`type_into_control`/
+  `select_control`/`scroll_control` for act, and re-calling
+  `inspect_current_window`/`list_controls` for verify) are each
+  independently dispatchable through the Action Runtime today; composing
+  them into a "focus -> inspect -> select -> act -> verify" sequence is
+  the orchestrator's job, not this skill's.
+- **`SetForegroundWindow` foreground-lock flakiness** (see Tests) affects
+  `focus_control` the same way it affects `windows_app.focus` — both call
+  into UIA/win32 focus APIs that are subject to the same OS-level
+  foreground-lock timeout under some process-focus histories. This is a
+  pre-existing Windows OS behavior, not specific to this session's code.
+
+**Exact dependencies required from other agents**:
+
+- **Antigravity** (`apps/web/src-tauri/`): the schema now supports
+  `window_state`/`monitor`/`focused_control`/`source` on `active_context`
+  — populating them from the native shell (extending
+  `get_active_window_context()` in `apps/web/src-tauri/src/lib.rs`) is
+  optional/additive, not required, since the backend's own
+  `inspect_current_window` action already provides this data on demand
+  without depending on the HUD to supply it.
+- **Codex** (`apps/backend/actions/` / orchestration): the five action
+  primitives listed under "no multi-step workflow orchestration" above are
+  ready to compose into a focus->inspect->select->act->verify sequence
+  whenever Codex's control runtime needs one; each already goes through
+  the existing Action Runtime/Permission Engine/confirmation-token flow
+  unchanged.
+- No blocking dependency for either — this session's additions are usable
+  standalone via `POST /api/v1/actions` today.
+
+**Next recommended action**: a coordinator decides whether this needs a
+schema-version bump (currently left at `1.0.0` since the change is
+strictly additive/backward-compatible — no existing consumer breaks) or
+just an ADR note recording the additive extension, same treatment as
+other additive contract changes in this repo's history. Antigravity can
+independently pick up wiring `monitor`/`window_state`/`focused_control`
+into the Tauri side whenever convenient. A follow-up session could verify
+File Explorer/Settings specifically and exercise the
+`LegacyIAccessiblePattern` fallback paths against a control that lacks the
+primary pattern.
+
+---
+
 ## Latest handoff — Wave 2A M2A Phase 2: skills execution layer (2026-08-17)
 
 **Branch**: `feature/wave2-core-skills`
