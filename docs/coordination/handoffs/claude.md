@@ -11,18 +11,550 @@ for that).
 
 ---
 
-## Latest handoff
+## Latest handoff — Append-only event history fix (2026-08-16)
 
-**Branch**:
-**Commit SHA**:
-**Work completed**:
-**Files changed**:
-**Interfaces exposed**:
+**Branch**: `fix/v1-final-lifecycle`
+**Base SHA**: `9f13e09a7c44be27901d34cb885a63ceb8755463`
+**Final SHA**: `bfb39df` (see `git log 9f13e09..bfb39df` for the full diff)
+
+Not merged into `feature/v1-remediation-integration`, `integration/v1`, or
+`main` — that remains a coordinator decision.
+
+**Commits**:
+
+| SHA | Summary |
+|---|---|
+| `224ea47` | Enforce append-only event persistence |
+| `bfb39df` | Add duplicate/concurrency regression tests for event persistence |
+
+**Work completed** — fixed the final backend certification blocker:
+`trading_events` was not genuinely append-only.
+
+**Root cause**: `EventService._persist` (`events/service.py`) wrote every
+event with `INSERT OR REPLACE INTO trading_events ... `, keyed on
+`event_id` (the table's `PRIMARY KEY`, unchanged from Wave 1). `event_id`
+is a required, caller-suppliable field on the public
+`POST /api/v1/events` route (`app/routers/events.py`) — the raw JSON body
+is validated against the frozen contract and passed straight into
+`TradingEvent(**raw)`, which accepts an explicit `event_id`. So any
+resubmission of an existing `event_id` — a retried request, a buggy
+upstream integration, or a malicious caller — silently overwrote
+(destroyed) that historical row instead of being rejected. The mock
+generator and `/dev/mock-event` path were never affected (they always let
+the model's `default_factory=uuid4` mint a fresh id), and the invalidate
+endpoint already minted a fresh id too (fixed in a prior session) — the
+open path was specifically direct callers of `POST /api/v1/events`
+supplying their own `event_id`.
+
+**Persistence change** (`events/service.py`): switched `_persist` to a
+plain `INSERT` and let the existing `PRIMARY KEY` constraint enforce
+uniqueness at the database level (no schema/migration change needed — the
+constraint was already there, just unenforced by the upsert). Added
+`DuplicateEventError(RuntimeError)`, raised when SQLite reports
+`IntegrityError` on the insert, carrying the offending `event_id`. Because
+`record_event` calls `_persist` before `_apply_active_state`, a rejected
+duplicate never reaches the `active_setups` write — no partial-state
+corruption path exists structurally, not just by convention.
+
+**Duplicate behavior**: `app/routers/events.py` catches
+`DuplicateEventError` in all three event-ingestion routes
+(`POST /api/v1/events`, `POST /api/v1/events/{id}/invalidate`,
+`POST /api/v1/dev/mock-event`) and returns **HTTP 409** with
+`{"detail": "Event <id> already exists"}` — no SQLite/DB internals in the
+response. The original historical row is left byte-for-byte unchanged
+(verified in tests below).
+
+**Lifecycle verification**: `tests/test_event_service.py::test_lifecycle_three_events_stay_queryable_and_active_state_clears`
+drives `SETUP_DEVELOPING -> SETUP_VALID -> SETUP_INVALIDATED` directly
+against `EventService` and asserts three distinct `event_id`s, all three
+rows still present in `get_history()`, and `get_active_setups()` empty
+afterward. (The API-level version of this same lifecycle proof already
+existed from a prior session:
+`tests/test_events_api.py::test_invalidation_preserves_prior_history_as_distinct_events`
+— left unmodified, still passing.)
+
+**Concurrency verification**: `tests/test_event_service.py::test_concurrent_duplicate_event_id_only_one_persists`
+fires two `record_event()` calls for the same `event_id` via
+`asyncio.gather(..., return_exceptions=True)`. Because `app/db.py`
+intentionally uses one shared `aiosqlite` connection (documented there as
+the correct scope for this single-user local app, not a pool), concurrent
+writers are serialized through that connection's single worker thread —
+so the database's `PRIMARY KEY` constraint deterministically admits exactly
+one writer and raises `IntegrityError`→`DuplicateEventError` for the
+other, with no TOCTOU window (no check-then-insert; the constraint itself
+is the check). Test asserts exactly one success, one `DuplicateEventError`,
+and exactly one matching row in history afterward.
+
+**Files changed**: `apps/backend/events/service.py`,
+`apps/backend/app/routers/events.py`,
+`apps/backend/tests/test_events_api.py` (added 2 cases),
+`apps/backend/tests/test_event_service.py` (new — 4 cases). No schema
+migration, no change to the frozen trading-event contract, no change to
+already-passing routes/behavior outside the duplicate-id path.
+
 **Tests run**:
-**Known limitations**:
-**Exact dependencies required from other agents**:
-**Next recommended action**:
+
+- `python -m pytest apps/backend/tests` — **81 passed** (up from 75 at
+  session start; existing tests unmodified except the 2 additions to
+  `test_events_api.py`, none weakened).
+- `ruff check apps/backend` — **clean**.
+- `mypy --config-file apps/backend/pyproject.toml apps/backend` — **clean,
+  57 source files**.
+
+**Known limitations**: none identified for this specific blocker. The
+concurrency proof is deterministic given this app's single-shared-connection
+architecture (see `app/db.py`'s own docstring); if that architecture ever
+changes to a real connection pool, the same `PRIMARY KEY`-constraint
+approach still holds (SQLite enforces it regardless of which connection
+issues the `INSERT`), so no follow-up is required on that account.
+
+**Next recommended action**: re-run final certification against
+`fix/v1-final-lifecycle`. No other backend work is pending from this
+session.
 
 ---
 
-*(No sessions yet — bootstrap stage only.)*
+## Certification remediation (2026-08-16)
+
+**Branch**: `fix/v1-backend-cert-blockers`
+**Base SHA**: `e8308d82361e6df3c0928c4994ac0505a2e4235f`
+**Final SHA**: `910c05a` (see `git log e8308d8..910c05a` for the full diff)
+
+**Commits** (each pushed after its own test/lint/type-check pass):
+
+| SHA | Summary |
+|---|---|
+| `76ed328` | Event lifecycle: SETUP_INVALIDATED no longer overwrites SETUP_VALID history |
+| `45b548b` | Payload security: real streaming body-size limit, not Content-Length-only |
+| `11d975d` | Memory grounding: source_id now flows into assistant grounding context |
+| `d478172` | Real voice path: STT->assistant->TTS proof test with actual local models |
+| `d611723` | Ruff: resolved remaining `apps/backend/run.py` E402 violations |
+| `910c05a` | This handoff |
+
+Not merged into `feature/v1-integration`, `integration/v1`, or `main` —
+that remains a coordinator/Codex decision.
+
+**Work completed** — fixed five Codex-identified backend certification
+blockers, scoped strictly to `apps/backend/` plus the two shared-test call
+sites that encoded the bugs being fixed (see below):
+
+1. **Event lifecycle / invalidation** (`app/routers/events.py`). The
+   invalidate endpoint reused the original event's `event_id`; since
+   `trading_events.event_id` is the primary key behind an
+   `INSERT OR REPLACE` upsert, invalidating a setup silently destroyed its
+   `SETUP_VALID` row. Fixed by letting the invalidated event get its own
+   unique `event_id` (the model default), correlating back to the original
+   via an `ORIGINAL_EVENT_ID:<uuid>` reason code (the frozen trading-event
+   contract has no dedicated correlation field — not touched).
+   Regression test: `tests/test_events_api.py::test_invalidation_preserves_prior_history_as_distinct_events`
+   drives `SETUP_DEVELOPING -> SETUP_VALID -> SETUP_INVALIDATED` over the
+   real HTTP API and asserts three distinct `event_id`s, all three still
+   present in history, and active state cleared.
+   `tests/acceptance/test_runtime.py::test_event_lifecycle_reaches_two_clients_and_persists`
+   (Codex-owned, shared) asserted the old, buggy id-reuse behavior; updated
+   it to match by symbol instead of a pre-known id (the new id is
+   server-generated) and added an explicit "SETUP_VALID still in history"
+   check. Verified against a live `python apps/backend/run.py` process with
+   `TARS_ACCEPTANCE=1`.
+
+2. **Payload security** (`app/body_limit.py`, `app/main.py`). The old
+   middleware only compared the declared `Content-Length` header against
+   1 MiB — a no-op for chunked transfer encoding, which never sends that
+   header. Replaced with `MaxBodySizeMiddleware`, a raw ASGI middleware
+   that counts bytes as uvicorn delivers them via `receive()` (the same
+   representation for Content-Length- and chunked-framed bodies) and
+   aborts as soon as the running total exceeds the cap, without ever
+   buffering the oversized body. The abort signal (`RequestBodyTooLarge`)
+   is a `BaseException`, not `Exception`, subclass so it can't be silently
+   swallowed by a route's broad `except Exception` around body reading
+   (confirmed this actually happens in `events.py`'s JSON-parse handler
+   during testing — an `Exception` subclass got turned into an unrelated
+   422). Verified against both `TestClient` and a live uvicorn process
+   with a real chunked-transfer request (no `Content-Length` header sent).
+   Regression tests: `tests/test_payload_limit.py` (normal payload passes,
+   Content-Length-declared oversized payload rejected, chunked oversized
+   payload rejected, chunked under-limit payload reaches the route).
+
+3. **Memory grounding / source traceability** (`assistant/grounding.py`).
+   `build_system_context` dropped `source_id` (the vault file path /
+   conversation `message_id`) from retrieved FTS notes before handing them
+   to the assistant provider — only the generic `source` type
+   ("vault"/"conversation") survived, so a grounded answer could never be
+   attributed to which specific note backed it. Fixed by passing
+   `source_id` through and instructing the provider to cite it. No change
+   to the frozen assistant-message contract (no field exists for
+   memory-note citations; traceability lives in the grounding text, not
+   response metadata — this was evaluated and doesn't rise to "genuine
+   blocker" for a contract change). Regression tests:
+   `tests/test_assistant_grounding.py` — `source_id` survives into the
+   context payload sent to the provider (verified with a stub provider
+   that echoes back what it received), and absent-information disclosure
+   for both empty and irrelevant retrieval.
+
+4. **Real voice backend path** (`tests/test_voice_end_to_end_real.py`).
+   The existing implementation (`voice/pipeline.py`,
+   `voice/pipecat_bridge.py`, `voice/pipecat_services.py`,
+   `voice/providers/faster_whisper_stt.py`,
+   `voice/providers/kokoro_tts.py`) was already architecturally correct —
+   real STT -> `AssistantRouter` -> real TTS, no canned phrases — so no
+   production code changed here. Added a proof test using actual model
+   weights: Kokoro synthesizes "What setups require my attention?" into a
+   real WAV fixture, faster-whisper independently transcribes it, the
+   transcription (not the hardcoded phrase) is sent through
+   `AssistantRouter` over the real `/api/v1/assistant/query` HTTP
+   endpoint, and the reply is synthesized back to playable audio. A
+   second, distinct control phrase must decode to distinct text — a
+   bypassed/canned STT stage would return identical text regardless of
+   audio, so the test fails in that case. **Executed with real models in
+   this environment**: `faster-whisper==1.2.1` and `kokoro-onnx==0.5.0`
+   installed successfully and both model weights downloaded and ran (CPU,
+   `base`/`af_heart`). `pipecat-ai` (the realtime WebSocket voice session)
+   was *not* installed/exercised this session — heavier dependency, and
+   the proof requirement only concerns the STT->assistant->TTS data path,
+   not the realtime transport; `voice/pipeline.py` etc. were reviewed by
+   inspection only, not executed. `scipy` added to
+   `requirements-voice.txt` as a test-only dependency (resamples Kokoro's
+   24kHz output to whisper's 16kHz input).
+
+5. **Ruff**: `apps/backend/run.py` had 2 pre-existing E402 violations
+   (sys.path manipulation before `import uvicorn`/`app.config`, which is
+   necessary when run as a script). Fixed with targeted `# noqa: E402` on
+   those two lines rather than disabling the rule project-wide.
+   `ruff check .` from `apps/backend/` is now clean.
+
+**Files changed**: `apps/backend/app/main.py`, `apps/backend/app/body_limit.py`
+(new), `apps/backend/app/routers/events.py`, `apps/backend/assistant/grounding.py`,
+`apps/backend/run.py`, `apps/backend/requirements-voice.txt`,
+`apps/backend/tests/test_events_api.py`, `apps/backend/tests/test_payload_limit.py`
+(new), `apps/backend/tests/test_assistant_grounding.py` (new),
+`apps/backend/tests/test_voice_end_to_end_real.py` (new); plus
+`tests/acceptance/test_runtime.py` (Codex-owned — edited only to correct
+an assertion that encoded the event-lifecycle bug being fixed; flagged
+here rather than left silently unowned). This handoff file only under
+shared coordination docs.
+
+**Tests run**:
+
+- `python -m pytest apps/backend/tests` — **75 passed, 0 skipped** (up
+  from 61 passed/1 skipped at session start — the previously-optional
+  `test_voice_real_adapters.py` cases now execute for real since
+  faster-whisper/kokoro-onnx are installed in this environment).
+- `ruff check .` (from `apps/backend/`) — **clean**.
+- `mypy .` (from `apps/backend/`, using its own `pyproject.toml`) —
+  **clean, 57 source files**. (Note: running `mypy apps/backend` from the
+  repo root instead picks up no config and reports ~20 spurious
+  `import-untyped`/`import-not-found` errors for packages the project
+  deliberately leaves untyped/optional, e.g. `pipecat`, `openwakeword`,
+  `jsonschema` — always run mypy from `apps/backend/` or with
+  `--config-file apps/backend/pyproject.toml`.)
+- `python -m pytest tests -q` (Codex's contract/unit suite) —
+  **39 passed, 15 skipped, 1 failed**. The one failure
+  (`tests/contracts/test_codegen_drift.py::test_generated_contracts_have_no_drift`)
+  is a pre-environment gap unrelated to this session's changes: it shells
+  out to `npm ci --prefix tools/codegen`, and `tools/codegen/node_modules`
+  was never installed in this workspace. Confirmed pre-existing via
+  `git stash` before investigating further — not a regression.
+- Targeted acceptance tests against a manually-started live
+  `python apps/backend/run.py` process with `TARS_ACCEPTANCE=1`:
+  `test_event_lifecycle_reaches_two_clients_and_persists`,
+  `test_websocket_disconnect_then_reconnect`,
+  `test_unexpected_event_field_is_rejected`,
+  `test_oversized_payload_is_rejected`, `test_no_live_trade_execution_surface`,
+  `test_voice_reports_real_local_provider_path`,
+  `test_assistant_refuses_to_invent_missing_trading_data`,
+  `test_public_event_response_cannot_bypass_contract` — **all passed**.
+  The *full* `tools/run_acceptance.py` suite (15/15) was not re-run:
+  `apps/web/node_modules` is not installed in this workspace, and
+  installing/running the frontend is out of scope for a backend-only
+  remediation session per the task's "do not modify frontend files"
+  instruction.
+
+**Known limitations**:
+
+- **Python version**: this machine has Python 3.13.3 and 3.7 installed,
+  no 3.12 (`py -0p` confirms). All validation above ran under **3.13.3**.
+  The project's `pyproject.toml` target (`py312`/mypy `python_version =
+  "3.12"`) was left unchanged. This is *not* a certification of Python
+  3.12 compatibility — someone with a 3.12 interpreter should re-run
+  `pytest`/`ruff`/`mypy` before treating this as 3.12-verified.
+  faster-whisper/kokoro-onnx/scipy installed successfully on 3.13 in this
+  environment; that says nothing about 3.12 specifically.
+- `pipecat-ai` (realtime voice WebSocket session) remains uninstalled and
+  unexercised this session — `voice/pipeline.py`,
+  `voice/pipecat_bridge.py`, `voice/pipecat_services.py` were reviewed by
+  code inspection only, found architecturally correct (no canned
+  phrases/faked success anywhere in the chain), but not run.
+- `tools/codegen` npm deps and `apps/web` npm deps are both uninstalled in
+  this workspace, so the codegen-drift test and the full black-box
+  acceptance suite (which needs a live frontend) could not be run this
+  session. Backend-only acceptance checks were run individually against a
+  manually-started backend instead (see Tests run above).
+
+**Exact dependencies required from other agents**: none — this was a
+backend-only remediation pass against blockers Codex already identified.
+If Codex re-certifies, the event-lifecycle broadcast for an invalidated
+setup now carries a **new** `event_id` (not the original's); any external
+consumer/tooling that assumed id-reuse (as `tests/acceptance/test_runtime.py`
+did) should match by symbol instead, per the fix in commit `76ed328`.
+
+**Next recommended action**: Codex re-certifies against
+`fix/v1-backend-cert-blockers`. Before merging toward `integration/v1`,
+someone should (a) validate under an actual Python 3.12 interpreter, (b)
+install `apps/web` and `tools/codegen` npm deps and run the full
+`tools/run_acceptance.py` 15-case suite plus the codegen-drift check, and
+(c) optionally install `pipecat-ai` and exercise the realtime voice
+WebSocket session directly (this session only proved the STT->assistant->TTS
+data path, not the realtime transport around it).
+
+---
+
+## Wave 1 backend implementation (2026-08-16)
+
+**Branch**: `feature/v1-backend-voice`
+**Base SHA**: `ad6f4bf6bd4dcb5c4039450dc8b8540ce63108e7` (tip of `integration/v1` at session start)
+**Final SHA**: `2bd64f664bf659085c67d3660ca21931ea06305a`
+
+**Commits** (each pushed after its own test/lint/type-check pass):
+
+| SHA | Summary |
+|---|---|
+| `f1fc132` | Core event backend: FastAPI + WebSocket + SQLite (Phase A) |
+| `88fd015` | Assistant provider abstraction + deterministic routing (Phase B) |
+| `1d7fda0` | Memory/retrieval layer: SQLite FTS5 + Obsidian vault indexing (Phase C) |
+| `df2a9e1` | Voice pipeline: Pipecat + local STT/TTS/wake-word providers (Phase D) |
+| `bea3c14` | Voice/assistant API surface + secure-by-default networking (Phase E+F) |
+| `2bd64f6` | OpenTelemetry instrumentation (ADR-017) |
+
+All six commits are on `feature/v1-backend-voice` and pushed to
+`origin/feature/v1-backend-voice`. Nothing merged into `integration/v1` or
+`main` — that is a coordinator decision per `AGENTS.md`.
+
+## Work completed
+
+Implemented the full backend mission (Phases A–F) plus OpenTelemetry
+instrumentation from `TASKS.md`:
+
+- **Phase A — Core event backend.** FastAPI app (`app/`), SQLite schema +
+  migration runner (`storage/`), mock trading-event generator
+  (`events/generator.py`), deterministic active-state calculation
+  (`events/service.py`), WebSocket broadcast (`/ws/events`). Every event is
+  validated directly against `contracts/trading-event.schema.json` via
+  `jsonschema` (`app/contracts.py`) — not a hand-duplicated copy — so the
+  backend can never silently drift from the frozen contract.
+- **Phase B — Assistant tool layer.** `AssistantProvider` interface with
+  four adapters: `MockAssistantProvider`, `ClaudeCodeProvider` (headless
+  `claude -p --output-format json` CLI invocation, verified against current
+  Claude Code docs, not assumed), `OllamaProvider` (local HTTP), optional
+  `AnthropicAPIProvider` (paid, lazy-imports `anthropic`). Deterministic
+  routing (`assistant/router.py`) resolves "show active setups" / "what
+  requires my attention" straight from `EventService` — these never reach a
+  model call. Everything else gets deterministic active-setup state as
+  grounding text instructing the model never to invent trading facts.
+  Conversation turns persist to `conversation_messages`, validated against
+  `contracts/assistant-message.schema.json`.
+- **Phase C — Memory.** `MemoryService` (`memory/`) with SQLite FTS5 full-
+  text search over conversation memory and an indexed Obsidian vault
+  (read-only indexer, content-hash-gated, excludes `.obsidian`/`.git`).
+  Every search result carries `source`/`source_id` for traceability.
+  Per ADR-013, `MemoryService` refuses to start with
+  `SQLITE_VEC_ENABLED=true` rather than silently ignoring it — no
+  measurement has justified semantic retrieval over FTS5 yet. APScheduler
+  wired for periodic vault reindexing (housekeeping only, per ADR-016).
+- **Phase D — Voice.** `WakeWordProvider`, `SpeechToTextProvider`,
+  `TextToSpeechProvider` interfaces, each with a zero-dependency mock plus
+  real local adapters: `FasterWhisperSTTProvider`, `KokoroTTSProvider`
+  (kokoro-onnx, fully local), `FishSpeechTTSProvider` (HTTP client against
+  a separately-run local Fish Speech API server), `OpenWakeWordProvider`.
+  The realtime pipeline (`voice/pipeline.py`) is built on pipecat-ai
+  1.7.0's current `PipelineWorker`/`WorkerRunner` API — verified against
+  the installed package's actual module structure via introspection, not
+  assumed from training data, since 1.7.0 deprecated the
+  `PipelineTask`/`PipelineRunner` API shown in older Pipecat examples.
+  Generic `ProviderBridgeSTTService`/`ProviderBridgeTTSService` wrap our
+  own provider instances rather than Pipecat's vendor-specific services, so
+  the realtime session and the one-shot REST endpoints share exactly one
+  adapter instance per provider. Silero VAD needs no separate package —
+  bundled inside `pipecat-ai` as an ONNX model.
+- **Phase E — Voice/assistant API.** `POST /api/v1/voice/transcribe`
+  (WAV → text), `POST /api/v1/voice/synthesize` (text → WAV),
+  `GET /api/v1/voice/status` (provider readiness/names, never secrets),
+  `WS /api/v1/voice/session` (realtime audio↔audio over the Phase D
+  pipeline). Text question/response already existed from Phase B
+  (`POST /api/v1/assistant/query`). STT/TTS/wake-word providers load in a
+  background task (`app/voice_state.py`) so cold model downloads (minutes,
+  see Benchmarks below) never block app startup; health/events/assistant
+  work immediately.
+- **Phase F — Local network.** `Settings.effective_host` resolves to
+  `127.0.0.1` by default; `BIND_LAN=true` opts into `0.0.0.0`; an explicit
+  `BACKEND_HOST` always wins. Tailscale Serve (the preferred private
+  remote-access path, ADR-014) works against the loopback default without
+  needing LAN exposure. `CORS_ALLOW_ORIGINS` is configurable (default `*`).
+  `run.py` is the settings-aware uvicorn entrypoint. Verified with a real
+  server smoke test: bound `127.0.0.1:8000`, `/api/v1/health` and
+  `/api/v1/voice/status` both responded correctly.
+- **OpenTelemetry (ADR-017).** `app/observability.py` configures a
+  `TracerProvider` that logs spans through the stdlib logger by default (no
+  network dependency) or exports to OTLP if `OTEL_EXPORTER_OTLP_ENDPOINT` is
+  set. Instruments event ingestion, assistant requests (provider, latency,
+  errors), and memory retrieval (retrieved `source:source_id`s). Verified
+  end-to-end — spans logged correctly with no secrets in any attribute.
+
+## Files changed
+
+~80 files under `apps/backend/` (new: `app/`, `storage/`, `events/`,
+`assistant/`, `memory/`, `voice/`, `tests/`, `run.py`, `README.md`,
+`requirements*.txt`) plus additive edits to `.env.example` (root-level
+config template — not under `docs/coordination/` or `contracts/`, and
+already owns the backend env vars this session extended; edited
+additively only, no existing key removed or renamed without a documented
+reason). See the six commits above for the exact diff per phase.
+
+## Interfaces exposed
+
+**HTTP** (all under `/api/v1`):
+- `GET /health`
+- `GET /events`, `GET /events/active`, `POST /dev/mock-event`
+- `POST /assistant/query`
+- `GET /memory/search`, `POST /memory/reindex-vault`
+- `POST /voice/transcribe`, `POST /voice/synthesize`, `GET /voice/status`
+
+**WebSocket**:
+- `/ws/events` — trading-event + active-setup broadcast
+- `/api/v1/voice/session` — realtime voice (Pipecat pipeline)
+
+**Python interfaces** (for future backend work, not external consumers):
+`assistant.provider.AssistantProvider`, `voice.interfaces.WakeWordProvider`
+/ `SpeechToTextProvider` / `TextToSpeechProvider`, `memory.service.MemoryService`.
+
+## Environment/configuration
+
+All new settings are documented in `.env.example` at the repo root and
+`apps/backend/app/config.py` (kept in lockstep per that file's own
+docstring rule). Defaults are the free/local-first path:
+`ASSISTANT_PROVIDER=claude_code`, `STT_PROVIDER=faster_whisper`,
+`TTS_PROVIDER=kokoro`, `WAKE_WORD_PROVIDER=mock` (see Known limitations),
+`BIND_LAN=false`. Two new requirements files: `requirements-voice.txt`
+(pipecat-ai + local model packages — optional, every voice provider mocks
+without it) and `requirements-optional.txt` (paid-provider SDKs — never
+required).
+
+## Benchmarks (Phase D)
+
+Measured in this sandboxed dev environment (CPU-only, no GPU):
+
+| Adapter | Cold init (incl. first-run download) | Warm init | Generation latency |
+|---|---|---|---|
+| faster-whisper (`tiny`) | 48.98s | ~2.3s | 0.70s for 1s of audio |
+| Kokoro TTS | 187.97s | ~2.5s | 8.66s cold / 0.77s warm, for a one-sentence reply |
+| Fish Speech (local) | **not benchmarked** — see below | — | — |
+
+**Fish Speech could not be benchmarked in this environment.** It has no
+pip-installable inference API; running it requires cloning the
+`fish-speech` repo, downloading GB-scale checkpoints, and running a
+separate local API server (`tools/api_server.py`) this sandbox had no
+practical way to host. `FishSpeechTTSProvider` is implemented as a
+best-effort HTTP client against that server's documented `/v1/tts`
+endpoint, but its exact request/response JSON schema was not fully
+published where I could reach it — verify against the actual deployed
+server version before relying on it. **Kokoro is the default `TTS_PROVIDER`
+in `.env.example`** on this evidence: fully local, no separate process, and
+fast once warm. If Fish Speech is benchmarked on real target hardware
+(ideally with a GPU) and found to sound meaningfully better, flipping the
+default is a one-line `.env` change — the provider is fully implemented.
+
+## Tests
+
+63 pytest cases across `apps/backend/tests/`, all passing; `ruff check .`
+and `mypy app events storage assistant memory voice run.py` both clean.
+Covers: contract validation, event persistence/active-state/invalidation,
+WebSocket broadcast, deterministic assistant routing (proven to never call
+the configured provider), assistant provider fallback-to-mock on
+misconfiguration, memory FTS5 round-trip + vault indexing lifecycle, voice
+mock providers, audio WAV↔PCM16 conversion, voice provider factory error
+paths, network config resolution, and — the only tests touching real ML
+models rather than mocks — `tests/test_voice_real_adapters.py`, which
+exercises faster-whisper and Kokoro against actual (already-cached in this
+environment) model weights; these skip cleanly via `pytest.importorskip`
+if the voice extras aren't installed, so the rest of the suite needs no
+network and no API keys.
+
+**Not run**: no live audio round-trip through `/api/v1/voice/session` —
+that needs a real microphone/browser client, which Antigravity owns. The
+pipeline was verified by introspecting the installed `pipecat-ai` 1.7.0
+package's real API (class names, constructor signatures, method
+signatures) rather than assumed, and by the unit-level construction tests,
+but not by an actual end-to-end voice conversation.
+
+## Known limitations
+
+- **No custom "TARS" wake-word model.** openWakeWord ships no pretrained
+  model for the phrase "TARS" (only generic phrases like "hey jarvis").
+  `OpenWakeWordProvider` is fully implemented and will run any
+  custom-trained model pointed at by `WAKE_WORD_MODEL_PATH`, but training
+  one is a separate, later effort (openWakeWord's own training pipeline,
+  requiring assembled audio samples). `.env.example` defaults
+  `WAKE_WORD_PROVIDER=mock` for this reason. Push-to-talk is unaffected —
+  `/api/v1/voice/session` never requires wake-word detection to begin a
+  session, satisfying AGENTS.md's "guaranteed regardless of wake-word
+  state" requirement structurally.
+- **Fish Speech not benchmarked** — see Benchmarks above.
+- **Wake word is not wired into the realtime pipeline as a gate.** The
+  `WakeWordProvider` interface and `OpenWakeWordProvider` adapter are
+  implemented and unit-testable, but `voice/pipeline.py`'s realtime session
+  doesn't yet use them to gate when STT starts listening — the pipeline is
+  push-to-talk/continuous-session by design (the client decides when to
+  open the WebSocket). Wiring wake-word detection as an always-on gate
+  ahead of a real trained model existing seemed like the wrong order of
+  operations; flagging it as intentionally deferred, not an oversight.
+- **No live voice round-trip test** — see Tests above.
+- **Memory search is not wired into assistant grounding.** Phase C built a
+  complete, working retrieval service (FTS5 + vault + API), but Phase B's
+  `AssistantRouter` only grounds on deterministic trading state, not on
+  retrieved memory/vault context. Wiring "recall relevant past notes into
+  the assistant's context" is a natural next step, deliberately not done
+  here to avoid scope creep into a Phase B change under a Phase C commit.
+- **`fastapi`/`starlette` were upgraded** from `0.115.0`/(implicit) to
+  `0.141.1`/`1.6.0` mid-session — `pipecat-ai[websocket]` pulled in the
+  newer versions as a transitive dependency, and I re-pinned
+  `requirements.txt` to match after confirming the full test suite still
+  passes at the new versions. Flagging this since it's outside the diff
+  Phase A originally shipped.
+- **Python 3.13 was used**, not the 3.12 named in `AGENTS.md`/`ARCHITECTURE.md`
+  — this machine only had 3.13 and 3.7 available (`py -0` confirmed no 3.12
+  install). Nothing in the codebase is 3.13-specific; it should run
+  unmodified on 3.12 if that's later required, but this wasn't verified on
+  3.12 in this session.
+
+## Exact dependencies required from other agents
+
+- **Antigravity (frontend)**: the WebSocket/HTTP contracts above are
+  stable and ready to consume. For voice specifically:
+  `/api/v1/voice/session` expects 16-bit PCM mono audio in and returns the
+  same out (no WAV wrapping over the wire — `add_wav_header=False`); WAV
+  wrapping is only used by the one-shot `/api/v1/voice/transcribe`
+  (upload) and `/api/v1/voice/synthesize` (response) endpoints. Browser
+  `MediaRecorder` typically produces webm/opus, not raw PCM — the frontend
+  is responsible for any needed transcoding before hitting these
+  endpoints; this backend does not transcode.
+- **Codex (tests/tools)**: `apps/backend/README.md` documents how to run
+  the test suite and what's expected to work with zero API keys (the
+  `mock` provider path for assistant/STT/TTS/wake-word — confirmed via
+  `tests/test_assistant_provider_fallback.py` and the voice mock tests).
+  The `contracts/*.schema.json` validation lives in `app/contracts.py`,
+  loading the canonical files directly (no forked copy) — useful if Codex
+  wants to cross-check contract conformance independently.
+
+## Next recommended action
+
+1. A coordinator decides whether/when to merge `feature/v1-backend-voice`
+   into `integration/v1`, per `AGENTS.md`'s merge-strategy note in
+   `TASKS.md` (Cross-cutting / Post-Wave-1).
+2. If someone has GPU hardware available, benchmark Fish Speech properly
+   (run the local API server, compare against the Kokoro numbers above)
+   before treating the current `TTS_PROVIDER=kokoro` default as final.
+3. Training a real "TARS" openWakeWord model, if always-on wake-word
+   listening (vs. push-to-talk) becomes a priority.
+4. A live voice round-trip test once Antigravity has a client that can
+   open `/api/v1/voice/session` with a real microphone.
+5. Wiring memory search into assistant grounding (Known limitations above)
+   if "recall past notes" becomes a desired assistant capability.

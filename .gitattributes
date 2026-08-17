@@ -1,0 +1,3 @@
+# Contract codegen emits canonical LF bytes; pin checkout endings across platforms.
+tools/generated/python/*.py text eol=lf
+tools/generated/typescript/*.d.ts text eol=lf

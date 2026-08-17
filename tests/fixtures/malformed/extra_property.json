@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0.0",
+  "event_id": "10000000-0000-4000-8000-000000000002",
+  "timestamp": "2026-08-16T09:00:00Z",
+  "source": "mock",
+  "symbol": "ES",
+  "state": "SETUP_VALID",
+  "validation_status": "VALID",
+  "confidence": 0.99
+}
