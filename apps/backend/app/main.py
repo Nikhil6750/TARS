@@ -58,19 +58,6 @@ async def lifespan(app: FastAPI):
     event_bus = EventBus(db, ws_manager)
     app.state.event_bus = event_bus
 
-    action_ws_manager = ConnectionManager()
-    app.state.action_ws_manager = action_ws_manager
-    action_registry = build_skill_registry()
-    app.state.action_registry = action_registry
-    action_runtime = ActionRuntime(
-        ActionStore(db.conn),
-        action_registry,
-        permission_engine=PermissionEngine(),
-        broadcaster=action_ws_manager,
-    )
-    await action_runtime.initialize()
-    app.state.action_runtime = action_runtime
-
     memory_service = MemoryService(
         db.conn,
         vault_path=settings.obsidian_vault_path,
@@ -89,6 +76,19 @@ async def lifespan(app: FastAPI):
     scheduler = build_scheduler(memory_service, timezone=settings.tars_timezone)
     scheduler.start()
     app.state.scheduler = scheduler
+
+    action_ws_manager = ConnectionManager()
+    app.state.action_ws_manager = action_ws_manager
+    action_registry = build_skill_registry(memory_service=memory_service)
+    app.state.action_registry = action_registry
+    action_runtime = ActionRuntime(
+        ActionStore(db.conn),
+        action_registry,
+        permission_engine=PermissionEngine(),
+        broadcaster=action_ws_manager,
+    )
+    await action_runtime.initialize()
+    app.state.action_runtime = action_runtime
 
     try:
         app.state.assistant_provider = build_assistant_provider(settings)

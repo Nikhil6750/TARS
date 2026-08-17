@@ -69,7 +69,10 @@ class FakeSkill(BaseSkill):
 
 
 def register(client, skill: FakeSkill) -> FakeSkill:
-    client.app.state.action_registry.register(skill)
+    # replace=True: the app's real registry is now populated with the actual
+    # windows_app/browser/filesystem/terminal/obsidian skills at startup, so
+    # tests that install a FakeSkill under one of those names must override it.
+    client.app.state.action_registry.register(skill, replace=True)
     return skill
 
 
@@ -400,9 +403,11 @@ def test_deterministic_fixed_phrase_routes_without_assistant_payload(client):
 
 
 def test_registry_rejects_duplicate_skill_names(client):
-    register(client, FakeSkill("reader", RiskLevel.READ_ONLY))
+    # Exercises the registry's own default (non-replace) duplicate rejection,
+    # so it registers directly rather than through the replace=True `register()` helper.
+    client.app.state.action_registry.register(FakeSkill("reader", RiskLevel.READ_ONLY))
     with pytest.raises(SkillRegistryError):
-        register(client, FakeSkill("reader", RiskLevel.READ_ONLY))
+        client.app.state.action_registry.register(FakeSkill("reader", RiskLevel.READ_ONLY))
 
 
 def test_action_result_is_broadcast_on_dedicated_stream(client):
@@ -417,3 +422,27 @@ def test_action_result_is_broadcast_on_dedicated_stream(client):
     assert running["type"] == "action_result"
     assert running["result"]["status"] == "RUNNING"
     assert done["result"]["status"] == "SUCCEEDED"
+
+
+def test_registered_skill_capabilities_are_not_unconditionally_blocked(client):
+    """Regression guard: every real skill's declared capability must be covered
+    by PermissionEngine's per-skill allowlist with a non-BLOCKED policy, or the
+    runtime blocks it outright no matter what the skill's own classify_risk()
+    says -- windows_app.list_running and browser.search were silently
+    permanently BLOCKED this way (the allowlist only listed launch/focus and
+    open_url) until the allowlist was corrected to cover every capability each
+    skill actually declares."""
+    from actions.permissions import PermissionEngine
+
+    engine = PermissionEngine()
+    registry = client.app.state.action_registry
+    for skill_name in ("windows_app", "browser", "filesystem", "obsidian"):
+        skill = registry.get(skill_name)
+        if skill is None:
+            continue  # obsidian is absent when no MemoryService was wired in
+        for action in skill.capabilities:
+            risk = engine.classify(skill, action, {})
+            assert risk != RiskLevel.BLOCKED, (
+                f"{skill_name}.{action} is unconditionally BLOCKED by the permission "
+                "engine's allowlist even though the skill declares it as a real capability"
+            )

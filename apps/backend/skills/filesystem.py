@@ -12,6 +12,7 @@ root, so a traversal like `~/../../Windows/System32` cannot escape.
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ _READ_ONLY_ACTIONS = {"list", "search"}
 _ALLOWED_ACTIONS = _READ_ONLY_ACTIONS | {"open"}
 
 _MAX_SEARCH_RESULTS = 200
+_SEARCH_TIME_BUDGET_SECONDS = 5.0
 
 
 def _safe_roots() -> list[Path]:
@@ -154,19 +156,42 @@ class FilesystemSkill(BaseSkill):
                 started_at=started,
             )
 
+        # `path` defaults to the home directory (the only allowed safe root)
+        # when the caller doesn't name a subfolder -- e.g. a deterministic
+        # "search files for X" HUD/voice command with no location. Without a
+        # time budget, `rglob("*")` over an entire real home directory (node_modules,
+        # AppData, browser caches, etc.) can run for minutes with no way to
+        # short-circuit before `_MAX_SEARCH_RESULTS` is reached, making the
+        # action appear hung. Bounding by wall-clock time, not just match
+        # count, keeps this a read-only op that always returns promptly.
         matches: list[str] = []
+        truncated = False
+        deadline = time.monotonic() + _SEARCH_TIME_BUDGET_SECONDS
         for path in resolved.rglob("*"):
             if query in path.name.lower():
                 matches.append(str(path))
                 if len(matches) >= _MAX_SEARCH_RESULTS:
+                    truncated = True
                     break
+            if time.monotonic() >= deadline:
+                truncated = True
+                break
+
+        summary = f"Found {len(matches)} match(es) for '{request.arguments['query']}' under {resolved}."
+        if truncated:
+            summary += " (search stopped early -- narrow 'path' for a complete result)"
 
         return self._result(
             request,
             ActionStatus.SUCCEEDED,
-            f"Found {len(matches)} match(es) for '{request.arguments['query']}' under {resolved}.",
+            summary,
             risk_level=RiskLevel.READ_ONLY,
-            data={"path": str(resolved), "query": request.arguments["query"], "matches": matches},
+            data={
+                "path": str(resolved),
+                "query": request.arguments["query"],
+                "matches": matches,
+                "truncated": truncated,
+            },
             started_at=started,
         )
 

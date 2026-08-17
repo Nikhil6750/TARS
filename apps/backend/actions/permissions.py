@@ -17,8 +17,12 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
     "windows_app": {
         "launch": RiskLevel.LOW_RISK,
         "focus": RiskLevel.LOW_RISK,
+        "list_running": RiskLevel.READ_ONLY,
     },
-    "browser": {"open_url": RiskLevel.LOW_RISK},
+    "browser": {
+        "open_url": RiskLevel.LOW_RISK,
+        "search": RiskLevel.LOW_RISK,
+    },
     "filesystem": {
         "list": RiskLevel.READ_ONLY,
         "list_files": RiskLevel.READ_ONLY,
