@@ -11,7 +11,216 @@ for that).
 
 ---
 
-## Latest handoff — Append-only event history fix (2026-08-16)
+## Latest handoff — Wave 2A M2A Phase 2: skills execution layer (2026-08-17)
+
+**Branch**: `feature/wave2-core-skills`
+**Worktree**: `C:\TARS-Wave2-Claude` (do not confuse with the V1 worktrees above)
+**Base SHA**: `20f2353e100a37d93621a018e72951038a50585c` (`integration/wave2`)
+**Final SHA**: `f900293454afae300a64e177a142e6f86f719917` (implementation+tests
+commit; this handoff/`docs/coordination/wave2/m2a/claude.done.json` are
+committed in a follow-up docs-only commit on the same branch — see
+`git log feature/wave2-core-skills` for its trailing SHA, same convention as
+prior entries in this file: *Final SHA* names the last substantive code/test
+commit, not the handoff-writing commit).
+
+This is a **new milestone** (Wave 2A / M2A), not a continuation of the V1
+backend work below — read
+[`docs/coordination/wave2/M2A_SPEC.md`](../wave2/M2A_SPEC.md) and
+[`M2A_INTERFACES.md`](../wave2/M2A_INTERFACES.md) first. `apps/backend/app/`,
+`apps/backend/{events,voice,assistant,memory}/`, and all V1 tests are
+**unmodified** except `apps/backend/requirements.txt` (one additive line,
+`pywin32==312`).
+
+**Work completed** — implemented `apps/backend/skills/`, the real Windows
+skill-execution layer Codex's action runtime (`apps/backend/actions/`, not
+yet built) will dispatch validated `ActionRequest`s into:
+
+1. **`skills/windows_app.py` (`WindowsAppSkill`)** — `launch`
+   (`subprocess.Popen` with an argv list, never `shell=True`; bare names
+   resolved via `shutil.which`, absolute targets must be an existing
+   `.exe` with no `..` segments), `focus` (real `pywin32`
+   `win32gui`/`win32process`/`win32api` — enumerates visible windows,
+   matches by executable basename or window-title substring, calls
+   `ShowWindow`/`SetForegroundWindow`), `list_running` (read-only: exe name
+   + window title only, no content). `pywin32==312` was already present
+   and genuinely importable in this sandbox (`import win32gui,
+   win32process, win32con, win32api` succeeds); added it to
+   `requirements.txt` since it wasn't previously pinned there.
+2. **`skills/filesystem.py` (`FilesystemSkill`)** — `list`/`search`
+   (read-only, boundary-checked: `Path.resolve()` then
+   `Path.relative_to()` against the caller's home-directory tree, so `..`
+   traversal or an absolute path outside the allowlist is rejected before
+   any filesystem access), `open` (`os.startfile`). **Write/delete/move
+   are not implemented** — `classify_risk()` returns `BLOCKED` and
+   `validate()` raises `SkillValidationError` for any such action; nothing
+   silently no-ops.
+3. **`skills/browser.py` (`BrowserSkill`)** — `open_url`/`search` via
+   stdlib `webbrowser` only; `validate_http_url()` rejects any scheme
+   other than `http`/`https` (`file://`, `javascript:`, `data:`, etc. all
+   rejected before `webbrowser.open` is ever called). No headless
+   automation/scraping.
+4. **`skills/terminal.py` (`TerminalSkill`)** — `run_command` via
+   `subprocess.run` with real captured stdout/stderr/exit code and a
+   timeout (default 30s, hard-capped at 120s regardless of caller input).
+   `classify_command()` is pure/deterministic: a conservative denylist
+   (`format`, `del`/`rd`/`rmdir /s`, `Remove-Item -Recurse -Force`,
+   `shutdown`/`Stop-Computer`/`Restart-Computer`, `diskpart`, `reg
+   delete`, `net user`, `bcdedit`, `vssadmin`, `cipher /w`, `runas`,
+   `sudo`, `takeown`, remote `iex`/`Invoke-Expression` combined with a
+   fetch construct, writes targeting `C:\Windows\System32`) is checked
+   **before** a narrow leading-verb `READ_ONLY` allowlist (`dir`, `ls`,
+   `type`, `cat`, `echo`, `whoami`, `pwd`, `cd`, `Get-ChildItem`,
+   `Get-Process`, `Get-Content`, `git status`/`log`/`diff`) — and any
+   chaining/redirection operator (`&`, `&&`, `|`, `;`, `>`, `<`)
+   disqualifies a command from that allowlist entirely, so `dir & del /s`
+   classifies `BLOCKED` (via the denylist) rather than slipping through as
+   `READ_ONLY` because it starts with `dir`. `validate()` re-checks
+   `BLOCKED` independently (defense in depth), and `execute()` refuses to
+   actually run a `BLOCKED` command even if called directly.
+5. **`skills/obsidian.py` (`ObsidianSkill`)** — `search`/`read` wrapping
+   the **existing** `memory.service.MemoryService` (FTS5 + vault
+   indexing) — no reimplemented indexing/search. `search` delegates to
+   `MemoryService.search(..., source="vault")` and preserves its
+   `source`/`source_id` fields verbatim into `ActionResult.data`. `read`
+   resolves a vault-relative path with the same boundary-check pattern as
+   `filesystem.py` and reads the real file (`MemoryService` only indexes
+   snippets, not full bodies, so this is the one piece not already
+   exposed by the existing service).
+6. **`skills/voice_bridge.py`** —
+   `build_action_request_from_voice(text, *, source, active_context=None)
+   -> ActionRequest | None`. A small, fixed set of 4 regex patterns
+   (`focus <target>`, `open <http(s) url>`, `search for <query>`,
+   `launch/open/start <app>`) mirroring `assistant/router.py`'s
+   deterministic-routing pattern (M2A criterion 12). Returns `None` for
+   anything unrecognized — the caller (voice pipeline / action runtime,
+   not this module) falls through to the existing LLM/assistant path
+   unchanged. `assistant/router.py` itself was **not modified**.
+7. **`skills/registry.py`** — `SKILLS: dict[str, Skill]` (eager; the 4
+   skills above with no live-DB dependency) and `build_registry
+   (memory_service=None, vault_path=None) -> dict[str, Skill]` for the
+   full 5-skill registry including `obsidian`. See "Interfaces exposed"
+   below for exactly why `obsidian` is not in the eager `SKILLS` dict and
+   how to get it.
+
+**Interfaces exposed** (for Codex, per M2A_INTERFACES.md's "expected
+surface between streams"):
+
+- `from skills.registry import SKILLS` → `dict[str, Skill]` with keys
+  `windows_app`, `filesystem`, `browser`, `terminal` — importable and
+  constructible with zero side effects, safe to import at module load
+  time.
+- `from skills.registry import build_registry` →
+  `build_registry(memory_service: MemoryService | None = None, vault_path:
+  str | None = None) -> dict[str, Skill]`. Call this **once you have a
+  live `MemoryService` instance** (e.g. `request.app.state.memory_service`
+  / `app.deps.get_memory_service`, the same DI pattern `app/main.py`'s
+  lifespan and `app/deps.py` already use for every other request-scoped
+  singleton) to get the complete 5-skill registry including `obsidian`.
+  `obsidian` is deliberately excluded from the eager `SKILLS` dict because
+  `ObsidianSkill` wraps `MemoryService`, which wraps a live
+  `aiosqlite.Connection` that this codebase only creates during app
+  startup — constructing it at import time would mean either an
+  unmanaged second DB connection or a fabricated stand-in, both wrong.
+- All five skill classes subclass `app.action_contracts.BaseSkill`
+  unmodified — `classify_risk()`/`validate()`/`execute()` match the
+  frozen `Skill` Protocol exactly; every `execute()` return is built via
+  `self._result(...)` (never a hand-built `ActionResult`).
+- `skills.terminal.classify_command(command: str) -> RiskLevel` and
+  `skills.browser.validate_http_url(url: str) -> str` and
+  `skills.filesystem.resolve_within_safe_roots(path: str) -> Path` are
+  exposed as standalone functions (not just methods) in case the action
+  runtime wants to pre-classify/pre-validate without a full skill dispatch
+  — not required, just available.
+
+**Files changed**:
+`apps/backend/skills/__init__.py` (new),
+`apps/backend/skills/windows_app.py` (new),
+`apps/backend/skills/filesystem.py` (new),
+`apps/backend/skills/browser.py` (new),
+`apps/backend/skills/terminal.py` (new),
+`apps/backend/skills/obsidian.py` (new),
+`apps/backend/skills/voice_bridge.py` (new),
+`apps/backend/skills/registry.py` (new),
+`apps/backend/tests/test_skill_windows_app.py` (new),
+`apps/backend/tests/test_skill_filesystem.py` (new),
+`apps/backend/tests/test_skill_browser.py` (new),
+`apps/backend/tests/test_skill_terminal.py` (new),
+`apps/backend/tests/test_skill_obsidian.py` (new),
+`apps/backend/tests/test_skill_voice_bridge.py` (new),
+`apps/backend/tests/test_skill_registry.py` (new),
+`apps/backend/requirements.txt` (one additive line: `pywin32==312`).
+No existing V1 file's behavior was touched;
+`apps/backend/app/action_contracts.py` and `apps/backend/app/contracts.py`
+were read but not edited (frozen, per `M2A_SPEC.md`).
+
+**Tests run** (from `C:\TARS-Wave2-Claude\apps\backend`, targeted only, per
+`M2A_SPEC.md`'s validation cadence for this milestone):
+
+- `python -m pytest tests/test_skill_windows_app.py
+  tests/test_skill_filesystem.py tests/test_skill_browser.py
+  tests/test_skill_terminal.py tests/test_skill_obsidian.py -q` — **113
+  passed**, 0 failed (the exact five files named in the Phase 2 task spec).
+- Same command plus `tests/test_skill_voice_bridge.py
+  tests/test_skill_registry.py` — **124 passed**, 0 failed.
+- Regression spot-check of pre-existing modules this work imports from —
+  `python -m pytest tests/test_action_contracts.py
+  tests/test_memory_service.py tests/test_memory_fts.py
+  tests/test_memory_vault.py tests/test_contracts.py -q` — **25 passed**,
+  0 failed (unmodified, none weakened).
+- `python -m ruff check skills/ tests/test_skill_*.py` — **clean**.
+- `python -m mypy --config-file pyproject.toml skills` — **clean, 8
+  source files**.
+- Full `apps/backend/tests` suite was **not** run this session (targeted
+  validation per milestone cadence, not repeated full-suite runs per
+  stream — see `M2A_SPEC.md`).
+
+**Known limitations** (see `claude.done.json`'s `known_gaps` for the full
+text):
+
+- `focus`'s `SetForegroundWindow` path was verified against a **real**
+  win32 window created in-process during the test run (genuine pass, not
+  mocked) — it was **not** verified against a separately-running foreground
+  application (e.g. a real, independently-launched Notepad) in this
+  sandbox session, since that would mean popping/interacting with a second
+  process's GUI window during an automated run. The same win32 API calls
+  apply regardless of which process owns the target window, so this is a
+  reasonable-confidence gap, explicitly flagged rather than omitted —
+  never claim this as fully end-to-end certified.
+- `terminal`'s `execute()` shells out via `cmd.exe`
+  (`subprocess.run(..., shell=True)`); PowerShell-only cmdlets in the
+  `READ_ONLY` allowlist (`Get-ChildItem` etc.) classify correctly but will
+  genuinely fail at execution time unless wrapped in
+  `powershell -Command "..."` — an honest `FAILED` result with real
+  stderr, not a silent lie, but worth the HUD/runtime knowing about.
+- `filesystem`'s safe-root allowlist is intentionally just the home
+  directory tree (`Path.home()`) — no mechanism yet to add more roots.
+- `voice_bridge` recognizes exactly 4 phrase shapes by design (not a
+  general NLU system).
+
+**Exact dependencies required from other agents**:
+
+- **Codex** (`apps/backend/actions/`): import `skills.registry.SKILLS` for
+  the 4 DB-independent skills, and call
+  `skills.registry.build_registry(memory_service=<its MemoryService
+  instance>)` to get the full 5-skill registry including `obsidian` — the
+  action runtime is the natural place to obtain a live `MemoryService` the
+  same way `app/main.py`'s lifespan does today.
+- **Codex**: the permission engine must be the actual enforcement point
+  for `RiskLevel` — a skill's own `BLOCKED` handling (e.g. `terminal.py`
+  refusing to run a `BLOCKED` command even if `execute()` is called
+  directly) is defense-in-depth, not a substitute for the runtime
+  re-deriving/checking the classification itself, per
+  `M2A_INTERFACES.md`'s RiskLevel section.
+- No blocking dependency on Antigravity's native shell for this phase.
+
+**Next recommended action**: Codex wires `skills.registry.SKILLS` /
+`build_registry()` into `apps/backend/actions/` dispatch. Once that exists,
+recommend an end-to-end action-runtime→skills dispatch test as part of the
+Phase 4 integration validation gate.
+
+---
+
+## Append-only event history fix (2026-08-16)
 
 **Branch**: `fix/v1-final-lifecycle`
 **Base SHA**: `9f13e09a7c44be27901d34cb885a63ceb8755463`
