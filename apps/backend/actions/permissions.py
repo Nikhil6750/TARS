@@ -37,6 +37,21 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         "read": RiskLevel.READ_ONLY,
         "read_note": RiskLevel.READ_ONLY,
     },
+    "desktop_control": {
+        "inspect_current_window": RiskLevel.READ_ONLY,
+        "list_controls": RiskLevel.READ_ONLY,
+        "read_selected_text": RiskLevel.READ_ONLY,
+        "read_clipboard": RiskLevel.READ_ONLY,
+        "focus_control": RiskLevel.LOW_RISK,
+        "scroll_control": RiskLevel.LOW_RISK,
+        # State-changing UI actions: must never be READ_ONLY, and the
+        # generic verb heuristic below would not catch these action names
+        # (no "write"/"create"/"update" substring), so they need an
+        # explicit floor here rather than falling through to it.
+        "invoke_control": RiskLevel.CONFIRM_REQUIRED,
+        "type_into_control": RiskLevel.CONFIRM_REQUIRED,
+        "select_control": RiskLevel.CONFIRM_REQUIRED,
+    },
 }
 
 _BLOCKED_ACTION = re.compile(

@@ -98,6 +98,52 @@
           "type": ["string", "null"],
           "format": "date-time",
           "default": null
+        },
+        "window_state": {
+          "description": "Restore state of the foreground window, if known.",
+          "default": null,
+          "enum": ["normal", "minimized", "maximized", "unknown", null]
+        },
+        "monitor": {
+          "description": "Display containing the foreground window, if known. No screenshot/pixel data -- geometry only.",
+          "default": null,
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["x", "y", "width", "height", "is_primary"],
+              "properties": {
+                "x": { "type": "integer" },
+                "y": { "type": "integer" },
+                "width": { "type": "integer" },
+                "height": { "type": "integer" },
+                "is_primary": { "type": "boolean" }
+              }
+            }
+          ]
+        },
+        "focused_control": {
+          "description": "Metadata (not content/value) of the control that has keyboard focus within the window, where UI Automation safely exposes it.",
+          "default": null,
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "control_type": { "type": ["string", "null"], "default": null },
+                "name": { "type": ["string", "null"], "default": null },
+                "automation_id": { "type": ["string", "null"], "default": null },
+                "class_name": { "type": ["string", "null"], "default": null }
+              }
+            }
+          ]
+        },
+        "source": {
+          "description": "Capture mechanism that produced this context.",
+          "default": null,
+          "enum": ["win32", "ui_automation", null]
         }
       }
     }
