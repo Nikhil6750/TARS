@@ -14,7 +14,7 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 **Status**: COMPLETE — Screen awareness (DPI-aware monitor geometry, active window BMP capture, bounded region capture, secure desktop protection, temp cache eviction, Win32 UI hierarchy), Visual & Semantic targeting engine (strict preference hierarchy, coordinate bounding, sensitive field redaction, zero random click loops), Real Browser automation layer (scheme validation, DOM/accessibility extraction, semantic element finding, safe clicking, sensitive typing, scrolling, history, tabs), Multi-Step Action Planner, and extended HUD UI surface (VisualInspectorCard, BrowserContextCard, MultiStepPlanView) fully implemented and verified.
 **Branch**: `feature/wave2b-vision-browser`
-**Commit SHA**: `HEAD`
+**Commit SHA**: `905825a0bb97c565cb9aa51547d916e0d45fe240`
 **MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231
 **Windows SDK**: Windows 10.0.26200 x86_64 SDK
 **Cargo Target**: `D:\TARS-cache\cargo-target\release\tars-companion.exe`
