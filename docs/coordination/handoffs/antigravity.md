@@ -14,7 +14,7 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 **Status**: COMPLETE — JARVIS-style background companion flow: Local continuous background wake listener ("Hey TARS"), pre-summon foreground window preservation (`LAST_EXTERNAL_HWND` in Win32/Rust bridge) ensuring TradingView/active chart is captured without capturing TARS itself, flexible conversational intent routing, silent background Claude Code reasoning formatted cleanly as TARS with concise structured fields (`BIAS`, `WHAT I SEE`, `SETUP`, `KEY LEVEL`, `INVALIDATION`, `RISK`, `ACTION`), progressive ChatGPT-style token streaming in HUD (`TARS AI · Live`), real-time TTS voice synchronization with dynamic FFT waveform reactivity, and native release binary compiled.
 **Branch**: `feature/linkedin-demo`
-**Commit SHA**: `HEAD` (to be recorded)
+**Commit SHA**: `b5a28ca93c558e7237fbf1868f06bd74fe3b2c5b`
 **Work completed**:
 1. **Background Wake & Previous Window Preservation (`apps/web/src-tauri/src/lib.rs`)**:
    - Implemented `LAST_EXTERNAL_HWND` atomic tracking in Win32 GDI bridge.
