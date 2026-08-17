@@ -14,12 +14,16 @@ from actions.plan_store import PlanStore
 from actions.registry import build_skill_registry
 from actions.runtime import ActionRuntime
 from actions.store import ActionStore
+from agents.providers import IntelligenceProviderRegistry
+from agents.quant_boundary import QuantBrainBoundary
+from agents.runtime import AgentRuntime
+from agents.store import AgentStore
 from app.body_limit import MaxBodySizeMiddleware
 from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
 from app.observability import configure_tracing
-from app.routers import action_plans, actions, assistant, events, health, memory, voice, ws
+from app.routers import action_plans, actions, agents, assistant, events, health, memory, voice, ws
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
 from app.ws_manager import ConnectionManager
@@ -102,6 +106,26 @@ async def lifespan(app: FastAPI):
     )
     await action_runtime.initialize()
     app.state.action_runtime = action_runtime
+    agent_runtime = AgentRuntime(
+        AgentStore(db.conn),
+        action_runtime,
+        IntelligenceProviderRegistry(),
+        strategy_boundary=QuantBrainBoundary(),
+    )
+    recovered_jobs = await agent_runtime.initialize()
+    if recovered_jobs:
+        logger.warning(
+            "%d interrupted agent job(s) require explicit recovery", len(recovered_jobs)
+        )
+    app.state.agent_runtime = agent_runtime
+    scheduler.add_job(
+        agent_runtime.run_due,
+        "interval",
+        seconds=1,
+        id="agent_due_jobs",
+        max_instances=1,
+        coalesce=True,
+    )
     plan_runtime = PlanRuntime(PlanStore(db.conn), action_runtime)
     await plan_runtime.initialize()
     app.state.plan_runtime = plan_runtime
@@ -169,6 +193,7 @@ def create_app() -> FastAPI:
     app.include_router(ws.router)
     app.include_router(actions.router)
     app.include_router(action_plans.router)
+    app.include_router(agents.router)
 
     return app
 
