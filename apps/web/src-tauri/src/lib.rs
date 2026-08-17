@@ -8,6 +8,64 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 static CAPTURE_COUNTER: AtomicUsize = AtomicUsize::new(1);
+static LAST_EXTERNAL_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+unsafe fn get_target_chart_window_hwnd() -> windows_sys::Win32::Foundation::HWND {
+    use windows_sys::Win32::Foundation::*;
+    use windows_sys::Win32::System::Threading::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    let current_pid = GetCurrentProcessId();
+    let current_fg = GetForegroundWindow();
+
+    // 1. If current foreground is an external application (e.g. TradingView), preserve & return it
+    if !current_fg.is_null() {
+        let mut fg_pid = 0u32;
+        GetWindowThreadProcessId(current_fg, &mut fg_pid);
+        if fg_pid != 0 && fg_pid != current_pid {
+            LAST_EXTERNAL_HWND.store(current_fg as isize, Ordering::SeqCst);
+            return current_fg;
+        }
+    }
+
+    // 2. If TARS is foreground, check the preserved previous external window
+    let stored_raw = LAST_EXTERNAL_HWND.load(Ordering::SeqCst);
+    if stored_raw != 0 {
+        let stored_hwnd = stored_raw as HWND;
+        if IsWindow(stored_hwnd) != 0 && IsWindowVisible(stored_hwnd) != 0 {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(stored_hwnd, &mut pid);
+            if pid != 0 && pid != current_pid {
+                return stored_hwnd;
+            }
+        }
+    }
+
+    // 3. Fallback: Search top-level windows in Z-order for top visible non-TARS application
+    let mut curr = GetTopWindow(std::ptr::null_mut());
+    while !curr.is_null() {
+        if IsWindowVisible(curr) != 0 {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(curr, &mut pid);
+            if pid != 0 && pid != current_pid {
+                let mut title_buf = [0u16; 64];
+                let len = GetWindowTextW(curr, title_buf.as_mut_ptr(), 64);
+                let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetWindowRect(curr, &mut rect);
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                if len > 0 && w > 200 && h > 200 {
+                    LAST_EXTERNAL_HWND.store(curr as isize, Ordering::SeqCst);
+                    return curr;
+                }
+            }
+        }
+        curr = GetWindow(curr, GW_HWNDNEXT);
+    }
+
+    current_fg
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowBounds {
@@ -232,6 +290,20 @@ fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn summon_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::System::Threading::*;
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let fg = GetForegroundWindow();
+        if !fg.is_null() {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(fg, &mut pid);
+            if pid != 0 && pid != GetCurrentProcessId() {
+                LAST_EXTERNAL_HWND.store(fg as isize, Ordering::SeqCst);
+            }
+        }
+    }
+
     if let Some(window) = app.get_webview_window("main") {
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
@@ -288,7 +360,7 @@ fn get_active_window_context() -> Result<ActiveWindowContext, String> {
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
         unsafe {
-            let hwnd = GetForegroundWindow();
+            let hwnd = get_target_chart_window_hwnd();
             if hwnd.is_null() {
                 return Ok(ActiveWindowContext {
                     executable: "unknown.exe".into(),
@@ -474,7 +546,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
         unsafe {
-            let hwnd = GetForegroundWindow();
+            let hwnd = get_target_chart_window_hwnd();
             let now = chrono::Utc::now().to_rfc3339();
             let count = CAPTURE_COUNTER.fetch_add(1, Ordering::SeqCst);
             let capture_id = format!("cap_{}_{}", chrono::Utc::now().timestamp_millis(), count);

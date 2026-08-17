@@ -530,7 +530,7 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
                     <div className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
                     <span className="font-bold">ANALYZING ACTIVE CHART...</span>
                   </div>
-                  <span className="text-[9px] text-slate-400">Claude Code · Live</span>
+                  <span className="text-[9px] text-cyan-400 font-mono">TARS AI · Live</span>
                 </div>
                 <div className="font-mono text-[11px] text-slate-200 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto custom-scrollbar">
                   {streamedAnalysisText}

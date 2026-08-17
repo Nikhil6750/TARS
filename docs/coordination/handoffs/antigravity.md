@@ -10,32 +10,27 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (LINKEDIN DEMO UI + WAKE EXPERIENCE + STREAMING FIX)
+## Latest handoff (FINAL DEMO FIX: JARVIS-STYLE TARS)
 
-**Status**: COMPLETE — Premium floating TARS voice HUD, quantum orb visualizer (`TARSOrb`) with hardware-accelerated 60fps animations and real-time audio amplitude reactivity, local continuous wake-word phrase detection ("Hey TARS" / "Analyze this chart"), real-time SSE chart analysis streaming from Claude Code (`/api/v1/assistant/analyze-chart/stream`), progressive token rendering card with live blinking cursor, structured chart analysis visualization card (`ChartAnalysisCard`), real-time TTS amplitude synchronization, Esc / close to tray, and native release build compiled and verified.
+**Status**: COMPLETE — JARVIS-style background companion flow: Local continuous background wake listener ("Hey TARS"), pre-summon foreground window preservation (`LAST_EXTERNAL_HWND` in Win32/Rust bridge) ensuring TradingView/active chart is captured without capturing TARS itself, flexible conversational intent routing, silent background Claude Code reasoning formatted cleanly as TARS with concise structured fields (`BIAS`, `WHAT I SEE`, `SETUP`, `KEY LEVEL`, `INVALIDATION`, `RISK`, `ACTION`), progressive ChatGPT-style token streaming in HUD (`TARS AI · Live`), real-time TTS voice synchronization with dynamic FFT waveform reactivity, and native release binary compiled.
 **Branch**: `feature/linkedin-demo`
-**Commit SHA**: `189fd694d3f5db119afddaca7df0d6c6b8bb63ca`
+**Commit SHA**: `HEAD` (to be recorded)
 **Work completed**:
-1. **Orb/HUD Native Summon & Default Experience (`apps/web/src-tauri/tauri.conf.json`, `apps/web/src/services/storage.ts`, `apps/web/src/App.tsx`)**:
-   - Configured native window size to `440x740`, `alwaysOnTop: true`, `title: "TARS — Trading Companion"`.
-   - Set `DEFAULT_SETTINGS.compactMode = true` so floating Orb HUD is the primary surface on startup.
-   - Updated `handleSummonHUD` to set `compactMode: true` and summon/focus the window on `Ctrl+Shift+Space`, `Ctrl+Shift+T`, and tray summon.
-   - Initialized microphone permission check on mount.
-2. **Real-Time Claude Code SSE Streaming (`apps/backend/`, `apps/web/src/App.tsx`, `apps/web/src/components/hud/HUDOverlay.tsx`)**:
-   - `ClaudeCodeProvider.respond_stream`: Uses `claude -p "<prompt>" --output-format stream-json --verbose` with `stdin=asyncio.subprocess.DEVNULL` for zero prompt timeout delay, streaming token deltas in real-time.
-   - `ChartAnalysisService.analyze_stream`: Async generator streaming stdout chunks from vision-read Claude process.
-   - `POST /api/v1/assistant/analyze-chart/stream`: FastAPI `StreamingResponse` emitting Server-Sent Events (`data: {"type": "delta", "text": "..."}`).
-   - Frontend `handleAnalyzeChart`: Consumes SSE stream, progressively rendering text generation under the Orb in real-time like ChatGPT.
-   - Seamlessly transitions from live stream card -> `ChartAnalysisCard` -> TTS speech with waveform reactivity.
-3. **TARS Quantum Orb Visualizer (`apps/web/src/components/character/TARSOrb.tsx`)**:
-   - Preserves high-detail generated orb design (`apps/web/public/assets/tars-orb.png`).
-   - 60fps hardware-accelerated transforms (`scale3d`, `translate3d`, `opacity`).
-   - Full state transitions: `IDLE` -> `WAKE` -> `LISTENING` -> `THINKING` -> `SPEAKING`.
-4. **Tests & Verification**:
-   - `linkedin-demo.test.tsx` (8 tests): TARSOrb states, progressive streaming card, ChartAnalysisCard presentation, disclaimer verification, demo trigger click handler, and truthful wake status.
-   - 17 test files, 105/105 tests passing (100%).
-   - Production Vite bundle (`npm run build`) succeeds cleanly.
-   - Tauri native Windows release build compiled (`tars-companion.exe` and `TARS_1.0.0_x64-setup.exe`).
+1. **Background Wake & Previous Window Preservation (`apps/web/src-tauri/src/lib.rs`)**:
+   - Implemented `LAST_EXTERNAL_HWND` atomic tracking in Win32 GDI bridge.
+   - `summon_hud_impl` grabs the current active foreground application HWND (e.g. TradingView/Chrome) before focusing TARS.
+   - `get_target_chart_window_hwnd()` finds and captures the target chart application beneath TARS, preventing TARS from capturing itself.
+2. **Flexible Voice Intent Routing (`apps/web/src/services/wake-word.ts`, `apps/web/src/App.tsx`)**:
+   - Expanded intent regex to match "analyze this chart", "analyze the chart", "check this chart", "look at this chart", "can you analyze this chart", "what do you see on this chart", etc.
+   - Added debounce timestamps and `isAnalyzingChartRef` guard to prevent duplicate executions.
+3. **TARS Persona & Concise Response Formatting (`apps/backend/assistant/chart_analysis.py`, `apps/web/src/`)**:
+   - Removed all user-facing "Claude" branding in favor of "TARS Core" / "TARS AI · Live".
+   - Formatted analysis strictly into TARS persona: `BIAS`, `WHAT I SEE`, `SETUP`, `KEY LEVEL`, `INVALIDATION`, `RISK`, `ACTION`.
+   - Spoken summary (`speech_text`) condensed for natural TTS read.
+4. **Tests & Build Verification**:
+   - `linkedin-demo.test.tsx` (9 tests passing): Intent regex variants, TARSOrb states, TARS AI badge, disclaimer verification, and local wake engine.
+   - 17 test suites (106 tests) passing with 0 errors.
+   - Native Windows release binary compiled cleanly at `C:\TARS-Demo\apps\web\src-tauri\target\release\tars-companion.exe`.
 
 ---
 

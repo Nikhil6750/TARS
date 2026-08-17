@@ -237,12 +237,16 @@ export const App: React.FC = () => {
   // "Analyze this chart": captures the active window through the real,
   // backend-authorized capture flow (nativeBridge -> Tauri, same path the
   // HUD's own screen-capture button uses) and the active-window context
-  // alongside it, then asks the backend's /analyze-chart endpoint (Claude,
-  // via the existing AssistantProvider architecture) for a qualitative,
-  // uncertainty-aware read. Reuses handleIncomingAssistantMessage for
-  // display, TTS, and the THINKING/SPEAKING/IDLE state machine -- no new
-  // UI or state plumbing.
+  const isAnalyzingChartRef = useRef(false);
+
+  // "Analyze this chart": captures the active window through the real,
+  // backend-authorized capture flow (nativeBridge -> Tauri, preserving the
+  // previous application window) and the active-window context alongside it,
+  // then asks the backend for a qualitative, uncertainty-aware read.
   const handleAnalyzeChart = useCallback(async () => {
+    if (isAnalyzingChartRef.current) return;
+    isAnalyzingChartRef.current = true;
+
     const convId = 'conv_main_session';
     const newMessage = (content: string, error?: string, providerName?: string): TARSAssistantMessage => ({
       schema_version: '1.0.0',
@@ -285,7 +289,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      setStreamedAnalysisText('Chart captured. Streaming Claude analysis...\n');
+      setStreamedAnalysisText('Chart captured. TARS analyzing price structure...\n\n');
 
       let streamCompleted = false;
       try {
@@ -373,6 +377,7 @@ export const App: React.FC = () => {
       setStreamedAnalysisText('');
       handleIncomingAssistantMessage(newMessage(`Chart analysis error: ${msg}`, msg));
     } finally {
+      isAnalyzingChartRef.current = false;
       setIsAnalyzingChart(false);
     }
   }, [settings.apiEndpoint, handleIncomingAssistantMessage]);

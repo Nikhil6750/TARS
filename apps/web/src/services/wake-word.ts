@@ -26,8 +26,8 @@ export interface WakeWordCallbacks {
 }
 
 // Regex patterns for wake phrase and chart analysis commands
-const WAKE_PHRASE_REGEX = /\b(hey\s+tars|tars|hey\s+tar|ok\s+tars|hey\s+torres)\b/i;
-const ANALYZE_CHART_REGEX = /\b(analy[sz]e)\s+(this|the|my)?\s*chart\b/i;
+const WAKE_PHRASE_REGEX = /\b(hey\s+tars|tars|hey\s+tar|ok\s+tars|hey\s+torres|hi\s+tars)\b/i;
+const ANALYZE_CHART_REGEX = /\b(analy[sz]e|check|look\s+at|evaluate|read|scan|inspect|review|what\s+do\s+you\s+see\s+on)\s+(?:this|the|my|active|current)?\s*charts?\b/i;
 
 type SpeechRecognitionType = unknown;
 
@@ -35,6 +35,8 @@ export class WakeWordService {
   private isRunning = false;
   private recognition: SpeechRecognitionType | null = null;
   private callbacks: WakeWordCallbacks | null = null;
+  private lastWakeDetectedAt = 0;
+  private lastChartDetectedAt = 0;
   private status: WakeWordStatusInfo = {
     isActive: false,
     engine: 'web_speech_local',
@@ -115,17 +117,25 @@ export class WakeWordService {
               this.callbacks.onTranscriptInterim(transcript);
             }
 
+            const now = Date.now();
+
             // Check if chart analysis command is directly uttered
             if (ANALYZE_CHART_REGEX.test(transcript)) {
-              this.callbacks?.onAnalyzeChartDetected?.(transcript);
-              this.updateStatus({ lastDetectedAt: new Date().toISOString() });
+              if (now - this.lastChartDetectedAt > 2000) {
+                this.lastChartDetectedAt = now;
+                this.callbacks?.onAnalyzeChartDetected?.(transcript);
+                this.updateStatus({ lastDetectedAt: new Date().toISOString() });
+              }
               return;
             }
 
             // Check for wake word "Hey TARS"
             if (WAKE_PHRASE_REGEX.test(transcript)) {
-              this.callbacks?.onWakeDetected(transcript);
-              this.updateStatus({ lastDetectedAt: new Date().toISOString() });
+              if (now - this.lastWakeDetectedAt > 2000) {
+                this.lastWakeDetectedAt = now;
+                this.callbacks?.onWakeDetected(transcript);
+                this.updateStatus({ lastDetectedAt: new Date().toISOString() });
+              }
               return;
             }
           }

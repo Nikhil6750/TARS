@@ -132,7 +132,25 @@ describe('LinkedIn Demo UI & Wake Experience Tests', () => {
 
       expect(screen.getAllByText(/ANALYZING ACTIVE CHART.../i).length).toBeGreaterThan(0);
       expect(screen.getByText(/Observing breakout above 1.0850 key level/i)).toBeInTheDocument();
-      expect(screen.getByText(/Claude Code · Live/i)).toBeInTheDocument();
+      expect(screen.getByText(/TARS AI · Live/i)).toBeInTheDocument();
+    });
+
+    it('matches all conversational chart analysis voice variants deterministically', () => {
+      const CHART_REGEX = /\b(analy[sz]e|check|look\s+at|evaluate|read|scan|inspect|review|what\s+do\s+you\s+see\s+on)\s+(?:this|the|my|active|current)?\s*charts?\b/i;
+      const variants = [
+        'analyze this chart',
+        'analyze the chart',
+        'check this chart',
+        'look at this chart',
+        'can you analyze this chart',
+        'evaluate the chart',
+        'scan active chart',
+        'what do you see on this chart',
+      ];
+      for (const variant of variants) {
+        expect(CHART_REGEX.test(variant)).toBe(true);
+      }
+      expect(CHART_REGEX.test('what is the weather today')).toBe(false);
     });
 
     it('wakeWordService reports local status truthfully without claiming external cloud', () => {

@@ -13,6 +13,10 @@ import {
 export interface ChartAnalysisData {
   instrument?: string | null;
   timeframe?: string | null;
+  bias?: string | null;
+  what_i_see?: string | null;
+  setup?: string | null;
+  action?: string | null;
   market_context: string;
   key_levels?: string[];
   possible_setup?: string | null;
@@ -21,6 +25,7 @@ export interface ChartAnalysisData {
   provider?: string;
   disclaimer?: string;
   speech_text?: string;
+  formatted_tars_text?: string;
 }
 
 interface ChartAnalysisCardProps {
@@ -39,12 +44,12 @@ export const ChartAnalysisCard: React.FC<ChartAnalysisCardProps> = ({
   const {
     instrument,
     timeframe,
+    bias,
     market_context,
     key_levels = [],
     possible_setup,
     invalidation,
     risk_notes,
-    provider = 'Claude',
     disclaimer,
   } = analysis;
 
@@ -59,11 +64,26 @@ export const ChartAnalysisCard: React.FC<ChartAnalysisCardProps> = ({
             <Activity className="w-3.5 h-3.5" />
           </div>
           <div>
-            <h4 className="text-xs font-mono font-bold text-cyan-300 tracking-wide">
-              {headerLabel}
-            </h4>
+            <div className="flex items-center gap-2">
+              <h4 className="text-xs font-mono font-bold text-cyan-300 tracking-wide">
+                {headerLabel}
+              </h4>
+              {bias && (
+                <span
+                  className={`px-1.5 py-0.2 rounded text-[9px] font-mono font-bold uppercase ${
+                    bias.toLowerCase().includes('bull')
+                      ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
+                      : bias.toLowerCase().includes('bear')
+                      ? 'bg-rose-950 text-rose-300 border border-rose-500/40'
+                      : 'bg-slate-800 text-slate-300 border border-slate-600/40'
+                  }`}
+                >
+                  {bias}
+                </span>
+              )}
+            </div>
             <span className="text-[9px] font-mono text-slate-400">
-              Provider: <span className="text-cyan-400">{provider}</span> · Read-Only Context
+              Reasoning: <span className="text-cyan-400">TARS Core</span> · Real-time Read
             </span>
           </div>
         </div>

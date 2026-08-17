@@ -29,24 +29,25 @@ from PIL import Image, UnidentifiedImageError
 from assistant.provider import AssistantProvider, AssistantRequest
 
 _SYSTEM_PROMPT = (
-    "You are TARS, a trading companion, looking at a screenshot of the "
-    "user's active window (likely a charting application) on their "
-    "explicit request to analyze it. You are not quant_brain and this is "
-    "not a validated trading signal -- never state a confidence percentage, "
+    "You are TARS, an AI trading companion, analyzing a screenshot of the "
+    "user's active chart application on their explicit voice request. "
+    "You are a companion, not quant_brain -- never state a confidence percentage, "
     "never claim a prediction is guaranteed, and never invent a price level "
-    "you cannot actually read from the image. If the image is not a chart, "
-    "say so plainly instead of inventing chart content. Respond with ONLY a "
-    "single JSON object (no markdown fences, no prose outside it) with "
-    'exactly these keys: "instrument" (string or null -- ticker/symbol if '
-    'legible, else null), "timeframe" (string or null), "market_context" '
-    '(1-3 sentences of what the price action/structure actually shows), '
-    '"key_levels" (array of short strings naming visible support/resistance '
-    "or structural levels -- empty array if none are legible), "
-    '"possible_setup" (string or null -- a qualitative, hedged read of what '
-    "setup this *could* be, never phrased as a recommendation or "
-    'certainty), "invalidation" (string or null -- what would invalidate '
-    'that read), "risk_notes" (string -- uncertainty, missing context, or '
-    "reasons this read could be wrong)."
+    "you cannot clearly read from the image. If the image is not a chart, "
+    "state that plainly. Keep observations short, crisp, and high-signal.\n\n"
+    "Respond with ONLY a single JSON object (no markdown fences, no prose outside it) "
+    "with exactly these keys:\n"
+    '- "instrument": string or null (ticker/symbol if legible, e.g. "EURUSD")\n'
+    '- "timeframe": string or null (e.g. "4H", "1D", "15m")\n'
+    '- "bias": string ("Bullish" | "Bearish" | "Neutral")\n'
+    '- "what_i_see": string (2-3 concise observations of price action/structure)\n'
+    '- "setup": string ("Valid" | "Invalid" | "Unclear")\n'
+    '- "key_levels": array of short strings (visible support/resistance levels)\n'
+    '- "possible_setup": string or null (qualitative setup name, e.g. "Breakout & Retest")\n'
+    '- "invalidation": string or null (specific condition/level invalidating this read)\n'
+    '- "risk_notes": string (one concise risk or volatility point)\n'
+    '- "action": string ("Wait" | "Watch" | "Potential setup")\n'
+    '- "market_context": string (concise overview sentence)'
 )
 
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
@@ -77,30 +78,55 @@ class ChartAnalysisResult:
     # shape -- market_context then holds the raw text verbatim instead of
     # fabricated structure.
     structured: bool
+    bias: str | None = None
+    what_i_see: str | None = None
+    setup: str | None = None
+    action: str | None = None
     disclaimer: str = (
         "Qualitative read from TARS's assistant, not a quant_brain-validated "
         "signal. No confidence score; nothing here is a guaranteed outcome."
     )
 
     def to_dict(self) -> dict[str, Any]:
-        # Includes speech_text so the frontend speaks/display the exact same
-        # composed summary this backend computed, rather than re-deriving
-        # its own formatting logic from the structured fields.
-        return {**asdict(self), "speech_text": self.speech_text()}
+        # Includes speech_text and formatted_tars_text
+        return {
+            **asdict(self),
+            "speech_text": self.speech_text(),
+            "formatted_tars_text": self.formatted_tars_text(),
+        }
+
+    def formatted_tars_text(self) -> str:
+        """Returns clean, formatted TARS response for HUD streaming."""
+        lines = [
+            f"BIAS: {self.bias or 'Neutral'}",
+            f"WHAT I SEE: {self.what_i_see or self.market_context or 'Observing active price structure.'}",
+            f"SETUP: {self.setup or 'Unclear'}",
+            f"KEY LEVEL: {', '.join(self.key_levels) if self.key_levels else 'None'}",
+            f"INVALIDATION: {self.invalidation or 'Structure break'}",
+            f"RISK: {self.risk_notes or 'Standard market risk.'}",
+            f"ACTION: {self.action or 'Watch'}",
+        ]
+        return "\n".join(lines)
 
     def speech_text(self) -> str:
         """A short, spoken-friendly summary for TTS."""
         parts: list[str] = []
-        if self.instrument or self.timeframe:
-            label = " ".join(p for p in (self.instrument, self.timeframe) if p)
-            parts.append(f"Looking at {label}.")
-        if self.market_context:
+        bias_label = self.bias or "Neutral"
+        label = " ".join(p for p in (self.instrument, self.timeframe) if p)
+        if label:
+            parts.append(f"Bias is {bias_label} on {label}.")
+        else:
+            parts.append(f"Bias is {bias_label}.")
+        if self.what_i_see:
+            parts.append(self.what_i_see)
+        elif self.market_context:
             parts.append(self.market_context)
-        if self.possible_setup:
-            parts.append(f"Possible read: {self.possible_setup}.")
         if self.invalidation:
-            parts.append(f"That would be invalidated if {self.invalidation}.")
-        parts.append("This isn't a validated signal, just a qualitative read.")
+            parts.append(f"Invalidation condition: {self.invalidation}.")
+        if self.action:
+            parts.append(f"Action: {self.action}.")
+        elif self.possible_setup:
+            parts.append(f"Possible read: {self.possible_setup}.")
         return " ".join(p.strip() for p in parts if p and p.strip())
 
 
@@ -242,6 +268,10 @@ def _parse_reply(text: str, provider: str) -> ChartAnalysisResult:
             possible_setup=_opt_str(payload.get("possible_setup")),
             invalidation=_opt_str(payload.get("invalidation")),
             risk_notes=str(payload.get("risk_notes") or ""),
+            bias=_opt_str(payload.get("bias")),
+            what_i_see=_opt_str(payload.get("what_i_see")),
+            setup=_opt_str(payload.get("setup")),
+            action=_opt_str(payload.get("action")),
             provider=provider,
             raw_text=text,
             structured=True,
