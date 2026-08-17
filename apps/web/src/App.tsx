@@ -382,52 +382,143 @@ export const App: React.FC = () => {
     }
   }, [settings.apiEndpoint, handleIncomingAssistantMessage]);
 
-  // Local continuous wake listener ("Hey TARS" / "Analyze this chart")
-  useEffect(() => {
-    wakeWordService.startListening({
-      onWakeDetected: (phrase) => {
-        console.info('[TARS Wake] Phrase detected:', phrase);
-        setSettings((prev) => {
-          if (!prev.compactMode) {
-            const next = { ...prev, compactMode: true };
-            saveSettings(next);
-            return next;
-          }
-          return prev;
-        });
-        nativeBridge.summonHUD('compact');
-        setCompanionState('WAKE');
-        setTimeout(async () => {
-          setCompanionState('LISTENING');
-          setIsListening(true);
-          await audioService.startPushToTalk((vol) => setAudioVolume(vol));
-        }, 400);
-      },
-      onAnalyzeChartDetected: async (phrase) => {
-        console.info('[TARS Wake] Direct chart analysis command detected:', phrase);
-        setSettings((prev) => {
-          if (!prev.compactMode) {
-            const next = { ...prev, compactMode: true };
-            saveSettings(next);
-            return next;
-          }
-          return prev;
-        });
-        nativeBridge.summonHUD('compact');
+  // Shared routing for any already-transcribed voice utterance, whether it
+  // came from manual push-to-talk or the post-wake command listener
+  // (services/wake-word.ts) -- same deterministic-action / chart-analysis /
+  // assistant-query path either way, so wake-triggered commands get
+  // identical handling to a manual PTT command.
+  const processVoiceTranscript = useCallback(async (transcript: string) => {
+    const convId = 'conv_voice_session';
+    setCompanionState('THINKING');
+
+    const userVoiceMsg: TARSAssistantMessage = {
+      schema_version: '1.0.0',
+      message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
+      conversation_id: convId,
+      timestamp: new Date().toISOString(),
+      role: 'user',
+      content: transcript,
+      input_mode: 'voice',
+      providers: { stt: 'faster-whisper' }
+    };
+    handleIncomingAssistantMessage(userVoiceMsg);
+
+    try {
+      // A recognized deterministic action phrase bypasses the LLM (not the
+      // Action Runtime) -- submitted through the same shared
+      // actionRuntimeClient the HUD uses, so its permission classification,
+      // skill dispatch, and CONFIRMATION_REQUIRED handling are identical,
+      // and the HUD's own onAnyActionResult listener picks up the real
+      // result automatically. Anything not recognized falls through
+      // unchanged to the assistant/LLM query below.
+      actionRuntimeClient.setEndpoint(settings.apiEndpoint);
+      const activeContext = await nativeBridge.getActiveWindowContext();
+      const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
+        transcript,
+        activeContext,
+        'voice_ptt'
+      );
+      if (deterministicReq) {
+        await actionRuntimeClient.submitAction(deterministicReq);
+        setCompanionState('IDLE');
+        return;
+      }
+
+      // "Analyze this chart" also bypasses the general LLM query -- it
+      // needs a screen capture attached, which the plain /assistant/query
+      // endpoint doesn't accept.
+      if (ANALYZE_CHART_PATTERN.test(transcript)) {
         await handleAnalyzeChart();
+        return;
+      }
+
+      const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: transcript, conversation_id: convId }),
+      });
+
+      if (response.ok) {
+        const assistantReply: TARSAssistantMessage = await response.json();
+        handleIncomingAssistantMessage(assistantReply);
+        return;
+      }
+    } catch (err) {
+      console.warn('[TARS Voice] Voice processing error:', err);
+    }
+
+    if (settings.mockGeneratorActive) {
+      setTimeout(() => {
+        const reply = createMockAssistantReply('status check', convId, activeSetups);
+        handleIncomingAssistantMessage(reply);
+      }, 500);
+    } else {
+      setCompanionState('IDLE');
+    }
+  }, [settings.apiEndpoint, settings.mockGeneratorActive, activeSetups, handleIncomingAssistantMessage, handleAnalyzeChart]);
+
+  // Local, always-on background wake listener ("Hey TARS" / "Analyze this
+  // chart") -- runs independent of HUD visibility (App.tsx/the WebView keep
+  // running when the window is hidden, see hide_hud_impl in src-tauri) and
+  // never depends on browser/WebView SpeechRecognition; see wake-word.ts.
+  useEffect(() => {
+    const summonCompact = () => {
+      setSettings((prev) => {
+        if (!prev.compactMode) {
+          const next = { ...prev, compactMode: true };
+          saveSettings(next);
+          return next;
+        }
+        return prev;
+      });
+      nativeBridge.summonHUD('compact');
+    };
+
+    wakeWordService.startListening(
+      {
+        onWakeDetected: (phrase) => {
+          console.info('[TARS Wake] Phrase detected:', phrase);
+          summonCompact();
+          setCompanionState('WAKE');
+          setTimeout(() => {
+            setCompanionState('LISTENING');
+            setIsListening(true);
+          }, 400);
+        },
+        onAnalyzeChartDetected: async (phrase) => {
+          console.info('[TARS Wake] Direct chart analysis command detected:', phrase);
+          summonCompact();
+          await handleAnalyzeChart();
+        },
+        onCommandCaptured: async (transcript) => {
+          console.info('[TARS Wake] Command captured:', transcript);
+          setIsListening(false);
+          setAudioVolume(0);
+          await processVoiceTranscript(transcript);
+        },
+        onCommandTimeout: () => {
+          console.info('[TARS Wake] No command heard after wake, returning to background listening.');
+          setIsListening(false);
+          setAudioVolume(0);
+          setCompanionState('IDLE');
+        },
+        onTranscriptInterim: (text) => {
+          setLiveTranscript(text);
+        },
+        onStateChange: (status) => {
+          setWakeStatus(status);
+        },
+        onAudioLevel: (level) => {
+          setAudioVolume(level);
+        },
       },
-      onTranscriptInterim: (text) => {
-        setLiveTranscript(text);
-      },
-      onStateChange: (status) => {
-        setWakeStatus(status);
-      },
-    });
+      settings.apiEndpoint
+    );
 
     return () => {
       wakeWordService.stopListening();
     };
-  }, [handleAnalyzeChart]);
+  }, [handleAnalyzeChart, processVoiceTranscript, settings.apiEndpoint]);
 
   // Fetch initial state from HTTP backend on mount
   useEffect(() => {
@@ -529,80 +620,17 @@ export const App: React.FC = () => {
         return;
       }
 
-      const convId = 'conv_voice_session';
+      let transcript = '';
       try {
-        // Step 1: Forward actual microphone Blob bytes to backend transcription endpoint
-        const transcript = await audioService.transcribeAudio(audioBlob, settings.apiEndpoint);
-        if (!transcript || !transcript.trim()) {
-          setCompanionState('IDLE');
-          return;
-        }
-
-        // Step 2: Display user message with actual transcribed text
-        const userVoiceMsg: TARSAssistantMessage = {
-          schema_version: '1.0.0',
-          message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
-          conversation_id: convId,
-          timestamp: new Date().toISOString(),
-          role: 'user',
-          content: transcript,
-          input_mode: 'voice',
-          providers: { stt: 'faster-whisper' }
-        };
-        handleIncomingAssistantMessage(userVoiceMsg);
-
-        // Step 2.5: A recognized deterministic action phrase bypasses the LLM
-        // (not the Action Runtime) -- submitted through the same shared
-        // actionRuntimeClient the HUD uses, so its permission classification,
-        // skill dispatch, and CONFIRMATION_REQUIRED handling are identical,
-        // and the HUD's own onAnyActionResult listener picks up the real
-        // result automatically. Anything not recognized falls through
-        // unchanged to the assistant/LLM query below.
-        actionRuntimeClient.setEndpoint(settings.apiEndpoint);
-        const activeContext = await nativeBridge.getActiveWindowContext();
-        const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
-          transcript,
-          activeContext,
-          'voice_ptt'
-        );
-        if (deterministicReq) {
-          await actionRuntimeClient.submitAction(deterministicReq);
-          setCompanionState('IDLE');
-          return;
-        }
-
-        // Step 2.75: "Analyze this chart" also bypasses the general LLM
-        // query -- it needs a screen capture attached, which the plain
-        // /assistant/query endpoint doesn't accept.
-        if (ANALYZE_CHART_PATTERN.test(transcript)) {
-          await handleAnalyzeChart();
-          return;
-        }
-
-        // Step 3: Query assistant endpoint with transcribed text
-        const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: transcript, conversation_id: convId }),
-        });
-
-        if (response.ok) {
-          const assistantReply: TARSAssistantMessage = await response.json();
-          handleIncomingAssistantMessage(assistantReply);
-          return;
-        }
+        transcript = await audioService.transcribeAudio(audioBlob, settings.apiEndpoint);
       } catch (err) {
-        console.warn('[TARS Voice PTT] Voice processing error:', err);
+        console.warn('[TARS Voice PTT] Transcription error:', err);
       }
-
-      if (settings.mockGeneratorActive) {
-        setTimeout(() => {
-          const reply = createMockAssistantReply('status check', convId, activeSetups);
-          handleIncomingAssistantMessage(reply);
-        }, 500);
-      } else {
+      if (!transcript || !transcript.trim()) {
         setCompanionState('IDLE');
+        return;
       }
+      await processVoiceTranscript(transcript.trim());
     } else {
       const started = await audioService.startPushToTalk((vol) => {
         setAudioVolume(vol);
@@ -709,16 +737,33 @@ export const App: React.FC = () => {
               wakeWordService.stopListening();
               setWakeStatus(wakeWordService.getStatus());
             } else {
-              wakeWordService.startListening({
-                onWakeDetected: () => {
-                  setSettings((prev) => ({ ...prev, compactMode: true }));
-                  setCompanionState('WAKE');
-                  setTimeout(() => setCompanionState('LISTENING'), 400);
+              wakeWordService.startListening(
+                {
+                  onWakeDetected: () => {
+                    setSettings((prev) => ({ ...prev, compactMode: true }));
+                    setCompanionState('WAKE');
+                    setTimeout(() => {
+                      setCompanionState('LISTENING');
+                      setIsListening(true);
+                    }, 400);
+                  },
+                  onAnalyzeChartDetected: () => handleAnalyzeChart(),
+                  onCommandCaptured: async (transcript) => {
+                    setIsListening(false);
+                    setAudioVolume(0);
+                    await processVoiceTranscript(transcript);
+                  },
+                  onCommandTimeout: () => {
+                    setIsListening(false);
+                    setAudioVolume(0);
+                    setCompanionState('IDLE');
+                  },
+                  onTranscriptInterim: (text) => setLiveTranscript(text),
+                  onStateChange: (status) => setWakeStatus(status),
+                  onAudioLevel: (level) => setAudioVolume(level),
                 },
-                onAnalyzeChartDetected: () => handleAnalyzeChart(),
-                onTranscriptInterim: (text) => setLiveTranscript(text),
-                onStateChange: (status) => setWakeStatus(status),
-              });
+                settings.apiEndpoint
+              );
               setWakeStatus(wakeWordService.getStatus());
             }
           }}
