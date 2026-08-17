@@ -25,6 +25,7 @@ import { actionRuntimeClient } from './services/actions';
 import { DesktopHeader } from './components/navigation/DesktopHeader';
 import { MobileTabBar } from './components/navigation/MobileTabBar';
 import { HUDOverlay } from './components/hud/HUDOverlay';
+import { FloatingVoicePanel } from './components/voice/FloatingVoicePanel';
 import { CompanionHero } from './components/companion/CompanionHero';
 import { ActiveSetupsView } from './components/setups/ActiveSetupsView';
 import { AlertHistoryView } from './components/alerts/AlertHistoryView';
@@ -46,6 +47,8 @@ export const App: React.FC = () => {
   // View & UI Navigation
   const [activeTab, setActiveTab] = useState<ActiveTab>('companion');
   const [companionState, setCompanionState] = useState<CompanionVisualState>('IDLE');
+  const [compactLayoutMode, setCompactLayoutMode] = useState<'voice' | 'hud'>('voice');
+  const [activeContextTitle, setActiveContextTitle] = useState<string>('');
 
   // Real-time Data Stores
   const [activeSetups, setActiveSetups] = useState<TARSTradingEvent[]>([]);
@@ -60,6 +63,7 @@ export const App: React.FC = () => {
   const [isAnalyzingChart, setIsAnalyzingChart] = useState(false);
   const [streamedAnalysisText, setStreamedAnalysisText] = useState<string>('');
   const [liveTranscript, setLiveTranscript] = useState<string>('');
+  const [voiceErrorMessage, setVoiceErrorMessage] = useState<string | null>(null);
   const [wakeStatus, setWakeStatus] = useState<WakeWordStatusInfo>(() => wakeWordService.getStatus());
 
   // Audio / Mic State
@@ -75,6 +79,28 @@ export const App: React.FC = () => {
   });
 
   const wsClientRef = useRef<TARSWebSocketClient | null>(null);
+  const companionStateRef = useRef<CompanionVisualState>('IDLE');
+  companionStateRef.current = companionState;
+
+  const autoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const compactLayoutModeRef = useRef<'voice' | 'hud'>('voice');
+  compactLayoutModeRef.current = compactLayoutMode;
+
+  const cancelAutoHide = useCallback(() => {
+    if (autoHideTimerRef.current !== null) {
+      clearTimeout(autoHideTimerRef.current);
+      autoHideTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleAutoHide = useCallback((delayMs = 2800) => {
+    cancelAutoHide();
+    if (settings.compactMode && compactLayoutModeRef.current === 'voice') {
+      autoHideTimerRef.current = setTimeout(() => {
+        nativeBridge.hideHUD();
+      }, delayMs);
+    }
+  }, [settings.compactMode, cancelAutoHide]);
 
   // Save settings when changed
   const updateSettings = useCallback((newPartial: Partial<AppSettings>) => {
@@ -95,37 +121,56 @@ export const App: React.FC = () => {
     toggleCompactWindow(settings.compactMode);
   }, [settings.compactMode]);
 
+  // Refresh active window context title periodically or on summon
+  const refreshContextTitle = useCallback(async () => {
+    try {
+      const ctx = await nativeBridge.getActiveWindowContext();
+      if (ctx) {
+        setActiveContextTitle(ctx.window_title || ctx.executable || 'Desktop');
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   // Register Global & In-App Shortcuts (Ctrl+Shift+Space / Ctrl+Shift+T / Ctrl+Shift+V)
   useEffect(() => {
-    const handleSummonHUD = () => {
+    const handleSummonHUD = (mode: 'voice' | 'hud' = 'voice') => {
+      cancelAutoHide();
       setSettings((prev) => {
         const next = { ...prev, compactMode: true };
         saveSettings(next);
         return next;
       });
-      nativeBridge.summonHUD('compact');
+      setCompactLayoutMode(mode);
+      nativeBridge.summonHUD(mode);
+      refreshContextTitle();
     };
 
     // 1. In-App Keydown Listener (for web, PWA, and direct in-window input)
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === ' ' || e.code === 'Space')) {
         e.preventDefault();
-        handleSummonHUD();
+        handleSummonHUD('voice');
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
         e.preventDefault();
-        handleSummonHUD();
+        handleSummonHUD('voice');
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        cancelAutoHide();
+        nativeBridge.hideHUD();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
 
     // 2. Native OS Global Shortcuts
-    registerGlobalShortcut('CommandOrControl+Shift+Space', handleSummonHUD);
-    registerGlobalShortcut('CommandOrControl+Shift+T', handleSummonHUD);
+    registerGlobalShortcut('CommandOrControl+Shift+Space', () => handleSummonHUD('voice'));
+    registerGlobalShortcut('CommandOrControl+Shift+T', () => handleSummonHUD('voice'));
 
     // 3. Native event bridge listeners (tars://summon-hud and tars://ptt-toggle)
     let cleanupNativeListeners: (() => void) | undefined;
     nativeBridge.listenToNativeEvents(
-      () => handleSummonHUD(),
+      () => handleSummonHUD('voice'),
       () => handleTogglePushToTalk()
     ).then((cleanup) => {
       cleanupNativeListeners = cleanup;
@@ -137,7 +182,7 @@ export const App: React.FC = () => {
       unregisterGlobalShortcut('CommandOrControl+Shift+T');
       if (cleanupNativeListeners) cleanupNativeListeners();
     };
-  }, []);
+  }, [cancelAutoHide, refreshContextTitle]);
 
   // Handle incoming Trading Events with lifecycle state management
   const handleIncomingTradingEvent = useCallback((event: TARSTradingEvent) => {
@@ -203,6 +248,7 @@ export const App: React.FC = () => {
 
   // Handle incoming Assistant Messages
   const handleIncomingAssistantMessage = useCallback((msg: TARSAssistantMessage) => {
+    cancelAutoHide();
     setChatMessages((prev) => {
       const updated = [...prev, msg];
       saveStoredChat(updated);
@@ -211,6 +257,8 @@ export const App: React.FC = () => {
 
     if (msg.role === 'assistant') {
       setCompanionState('SPEAKING');
+      setStreamedAnalysisText(msg.content);
+
       if (settings.audioEnabled && msg.content) {
         audioService.synthesizeAndPlay(msg.content, settings.apiEndpoint, (vol) => {
           setAudioVolume(vol);
@@ -224,28 +272,36 @@ export const App: React.FC = () => {
           .finally(() => {
             setCompanionState('IDLE');
             setAudioVolume(0);
+            scheduleAutoHide(3000);
           });
       } else {
         setTimeout(() => {
           setCompanionState('IDLE');
           setAudioVolume(0);
+          scheduleAutoHide(3000);
         }, 2000);
       }
     }
-  }, [settings.audioEnabled, settings.apiEndpoint, settings.speechRate, settings.speechVolume]);
+  }, [settings.audioEnabled, settings.apiEndpoint, settings.speechRate, settings.speechVolume, cancelAutoHide, scheduleAutoHide]);
+
+  // Barge-in: immediately stops TTS speaking and transitions back to listening
+  const handleInterruptSpeech = useCallback(() => {
+    cancelAutoHide();
+    audioService.stopSpeaking();
+    setCompanionState('LISTENING');
+    setIsListening(true);
+    setAudioVolume(0);
+    wakeWordService.beginCommandCaptureManual();
+  }, [cancelAutoHide]);
 
   // "Analyze this chart": captures the active window through the real,
-  // backend-authorized capture flow (nativeBridge -> Tauri, same path the
-  // HUD's own screen-capture button uses) and the active-window context
+  // backend-authorized capture flow and the active-window context
   const isAnalyzingChartRef = useRef(false);
 
-  // "Analyze this chart": captures the active window through the real,
-  // backend-authorized capture flow (nativeBridge -> Tauri, preserving the
-  // previous application window) and the active-window context alongside it,
-  // then asks the backend for a qualitative, uncertainty-aware read.
   const handleAnalyzeChart = useCallback(async () => {
     if (isAnalyzingChartRef.current) return;
     isAnalyzingChartRef.current = true;
+    cancelAutoHide();
 
     const convId = 'conv_main_session';
     const newMessage = (content: string, error?: string, providerName?: string): TARSAssistantMessage => ({
@@ -380,14 +436,12 @@ export const App: React.FC = () => {
       isAnalyzingChartRef.current = false;
       setIsAnalyzingChart(false);
     }
-  }, [settings.apiEndpoint, handleIncomingAssistantMessage]);
+  }, [settings.apiEndpoint, handleIncomingAssistantMessage, cancelAutoHide]);
 
-  // Shared routing for any already-transcribed voice utterance, whether it
-  // came from manual push-to-talk or the post-wake command listener
-  // (services/wake-word.ts) -- same deterministic-action / chart-analysis /
-  // assistant-query path either way, so wake-triggered commands get
-  // identical handling to a manual PTT command.
+  // Shared routing for any already-transcribed voice utterance
   const processVoiceTranscript = useCallback(async (transcript: string) => {
+    cancelAutoHide();
+    setVoiceErrorMessage(null);
     const convId = 'conv_voice_session';
     setCompanionState('THINKING');
 
@@ -404,15 +458,12 @@ export const App: React.FC = () => {
     handleIncomingAssistantMessage(userVoiceMsg);
 
     try {
-      // A recognized deterministic action phrase bypasses the LLM (not the
-      // Action Runtime) -- submitted through the same shared
-      // actionRuntimeClient the HUD uses, so its permission classification,
-      // skill dispatch, and CONFIRMATION_REQUIRED handling are identical,
-      // and the HUD's own onAnyActionResult listener picks up the real
-      // result automatically. Anything not recognized falls through
-      // unchanged to the assistant/LLM query below.
       actionRuntimeClient.setEndpoint(settings.apiEndpoint);
       const activeContext = await nativeBridge.getActiveWindowContext();
+      if (activeContext) {
+        setActiveContextTitle(activeContext.window_title || activeContext.executable || '');
+      }
+
       const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
         transcript,
         activeContext,
@@ -421,12 +472,10 @@ export const App: React.FC = () => {
       if (deterministicReq) {
         await actionRuntimeClient.submitAction(deterministicReq);
         setCompanionState('IDLE');
+        scheduleAutoHide(2500);
         return;
       }
 
-      // "Analyze this chart" also bypasses the general LLM query -- it
-      // needs a screen capture attached, which the plain /assistant/query
-      // endpoint doesn't accept.
       if (ANALYZE_CHART_PATTERN.test(transcript)) {
         await handleAnalyzeChart();
         return;
@@ -445,6 +494,7 @@ export const App: React.FC = () => {
       }
     } catch (err) {
       console.warn('[TARS Voice] Voice processing error:', err);
+      setVoiceErrorMessage(err instanceof Error ? err.message : String(err));
     }
 
     if (settings.mockGeneratorActive) {
@@ -454,15 +504,14 @@ export const App: React.FC = () => {
       }, 500);
     } else {
       setCompanionState('IDLE');
+      scheduleAutoHide(2500);
     }
-  }, [settings.apiEndpoint, settings.mockGeneratorActive, activeSetups, handleIncomingAssistantMessage, handleAnalyzeChart]);
+  }, [settings.apiEndpoint, settings.mockGeneratorActive, activeSetups, handleIncomingAssistantMessage, handleAnalyzeChart, cancelAutoHide, scheduleAutoHide]);
 
-  // Local, always-on background wake listener ("Hey TARS" / "Analyze this
-  // chart") -- runs independent of HUD visibility (App.tsx/the WebView keep
-  // running when the window is hidden, see hide_hud_impl in src-tauri) and
-  // never depends on browser/WebView SpeechRecognition; see wake-word.ts.
+  // Local, always-on background wake listener ("Hey TARS" / "Analyze this chart")
   useEffect(() => {
-    const summonCompact = () => {
+    const summonVoicePanel = () => {
+      cancelAutoHide();
       setSettings((prev) => {
         if (!prev.compactMode) {
           const next = { ...prev, compactMode: true };
@@ -471,24 +520,35 @@ export const App: React.FC = () => {
         }
         return prev;
       });
-      nativeBridge.summonHUD('compact');
+      setCompactLayoutMode('voice');
+      nativeBridge.summonHUD('voice');
+      refreshContextTitle();
     };
 
     wakeWordService.startListening(
       {
         onWakeDetected: (phrase) => {
           console.info('[TARS Wake] Phrase detected:', phrase);
-          summonCompact();
+          summonVoicePanel();
           setCompanionState('WAKE');
           setTimeout(() => {
             setCompanionState('LISTENING');
             setIsListening(true);
-          }, 400);
+          }, 350);
         },
         onAnalyzeChartDetected: async (phrase) => {
           console.info('[TARS Wake] Direct chart analysis command detected:', phrase);
-          summonCompact();
+          summonVoicePanel();
           await handleAnalyzeChart();
+        },
+        onSpeechStart: () => {
+          // Real-time barge-in detection: if speaking when user speaks, interrupt immediately!
+          if (companionStateRef.current === 'SPEAKING') {
+            console.info('[TARS Voice] Barge-in speech onset detected: interrupting TTS');
+            audioService.stopSpeaking();
+            setCompanionState('LISTENING');
+            setIsListening(true);
+          }
         },
         onCommandCaptured: async (transcript) => {
           console.info('[TARS Wake] Command captured:', transcript);
@@ -501,6 +561,7 @@ export const App: React.FC = () => {
           setIsListening(false);
           setAudioVolume(0);
           setCompanionState('IDLE');
+          scheduleAutoHide(2000);
         },
         onTranscriptInterim: (text) => {
           setLiveTranscript(text);
@@ -518,7 +579,7 @@ export const App: React.FC = () => {
     return () => {
       wakeWordService.stopListening();
     };
-  }, [handleAnalyzeChart, processVoiceTranscript, settings.apiEndpoint]);
+  }, [handleAnalyzeChart, processVoiceTranscript, settings.apiEndpoint, cancelAutoHide, scheduleAutoHide, refreshContextTitle]);
 
   // Fetch initial state from HTTP backend on mount
   useEffect(() => {
@@ -590,7 +651,6 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!settings.mockGeneratorActive) return;
 
-    // Seed initial mock setups if list is empty
     if (activeSetups.length === 0) {
       const initial = [
         createMockTradingEvent({ symbol: 'XAUUSD', direction: 'LONG', state: 'SETUP_VALID', validation_status: 'VALID', entry: 2684.50, stop_loss: 2676.00, take_profit: 2708.50, risk_reward: 2.82, risk_percent: 1.0 }),
@@ -608,8 +668,9 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [settings.mockGeneratorActive, settings.mockIntervalSeconds, activeSetups.length, handleIncomingTradingEvent]);
 
-  // Certified Push to Talk Handler (Microphone -> Real Audio Blob -> Backend STT -> Assistant -> Backend TTS)
+  // Certified Push to Talk Handler
   const handleTogglePushToTalk = async () => {
+    cancelAutoHide();
     if (isListening) {
       setIsListening(false);
       const audioBlob = await audioService.stopPushToTalk();
@@ -617,6 +678,7 @@ export const App: React.FC = () => {
 
       if (!audioBlob || audioBlob.size === 0) {
         setCompanionState('IDLE');
+        scheduleAutoHide(2000);
         return;
       }
 
@@ -628,10 +690,14 @@ export const App: React.FC = () => {
       }
       if (!transcript || !transcript.trim()) {
         setCompanionState('IDLE');
+        scheduleAutoHide(2000);
         return;
       }
       await processVoiceTranscript(transcript.trim());
     } else {
+      if (companionState === 'SPEAKING') {
+        audioService.stopSpeaking();
+      }
       const started = await audioService.startPushToTalk((vol) => {
         setAudioVolume(vol);
       });
@@ -644,6 +710,7 @@ export const App: React.FC = () => {
 
   // Send Chat Message via real backend endpoint
   const handleSendMessage = async (text: string, inputMode: 'text' | 'voice' = 'text') => {
+    cancelAutoHide();
     const convId = 'conv_main_session';
     const userMsg: TARSAssistantMessage = {
       schema_version: '1.0.0',
@@ -696,6 +763,7 @@ export const App: React.FC = () => {
       }, 500);
     } else {
       setCompanionState('IDLE');
+      scheduleAutoHide(2500);
     }
   };
 
@@ -711,14 +779,91 @@ export const App: React.FC = () => {
     handleIncomingTradingEvent(evt);
   };
 
-  // Compact Mode HUD Layout (Wave 2A Assistant Shell)
+  // Compact Mode (Minimal Voice Panel or Full HUD)
   if (settings.compactMode) {
+    if (compactLayoutMode === 'voice') {
+      return (
+        <div className="w-screen h-screen bg-transparent p-1 overflow-hidden flex items-center justify-center">
+          <FloatingVoicePanel
+            companionState={companionState}
+            isListening={isListening}
+            onTogglePushToTalk={handleTogglePushToTalk}
+            audioVolume={audioVolume}
+            liveTranscript={liveTranscript}
+            streamedText={streamedAnalysisText}
+            responseSpeakerText={chatMessages.length > 0 && chatMessages[chatMessages.length - 1].role === 'assistant' ? chatMessages[chatMessages.length - 1].content : undefined}
+            errorMessage={voiceErrorMessage}
+            wakeStatus={wakeStatus}
+            onToggleWakeListening={() => {
+              if (wakeStatus.isActive) {
+                wakeWordService.stopListening();
+                setWakeStatus(wakeWordService.getStatus());
+              } else {
+                wakeWordService.startListening(
+                  {
+                    onWakeDetected: () => {
+                      setSettings((prev) => ({ ...prev, compactMode: true }));
+                      setCompanionState('WAKE');
+                      setTimeout(() => {
+                        setCompanionState('LISTENING');
+                        setIsListening(true);
+                      }, 350);
+                    },
+                    onAnalyzeChartDetected: () => handleAnalyzeChart(),
+                    onSpeechStart: () => {
+                      if (companionStateRef.current === 'SPEAKING') {
+                        audioService.stopSpeaking();
+                        setCompanionState('LISTENING');
+                        setIsListening(true);
+                      }
+                    },
+                    onCommandCaptured: async (transcript) => {
+                      setIsListening(false);
+                      setAudioVolume(0);
+                      await processVoiceTranscript(transcript);
+                    },
+                    onCommandTimeout: () => {
+                      setIsListening(false);
+                      setAudioVolume(0);
+                      setCompanionState('IDLE');
+                      scheduleAutoHide(2000);
+                    },
+                    onTranscriptInterim: (text) => setLiveTranscript(text),
+                    onStateChange: (status) => setWakeStatus(status),
+                    onAudioLevel: (level) => setAudioVolume(level),
+                  },
+                  settings.apiEndpoint
+                );
+                setWakeStatus(wakeWordService.getStatus());
+              }
+            }}
+            onInterruptSpeech={handleInterruptSpeech}
+            onExpandToHUD={() => {
+              setCompactLayoutMode('hud');
+              nativeBridge.setWindowSize(440, 740, true);
+            }}
+            onExpandToWorkstation={() => {
+              updateSettings({ compactMode: false });
+              nativeBridge.setWindowSize(1280, 840, false);
+            }}
+            onDismiss={() => {
+              cancelAutoHide();
+              nativeBridge.hideHUD();
+            }}
+            activeContextTitle={activeContextTitle}
+          />
+        </div>
+      );
+    }
+
+    // HUD Mode (Wave 2A/2B Action & Trading HUD)
     return (
       <div className="w-screen h-screen bg-[#03060a] p-1 overflow-hidden">
         <HUDOverlay
           companionState={companionState}
           onExpand={() => updateSettings({ compactMode: false })}
           onHideHUD={() => {
+            cancelAutoHide();
             nativeBridge.hideHUD();
           }}
           activeSetups={activeSetups}
@@ -745,9 +890,16 @@ export const App: React.FC = () => {
                     setTimeout(() => {
                       setCompanionState('LISTENING');
                       setIsListening(true);
-                    }, 400);
+                    }, 350);
                   },
                   onAnalyzeChartDetected: () => handleAnalyzeChart(),
+                  onSpeechStart: () => {
+                    if (companionStateRef.current === 'SPEAKING') {
+                      audioService.stopSpeaking();
+                      setCompanionState('LISTENING');
+                      setIsListening(true);
+                    }
+                  },
                   onCommandCaptured: async (transcript) => {
                     setIsListening(false);
                     setAudioVolume(0);
@@ -785,7 +937,13 @@ export const App: React.FC = () => {
         connectionStatus={connectionState.status}
         latencyMs={connectionState.latencyMs || 0}
         compactMode={settings.compactMode}
-        setCompactMode={(compact) => updateSettings({ compactMode: compact })}
+        setCompactMode={(compact) => {
+          updateSettings({ compactMode: compact });
+          if (compact) {
+            setCompactLayoutMode('voice');
+            nativeBridge.summonHUD('voice');
+          }
+        }}
         activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
         unreadAlertsCount={alertsHistory.length}
       />

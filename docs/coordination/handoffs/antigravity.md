@@ -10,7 +10,34 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (FINAL DEMO FIX: JARVIS-STYLE TARS)
+## Latest handoff (OVERNIGHT TARS VOICE-FIRST NATIVE EXPERIENCE)
+
+**Status**: COMPLETE — Voice-first native background assistant with minimal dark floating panel (NO decorative orb as primary interface), instant wake popup ("Hey TARS"), live PCM waveform visualizer, live user transcript, progressive streamed Claude reasoning, barge-in / speech interruption, auto-dismiss lifecycle, previous foreground window preservation (`LAST_EXTERNAL_HWND`), and native Windows release build (`TARS_1.0.0_x64-setup.exe`).
+**Branch**: `feature/overnight-voice-native`
+**Commit SHA**: `38ef06f`
+**Work completed**:
+1. **Minimal Dark Floating Voice Panel (`apps/web/src/components/voice/FloatingVoicePanel.tsx`)**:
+   - Created clean, dark glassmorphic floating panel (no decorative orb).
+   - Real-time animated canvas waveform visualizer responding to mic PCM level and speaker playback amplitude.
+   - Status badges for `LISTENING`, `THINKING`, `SPEAKING`, `ERROR`, and `READY ("Hey TARS")`.
+   - Live transcript display, progressive streamed response rendering, interrupt/barge-in button, manual PTT trigger, and active application context indicator.
+2. **Local VAD & Wake Word Service (`apps/web/src/services/local-vad.ts`, `apps/web/src/services/wake-word.ts`)**:
+   - Added `onSpeechStart` callback triggered immediately on speech onset for millisecond-level barge-in detection.
+   - Wired local audio capture with energy segmentation and streaming to local `faster-whisper` wake/phrase detection (no cloud browser SpeechRecognition required).
+3. **Audio Service Interruption & Streaming TTS (`apps/web/src/services/audio.ts`)**:
+   - Added active buffer source tracking, playback context management, generation counter for cancellation, `playSentenceQueue()` for streaming sentences, and instant interruption in `stopSpeaking()`.
+4. **Window Sizing & Background Lifecycle (`apps/web/src-tauri/src/lib.rs`, `apps/web/src/services/native-bridge.ts`, `apps/web/src/App.tsx`)**:
+   - Implemented dynamic sizing: 420x260 for voice panel, 440x740 for HUD, 1280x840 for workstation.
+   - Preserved `LAST_EXTERNAL_HWND` foreground window tracking so background chart capture never captures TARS itself.
+   - Implemented auto-dismiss timer (2.8s) returning focus and hiding the panel back to system tray upon speech completion.
+5. **Tests & Build Verification**:
+   - Created `voice-native.test.tsx` (12 tests passing).
+   - Full Vitest suite: 18 test files, 118 unit and integration tests passing with 0 errors.
+   - Native Windows release binary compiled with MSVC / Tauri 2 to `D:\TARS-cache\cargo-target\release\bundle\nsis\TARS_1.0.0_x64-setup.exe` and `tars-companion.exe`.
+
+---
+
+## Previous handoff (FINAL DEMO FIX: JARVIS-STYLE TARS)
 
 **Status**: COMPLETE — JARVIS-style background companion flow: Local continuous background wake listener ("Hey TARS"), pre-summon foreground window preservation (`LAST_EXTERNAL_HWND` in Win32/Rust bridge) ensuring TradingView/active chart is captured without capturing TARS itself, flexible conversational intent routing, silent background Claude Code reasoning formatted cleanly as TARS with concise structured fields (`BIAS`, `WHAT I SEE`, `SETUP`, `KEY LEVEL`, `INVALIDATION`, `RISK`, `ACTION`), progressive ChatGPT-style token streaming in HUD (`TARS AI · Live`), real-time TTS voice synchronization with dynamic FFT waveform reactivity, and native release binary compiled.
 **Branch**: `feature/linkedin-demo`

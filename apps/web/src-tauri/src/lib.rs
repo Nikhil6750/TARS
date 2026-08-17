@@ -257,7 +257,7 @@ fn toggle_compact_mode(app: tauri::AppHandle, is_compact: Option<bool>) -> Resul
     if let Some(window) = app.get_webview_window("main") {
         let next_compact = is_compact.unwrap_or_else(|| !window.is_always_on_top().unwrap_or(false));
         if next_compact {
-            window.set_size(tauri::LogicalSize::new(440.0, 740.0)).map_err(|e| e.to_string())?;
+            window.set_size(tauri::LogicalSize::new(420.0, 260.0)).map_err(|e| e.to_string())?;
             window.set_always_on_top(true).map_err(|e| e.to_string())?;
         } else {
             window.set_size(tauri::LogicalSize::new(1280.0, 840.0)).map_err(|e| e.to_string())?;
@@ -269,8 +269,20 @@ fn toggle_compact_mode(app: tauri::AppHandle, is_compact: Option<bool>) -> Resul
 }
 
 #[tauri::command]
-fn summon_hud(app: tauri::AppHandle, _mode: Option<String>) -> Result<(), String> {
-    summon_hud_impl(&app)
+fn set_window_size(app: tauri::AppHandle, width: f64, height: f64, always_on_top: Option<bool>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_size(tauri::LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
+        if let Some(on_top) = always_on_top {
+            window.set_always_on_top(on_top).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    Err("Main window not found".into())
+}
+
+#[tauri::command]
+fn summon_hud(app: tauri::AppHandle, mode: Option<String>) -> Result<(), String> {
+    summon_hud_impl(&app, mode.as_deref())
 }
 
 #[tauri::command]
@@ -279,8 +291,8 @@ fn hide_hud(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn toggle_hud(app: tauri::AppHandle, _mode: Option<String>) -> Result<bool, String> {
-    toggle_hud_impl(&app)
+fn toggle_hud(app: tauri::AppHandle, mode: Option<String>) -> Result<bool, String> {
+    toggle_hud_impl(&app, mode.as_deref())
 }
 
 #[tauri::command]
@@ -289,7 +301,7 @@ fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn summon_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
+fn summon_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     unsafe {
         use windows_sys::Win32::System::Threading::*;
@@ -307,10 +319,20 @@ fn summon_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
-        window.set_size(tauri::LogicalSize::new(440.0, 740.0)).map_err(|e| e.to_string())?;
-        window.set_always_on_top(true).map_err(|e| e.to_string())?;
+        let m = mode.unwrap_or("voice");
+        if m == "full" || m == "workstation" {
+            window.set_size(tauri::LogicalSize::new(1280.0, 840.0)).map_err(|e| e.to_string())?;
+            window.set_always_on_top(false).map_err(|e| e.to_string())?;
+        } else if m == "hud" || m == "compact" {
+            window.set_size(tauri::LogicalSize::new(440.0, 740.0)).map_err(|e| e.to_string())?;
+            window.set_always_on_top(true).map_err(|e| e.to_string())?;
+        } else {
+            // "voice" (default minimal floating voice panel)
+            window.set_size(tauri::LogicalSize::new(420.0, 260.0)).map_err(|e| e.to_string())?;
+            window.set_always_on_top(true).map_err(|e| e.to_string())?;
+        }
         window.set_focus().map_err(|e| e.to_string())?;
-        let _ = app.emit("tars://summon-hud", ());
+        let _ = app.emit("tars://summon-hud", mode.unwrap_or("voice"));
         return Ok(());
     }
     Err("Main window not found".into())
@@ -336,14 +358,14 @@ fn hide_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
     Err("Main window not found".into())
 }
 
-fn toggle_hud_impl(app: &tauri::AppHandle) -> Result<bool, String> {
+fn toggle_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window("main") {
         let is_visible = window.is_visible().unwrap_or(false);
         if is_visible {
             let _ = hide_hud_impl(app);
             Ok(false)
         } else {
-            let _ = summon_hud_impl(app);
+            let _ = summon_hud_impl(app, mode);
             Ok(true)
         }
     } else {
@@ -1107,7 +1129,7 @@ pub fn run() {
                 .with_handler(move |app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         if shortcut == &summon_shortcut_space || shortcut == &summon_shortcut_t {
-                            let _ = toggle_hud_impl(app);
+                            let _ = toggle_hud_impl(app, Some("voice"));
                         } else if shortcut == &ptt_shortcut {
                             let _ = app.emit("tars://ptt-toggle", ());
                         }
@@ -1118,6 +1140,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             toggle_compact_mode,
+            set_window_size,
             is_always_on_top,
             summon_hud,
             hide_hud,
@@ -1179,7 +1202,7 @@ pub fn run() {
                 .tooltip("TARS Windows Assistant (Running in Background)")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "summon_hud" => {
-                        let _ = summon_hud_impl(app);
+                        let _ = summon_hud_impl(app, Some("voice"));
                     }
                     "show_main" => {
                         let _ = show_main_impl(app);
@@ -1200,7 +1223,7 @@ pub fn run() {
                     } = event
                     {
                         let app = tray.app_handle();
-                        let _ = toggle_hud_impl(app);
+                        let _ = toggle_hud_impl(app, Some("voice"));
                     }
                 })
                 .build(app)?;

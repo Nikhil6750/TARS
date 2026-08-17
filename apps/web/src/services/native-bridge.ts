@@ -318,9 +318,34 @@ export class NativeBridgeService {
   }
 
   /**
-   * Summons the HUD window, restoring visibility, focusing, and bringing to top.
+   * Sets the native window size and always-on-top mode.
    */
-  public async summonHUD(mode?: 'compact' | 'full' | 'pill'): Promise<void> {
+  public async setWindowSize(width: number, height: number, alwaysOnTop?: boolean): Promise<void> {
+    if (!isTauri()) {
+      return;
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('set_window_size', { width, height, alwaysOnTop });
+    } catch {
+      try {
+        const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        await win.setSize(new LogicalSize(width, height));
+        if (typeof alwaysOnTop === 'boolean') {
+          await win.setAlwaysOnTop(alwaysOnTop);
+        }
+      } catch (innerErr) {
+        console.warn('[NativeBridge] Failed to set window size:', innerErr);
+      }
+    }
+  }
+
+  /**
+   * Summons the HUD or voice panel window, restoring visibility, focusing, and bringing to top.
+   */
+  public async summonHUD(mode?: 'voice' | 'compact' | 'hud' | 'full' | 'workstation' | 'pill'): Promise<void> {
     if (!isTauri()) {
       console.info(`[NativeBridge Mock] Summoned HUD in mode: ${mode || 'default'}`);
       return;
@@ -331,12 +356,22 @@ export class NativeBridgeService {
       await invoke('summon_hud', { mode });
     } catch {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
         const win = getCurrentWindow();
         await win.show();
         await win.unminimize();
+        if (mode === 'full' || mode === 'workstation') {
+          await win.setSize(new LogicalSize(1280, 840));
+          await win.setAlwaysOnTop(false);
+        } else if (mode === 'hud' || mode === 'compact') {
+          await win.setSize(new LogicalSize(440, 740));
+          await win.setAlwaysOnTop(true);
+        } else {
+          // voice mode
+          await win.setSize(new LogicalSize(420, 260));
+          await win.setAlwaysOnTop(true);
+        }
         await win.setFocus();
-        await win.setAlwaysOnTop(true);
       } catch (innerErr) {
         console.warn('[NativeBridge] Failed to summon HUD window:', innerErr);
       }
@@ -368,7 +403,7 @@ export class NativeBridgeService {
   /**
    * Toggles HUD visibility
    */
-  public async toggleHUD(mode?: 'compact' | 'full' | 'pill'): Promise<boolean> {
+  public async toggleHUD(mode?: 'voice' | 'compact' | 'hud' | 'full' | 'workstation' | 'pill'): Promise<boolean> {
     if (!isTauri()) {
       return true;
     }
