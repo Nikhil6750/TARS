@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tars.local/schemas/action-request.schema.json",
+  "title": "TARSActionRequest",
+  "description": "Canonical request to execute a Windows-wide TARS skill action (Wave 2A). Emitted by the HUD, global hotkey/voice path, or a deterministic command router; consumed by the action runtime/permission engine and the target skill. Shared by the backend, the action runtime, and the native shell/HUD.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "skill",
+    "action",
+    "arguments",
+    "source",
+    "requested_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "Contract version. Bump on any breaking change and record a new ADR in DECISIONS.md."
+    },
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this request. ActionResult.request_id correlates back to this value."
+    },
+    "skill": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Registered skill name, e.g. 'windows_app', 'filesystem', 'browser', 'terminal', 'obsidian'."
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Skill-specific action verb, e.g. 'launch', 'focus', 'open_url', 'run_command'."
+    },
+    "arguments": {
+      "type": "object",
+      "description": "Action-specific arguments. Structure is defined by the target skill, not by this contract; the skill's own validate() is the source of truth for what is acceptable.",
+      "default": {}
+    },
+    "source": {
+      "type": "string",
+      "enum": ["hud", "voice_ptt", "voice_wake_word", "hotkey", "deterministic", "api"],
+      "description": "What originated this request. 'deterministic' marks a request resolved by deterministic command routing rather than an LLM (see AGENTS.md non-negotiable: deterministic commands bypass the LLM when possible)."
+    },
+    "active_context": {
+      "description": "Snapshot of the foreground window at request time, if known. No screenshot/content capture in Wave 2A -- process/title/bounds only.",
+      "default": null,
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/active_window_context" }
+      ]
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when this request was created."
+    }
+  },
+  "$defs": {
+    "active_window_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executable", "window_title"],
+      "properties": {
+        "executable": {
+          "type": "string",
+          "description": "Foreground process executable name (e.g. 'notepad.exe'), not a full path."
+        },
+        "process_id": {
+          "type": ["integer", "null"],
+          "default": null
+        },
+        "window_title": {
+          "type": "string"
+        },
+        "window_bounds": {
+          "description": "Screen-space bounding rectangle of the foreground window, if available.",
+          "default": null,
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["x", "y", "width", "height"],
+              "properties": {
+                "x": { "type": "integer" },
+                "y": { "type": "integer" },
+                "width": { "type": "integer" },
+                "height": { "type": "integer" }
+              }
+            }
+          ]
+        },
+        "captured_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "default": null
+        }
+      }
+    }
+  }
+}

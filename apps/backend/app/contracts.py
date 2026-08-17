@@ -30,6 +30,14 @@ def assistant_message_schema() -> dict[str, Any]:
     return _load_schema("assistant-message.schema.json")
 
 
+def action_request_schema() -> dict[str, Any]:
+    return _load_schema("action-request.schema.json")
+
+
+def action_result_schema() -> dict[str, Any]:
+    return _load_schema("action-result.schema.json")
+
+
 class ContractValidationError(ValueError):
     """Raised when a payload does not conform to a frozen contracts/*.schema.json."""
 
@@ -47,6 +55,24 @@ def validate_assistant_message(payload: dict[str, Any]) -> None:
     try:
         jsonschema.validate(
             payload, assistant_message_schema(), format_checker=FormatChecker()
+        )
+    except jsonschema.ValidationError as exc:
+        raise ContractValidationError(str(exc.message)) from exc
+
+
+def validate_action_request(payload: dict[str, Any]) -> None:
+    try:
+        jsonschema.validate(
+            payload, action_request_schema(), format_checker=FormatChecker()
+        )
+    except jsonschema.ValidationError as exc:
+        raise ContractValidationError(str(exc.message)) from exc
+
+
+def validate_action_result(payload: dict[str, Any]) -> None:
+    try:
+        jsonschema.validate(
+            payload, action_result_schema(), format_checker=FormatChecker()
         )
     except jsonschema.ValidationError as exc:
         raise ContractValidationError(str(exc.message)) from exc
