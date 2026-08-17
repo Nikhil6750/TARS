@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0.0",
+  "milestone": "OVERNIGHT_TARS_CORE",
+  "agent": "claude",
+  "stream": "tars-core",
+  "status": "complete",
+  "branch": "feature/overnight-tars-core",
+  "base_sha": "0ff540039dc6333fd11e563789cb65dffa49506a",
+  "implementation_sha": "52a6a5834c04ca6b6cba26a1d478e9c19b39bee9",
+  "completed_at": "2026-08-18T19:20:00Z",
+  "tests": {
+    "backend_pytest": "384 passed (6 deselected: 4 real-model tests needing local weights, 2 pre-existing/unrelated failures predating this stream)",
+    "ruff": "passed",
+    "mypy": "passed except 2 pre-existing unrelated warnings in assistant/providers/claude_code.py (StreamReader | None)"
+  },
+  "capabilities": [
+    "TarsOrchestrator above AssistantRouter: deterministic/conversation/skill/memory routing, decision-memory logging",
+    "Trading Intelligence foundation: StrategyProvider/StrategyDefinition/TradingContext/TradingAnalysis, NOT_CONFIGURED by default",
+    "trading skill: analyze_active_chart, capture_chart, get_trading_context, explain_setup, search_trading_memory, save_trading_observation, open/focus_tradingview",
+    "Bounded Agent framework (ON_DEMAND/SCHEDULED/CONTINUOUS) with ChartAnalysisAgent, TradingWorkspaceAgent, SetupWatchAgent",
+    "SetupWatchAgent never synthesizes a trade signal when strategy is NOT_CONFIGURED -- restates only raw deterministic TradingEvent fields",
+    "Memory: structured memory_notes (explicit remember, trading observations, decisions) with provenance, session/short-term conversation cache, retrieval cache",
+    "Unified skill contract: description + health() on every skill, GET /api/v1/actions/capabilities surfaces both",
+    "Performance: Claude Code CLI session reuse via --resume with stale-session fallback, LatencyTracker (wake->STT->reasoning->first-token->TTS scaffolding, wired for the reasoning segment)"
+  ],
+  "known_gaps": [
+    "quant_brain integration is out of scope (per MASTER_SPEC.md) -- StrategyProvider stays NOT_CONFIGURED until a real quant_brain adapter exists.",
+    "Wake/STT/TTS latency marks are not yet wired into voice/pipeline.py (left to the voice-native stream's ownership of that surface); LatencyTracker is ready for it.",
+    "Two pre-existing test issues unrelated to this stream, left unfixed (out of scope, not introduced here): test_chart_analysis.py's disclaimer-wording assertion, and test_skill_windows_app.py's real-focus flakiness (Windows SetForegroundWindow timing)."
+  ],
+  "integration": {
+    "role": "integration owner",
+    "integration_branch": "feature/overnight-integration",
+    "integration_worktree": "C:\\TARS-Overnight-Integration",
+    "merged_no_squash": [
+      "feature/overnight-tars-core",
+      "feature/overnight-voice-native",
+      "feature/overnight-agent-runtime"
+    ],
+    "conflicts_resolved": [
+      "apps/backend/agents/ existed on both tars-core and agent-runtime streams with different meanings (a simple bounded worker framework vs. a durable LLM-decision-loop job runtime). Renamed agent-runtime's package to apps/backend/agent_runtime/ and its router to /api/v1/agent-runtime (tars-core kept apps/backend/agents/ and /api/v1/agents), rewired app/main.py and app/deps.py to construct and expose both side by side, and split the colliding tests/test_agent_runtime.py into two files.",
+      "Fixed a behavioral break the rename exposed: agent_runtime/skill_discovery.py called the (now-async) SkillRegistry.describe() synchronously; made discover()/SkillDiscoveryProvider async and adapted to describe()'s richer per-skill dict without loosening SkillDescriptor's StrictModel."
+    ],
+    "final_validation": {
+      "backend_pytest": "403 passed, 6 deselected (same 2 pre-existing unrelated failures plus the 4 real-model tests)",
+      "backend_ruff": "passed",
+      "backend_mypy": "passed except the same 2 pre-existing unrelated warnings",
+      "frontend_vitest": "118 passed (18 test files)",
+      "frontend_typescript_build": "passed (tsc && vite build, PWA generated)"
+    }
+  }
+}
