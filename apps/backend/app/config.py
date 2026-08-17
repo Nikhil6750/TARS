@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     # ---- Scheduling ----
     tars_timezone: str = "UTC"
 
+    # ---- Agent framework ----
+    # SetupWatchAgent is a read-only, deterministic-state watcher (never
+    # generates trade signals -- see agents/setup_watch_agent.py) that is
+    # safe to run continuously by default; disable it if a quieter dev
+    # environment is preferred.
+    setup_watch_agent_enabled: bool = True
+    setup_watch_agent_interval_seconds: float = 30.0
+
     # ---- Connectivity ----
     # Tailscale Serve is the preferred private path to reach this backend
     # from another device (e.g. iPhone) — it proxies a localhost-bound
