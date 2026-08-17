@@ -42,7 +42,7 @@ export async function toggleCompactWindow(isCompact: boolean): Promise<void> {
   try {
     const { invoke } = await import('@tauri-apps/api/core');
     await invoke('toggle_compact_mode', { isCompact });
-  } catch (cmdErr) {
+  } catch {
     try {
       const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
       const appWindow = getCurrentWindow();

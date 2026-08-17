@@ -28,7 +28,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   hapticFeedback: true,
   mockGeneratorActive: false, // Default connected to real backend
   mockIntervalSeconds: 8,
-  theme: 'dark-terminal'
+  theme: 'dark-terminal',
+  autostartEnabled: false,
+  closeToTray: true,
+  globalSummonHotkey: 'Ctrl+Shift+Space',
+  globalPttHotkey: 'Ctrl+Shift+V'
 };
 
 export function loadSettings(): AppSettings {
