@@ -24,6 +24,7 @@ from pipecat.processors.audio.vad_processor import VADProcessor
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 from pipecat.workers.runner import WorkerRunner
 
+from actions.runtime import ActionRuntime
 from assistant.router import AssistantRouter
 from voice.interfaces import SpeechToTextProvider, TextToSpeechProvider
 from voice.pipecat_bridge import AssistantBridgeProcessor
@@ -40,6 +41,7 @@ def build_voice_pipeline(
     tts_provider: TextToSpeechProvider,
     assistant_router: AssistantRouter,
     conversation_id: str,
+    action_runtime: ActionRuntime | None = None,
 ) -> PipelineWorker:
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
@@ -54,7 +56,11 @@ def build_voice_pipeline(
 
     vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
     stt = ProviderBridgeSTTService(provider=stt_provider)
-    bridge = AssistantBridgeProcessor(assistant_router=assistant_router, conversation_id=conversation_id)
+    bridge = AssistantBridgeProcessor(
+        assistant_router=assistant_router,
+        conversation_id=conversation_id,
+        action_runtime=action_runtime,
+    )
     tts = ProviderBridgeTTSService(provider=tts_provider, sample_rate=TTS_OUTPUT_SAMPLE_RATE)
 
     pipeline = Pipeline(
@@ -77,12 +83,15 @@ async def run_voice_session(
     tts_provider: TextToSpeechProvider,
     assistant_router: AssistantRouter,
     conversation_id: str,
+    action_runtime: ActionRuntime | None = None,
 ) -> None:
     """Runs one voice session to completion (until the client disconnects or
     the pipeline ends). Intended to be awaited from inside the FastAPI
     WebSocket route handler, after `websocket.accept()`-equivalent setup —
     `FastAPIWebsocketTransport` manages the accept/close handshake itself."""
-    worker = build_voice_pipeline(websocket, stt_provider, tts_provider, assistant_router, conversation_id)
+    worker = build_voice_pipeline(
+        websocket, stt_provider, tts_provider, assistant_router, conversation_id, action_runtime
+    )
     runner = WorkerRunner()
     await runner.add_workers(worker)
     await runner.run()

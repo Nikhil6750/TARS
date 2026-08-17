@@ -14,6 +14,12 @@ httpx==0.27.2
 python-multipart==0.0.12
 jsonschema==4.23.0
 
+# Windows integration -- required by skills/windows_app.py's `focus`/
+# `list_running` actions (win32gui/win32process/win32api window
+# enumeration and foreground-window switching). TARS targets Windows only,
+# so this is core, not optional.
+pywin32==312
+
 # Testing
 pytest==8.3.3
 pytest-asyncio==0.24.0

@@ -7,12 +7,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from actions.permissions import PermissionEngine
+from actions.registry import build_skill_registry
+from actions.runtime import ActionRuntime
+from actions.store import ActionStore
 from app.body_limit import MaxBodySizeMiddleware
 from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
 from app.observability import configure_tracing
-from app.routers import assistant, events, health, memory, voice, ws
+from app.routers import actions, assistant, events, health, memory, voice, ws
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
 from app.ws_manager import ConnectionManager
@@ -73,6 +77,19 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.scheduler = scheduler
 
+    action_ws_manager = ConnectionManager()
+    app.state.action_ws_manager = action_ws_manager
+    action_registry = build_skill_registry(memory_service=memory_service)
+    app.state.action_registry = action_registry
+    action_runtime = ActionRuntime(
+        ActionStore(db.conn),
+        action_registry,
+        permission_engine=PermissionEngine(),
+        broadcaster=action_ws_manager,
+    )
+    await action_runtime.initialize()
+    app.state.action_runtime = action_runtime
+
     try:
         app.state.assistant_provider = build_assistant_provider(settings)
         logger.info("assistant provider: %s", settings.assistant_provider)
@@ -130,6 +147,7 @@ def create_app() -> FastAPI:
     app.include_router(memory.router)
     app.include_router(voice.router)
     app.include_router(ws.router)
+    app.include_router(actions.router)
 
     return app
 

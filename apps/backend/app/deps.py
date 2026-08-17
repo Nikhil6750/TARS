@@ -13,6 +13,7 @@ from app.ws_manager import ConnectionManager
 from events.service import EventService
 
 if TYPE_CHECKING:
+    from actions.runtime import ActionRuntime
     from app.voice_state import VoiceProviders
     from assistant.provider import AssistantProvider
     from assistant.router import AssistantRouter
@@ -62,3 +63,7 @@ def get_memory_service(request: Request) -> MemoryService:
 
 def get_voice_providers(request: Request) -> VoiceProviders:
     return request.app.state.voice_providers
+
+
+def get_action_runtime(request: Request) -> ActionRuntime:
+    return request.app.state.action_runtime

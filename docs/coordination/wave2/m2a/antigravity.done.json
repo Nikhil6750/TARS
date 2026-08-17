@@ -1,0 +1,72 @@
+{
+  "status": "COMPLETE",
+  "milestone": "Wave 2A",
+  "stream": "native_shell",
+  "agent": "Antigravity",
+  "branch": "feature/wave2-native-shell",
+  "commit_sha": "d725ee56f993f1e4f11327453d9d37623849ce71",
+  "features": {
+    "background_persistence": {
+      "status": "IMPLEMENTED",
+      "mechanism": "Tauri WindowEvent::CloseRequested intercepted to prevent_close() and hide window to system tray"
+    },
+    "tray_controls": {
+      "status": "IMPLEMENTED",
+      "menu_items": [
+        "Summon TARS HUD (Ctrl+Shift+Space)",
+        "Open Main Dashboard",
+        "Trigger Voice PTT (Ctrl+Shift+V)",
+        "Quit TARS"
+      ],
+      "tray_click": "Left-click toggles HUD show/hide"
+    },
+    "autostart": {
+      "status": "IMPLEMENTED",
+      "mechanism": "Windows Registry HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\TARS via winreg crate and Tauri command bridge",
+      "default": "false (user-controlled preference toggle)"
+    },
+    "global_hotkeys": {
+      "status": "IMPLEMENTED",
+      "summon_shortcuts": [
+        "Ctrl+Shift+Space",
+        "Ctrl+Shift+T"
+      ],
+      "ptt_shortcut": "Ctrl+Shift+V"
+    },
+    "active_window_context": {
+      "status": "IMPLEMENTED",
+      "mechanism": "Win32 API GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, QueryFullProcessImageNameW, GetWindowRect",
+      "schema": "ActiveWindowContext (executable, process_id, window_title, window_bounds, captured_at)"
+    },
+    "hud_surface": {
+      "status": "IMPLEMENTED",
+      "surface": "HUDOverlay component",
+      "features": [
+        "Active foreground window context bar with live refresh",
+        "Deterministic bypass command interpreter (focus, launch, terminal, browser, filesystem, obsidian)",
+        "ActionConfirmationCard with confirm/deny user flow",
+        "ActionResultView rendering canonical statuses, risk levels, payload data, and errors",
+        "Global Voice PTT button and microphone volume visualizer",
+        "Market confluences & risk warning indicators"
+      ]
+    },
+    "action_runtime_client": {
+      "status": "IMPLEMENTED",
+      "endpoints": [
+        "POST /api/v1/actions",
+        "GET /api/v1/actions/{id}",
+        "POST /api/v1/actions/{id}/confirm",
+        "POST /api/v1/actions/{id}/deny"
+      ],
+      "validation": "Strict runtime validation against action-request.schema.json and action-result.schema.json"
+    }
+  },
+  "tests": {
+    "test_files": 11,
+    "tests_passed": 57,
+    "tests_failed": 0,
+    "pass_rate": "100%",
+    "native_release_build": "PASSED (cargo build --release finished in 3m 45s)"
+  },
+  "known_gaps": []
+}

@@ -1,13 +1,18 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Settings,
   Volume2,
   Bell,
   Play,
-  Radio
+  Radio,
+  Power,
+  Keyboard,
+  Shield,
+  Layers,
 } from 'lucide-react';
 import { AppSettings } from '../../types/companion';
 import { sendNotification, requestNotificationPermission } from '../../services/notifications';
+import { nativeBridge } from '../../services/native-bridge';
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -20,6 +25,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onUpdateSettings,
   onTriggerMockEvent
 }) => {
+  const [autostartActive, setAutostartActive] = useState<boolean>(settings.autostartEnabled ?? false);
+  const [isUpdatingAutostart, setIsUpdatingAutostart] = useState(false);
+
+  useEffect(() => {
+    async function loadAutostart() {
+      try {
+        const enabled = await nativeBridge.getAutostartStatus();
+        setAutostartActive(enabled);
+      } catch (err) {
+        console.warn('Could not query autostart status:', err);
+      }
+    }
+    loadAutostart();
+  }, []);
+
+  const handleToggleAutostart = async (enabled: boolean) => {
+    setIsUpdatingAutostart(true);
+    try {
+      const result = await nativeBridge.setAutostart(enabled);
+      setAutostartActive(result);
+      onUpdateSettings({ autostartEnabled: result });
+    } catch (err) {
+      console.error('Failed to set autostart:', err);
+    } finally {
+      setIsUpdatingAutostart(false);
+    }
+  };
+
   const handleTestNotification = async () => {
     const permitted = await requestNotificationPermission();
     if (permitted) {
@@ -41,11 +74,90 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           TARS SYSTEM PREFERENCES
         </h1>
         <p className="text-[11px] font-mono text-slate-400">
-          Configure audio synthesizers, mock generator cadence, notification channels, and companion layouts.
+          Configure Windows-wide native shell, autostart, global hotkeys, audio synthesizers, and companion layouts.
         </p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Windows-wide Assistant Shell & Autostart (Wave 2A) */}
+        <div className="glass-panel p-5 bg-[#081224]/90 flex flex-col justify-between border-cyan-500/30">
+          <div>
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <span className="text-xs font-mono font-bold text-cyan-300 flex items-center gap-2">
+                <Power className="w-4 h-4 text-cyan-400" />
+                WINDOWS AUTOSTART (WAVE 2A)
+              </span>
+              <input
+                type="checkbox"
+                checked={autostartActive}
+                disabled={isUpdatingAutostart}
+                onChange={(e) => handleToggleAutostart(e.target.checked)}
+                className="w-4 h-4 accent-cyan-400 cursor-pointer disabled:opacity-50"
+              />
+            </div>
+            <p className="text-xs text-slate-400 mt-2 font-sans">
+              Configures TARS to launch in the background upon Windows user login via the standard user Registry Run key (M2A Criterion 3: off by default).
+            </p>
+
+            <div className="mt-3 p-2 bg-[#040810] rounded border border-slate-800 font-mono text-[11px] space-y-1">
+              <div className="flex items-center justify-between text-slate-400">
+                <span>Registry Key:</span>
+                <span className="text-cyan-400 text-[10px]">HKCU\Software\...\Run\TARS</span>
+              </div>
+              <div className="flex items-center justify-between text-slate-400">
+                <span>Status:</span>
+                <span className={autostartActive ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
+                  {autostartActive ? 'ENABLED' : 'DISABLED'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-3 pt-2 border-t border-slate-800 text-[11px] font-mono text-slate-400 flex items-center gap-1.5">
+            <Shield className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Runs un-elevated in user session</span>
+          </div>
+        </div>
+
+        {/* Global Hotkeys & Background Tray */}
+        <div className="glass-panel p-5 bg-[#081224]/90 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <span className="text-xs font-mono font-bold text-cyan-300 flex items-center gap-2">
+                <Keyboard className="w-4 h-4 text-cyan-400" />
+                GLOBAL SHORTCUTS & TRAY
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-2 font-sans">
+              Summon and interact with TARS from any active Windows application.
+            </p>
+
+            <div className="mt-3 space-y-2 font-mono text-xs">
+              <div className="flex items-center justify-between p-2 bg-[#040810] rounded border border-slate-800">
+                <span className="text-slate-400">Summon / Hide HUD:</span>
+                <span className="px-2 py-0.5 bg-cyan-950 text-cyan-300 rounded border border-cyan-500/40 text-[11px] font-bold">
+                  Ctrl+Shift+Space / Ctrl+Shift+T
+                </span>
+              </div>
+              <div className="flex items-center justify-between p-2 bg-[#040810] rounded border border-slate-800">
+                <span className="text-slate-400">Push-to-Talk (PTT):</span>
+                <span className="px-2 py-0.5 bg-emerald-950 text-emerald-300 rounded border border-emerald-500/40 text-[11px] font-bold">
+                  Ctrl+Shift+V
+                </span>
+              </div>
+              <div className="flex items-center justify-between p-2 bg-[#040810] rounded border border-slate-800">
+                <span className="text-slate-400">Close to Tray:</span>
+                <span className="text-emerald-400 font-bold text-[11px]">ACTIVE (PERSISTENT)</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-3 pt-2 border-t border-slate-800 text-[11px] font-mono text-slate-400 flex items-center gap-1.5">
+            <Layers className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Tray menu: Show HUD | Open Dashboard | Quit</span>
+          </div>
+        </div>
+
         {/* Mock Event Generator (Development Fixture) */}
         <div className="glass-panel p-5 bg-[#081224]/90 flex flex-col justify-between">
           <div>
@@ -182,3 +294,4 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     </div>
   );
 };
+

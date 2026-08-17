@@ -20,10 +20,11 @@ import { audioService } from './services/audio';
 import { sendNotification } from './services/notifications';
 import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut } from './services/tauri';
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
+import { actionRuntimeClient } from './services/actions';
 
 import { DesktopHeader } from './components/navigation/DesktopHeader';
 import { MobileTabBar } from './components/navigation/MobileTabBar';
-import { CompactHUD } from './components/navigation/CompactHUD';
+import { HUDOverlay } from './components/hud/HUDOverlay';
 import { CompanionHero } from './components/companion/CompanionHero';
 import { ActiveSetupsView } from './components/setups/ActiveSetupsView';
 import { AlertHistoryView } from './components/alerts/AlertHistoryView';
@@ -32,6 +33,7 @@ import { VoiceControlView } from './components/voice/VoiceControlView';
 import { MemoryView } from './components/memory/MemoryView';
 import { SystemStatusView } from './components/system/SystemStatusView';
 import { SettingsView } from './components/settings/SettingsView';
+import { nativeBridge } from './services/native-bridge';
 
 export const App: React.FC = () => {
   // App Settings
@@ -77,9 +79,9 @@ export const App: React.FC = () => {
     toggleCompactWindow(settings.compactMode);
   }, [settings.compactMode]);
 
-  // Register Global & In-App Shortcut (Ctrl+Shift+T / Command+Shift+T) to toggle compact HUD
+  // Register Global & In-App Shortcuts (Ctrl+Shift+Space / Ctrl+Shift+T / Ctrl+Shift+V)
   useEffect(() => {
-    const handleToggle = () => {
+    const handleToggleHUD = () => {
       setSettings((prev) => {
         const next = { ...prev, compactMode: !prev.compactMode };
         saveSettings(next);
@@ -89,20 +91,34 @@ export const App: React.FC = () => {
 
     // 1. In-App Keydown Listener (for web, PWA, and direct in-window input)
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === ' ' || e.code === 'Space')) {
         e.preventDefault();
-        handleToggle();
+        handleToggleHUD();
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
+        e.preventDefault();
+        handleToggleHUD();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
 
-    // 2. Native OS Global Shortcut (when window is in background)
-    const shortcut = 'CommandOrControl+Shift+T';
-    registerGlobalShortcut(shortcut, handleToggle);
+    // 2. Native OS Global Shortcuts
+    registerGlobalShortcut('CommandOrControl+Shift+Space', handleToggleHUD);
+    registerGlobalShortcut('CommandOrControl+Shift+T', handleToggleHUD);
+
+    // 3. Native event bridge listeners (tars://summon-hud and tars://ptt-toggle)
+    let cleanupNativeListeners: (() => void) | undefined;
+    nativeBridge.listenToNativeEvents(
+      () => handleToggleHUD(),
+      () => handleTogglePushToTalk()
+    ).then((cleanup) => {
+      cleanupNativeListeners = cleanup;
+    });
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
-      unregisterGlobalShortcut(shortcut);
+      unregisterGlobalShortcut('CommandOrControl+Shift+Space');
+      unregisterGlobalShortcut('CommandOrControl+Shift+T');
+      if (cleanupNativeListeners) cleanupNativeListeners();
     };
   }, []);
 
@@ -315,6 +331,26 @@ export const App: React.FC = () => {
         };
         handleIncomingAssistantMessage(userVoiceMsg);
 
+        // Step 2.5: A recognized deterministic action phrase bypasses the LLM
+        // (not the Action Runtime) -- submitted through the same shared
+        // actionRuntimeClient the HUD uses, so its permission classification,
+        // skill dispatch, and CONFIRMATION_REQUIRED handling are identical,
+        // and the HUD's own onAnyActionResult listener picks up the real
+        // result automatically. Anything not recognized falls through
+        // unchanged to the assistant/LLM query below.
+        actionRuntimeClient.setEndpoint(settings.apiEndpoint);
+        const activeContext = await nativeBridge.getActiveWindowContext();
+        const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
+          transcript,
+          activeContext,
+          'voice_ptt'
+        );
+        if (deterministicReq) {
+          await actionRuntimeClient.submitAction(deterministicReq);
+          setCompanionState('IDLE');
+          return;
+        }
+
         // Step 3: Query assistant endpoint with transcribed text
         const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
           method: 'POST',
@@ -413,11 +449,11 @@ export const App: React.FC = () => {
     handleIncomingTradingEvent(evt);
   };
 
-  // Compact Mode HUD Layout
+  // Compact Mode HUD Layout (Wave 2A Assistant Shell)
   if (settings.compactMode) {
     return (
       <div className="w-screen h-screen bg-[#03060a] p-1 overflow-hidden">
-        <CompactHUD
+        <HUDOverlay
           companionState={companionState}
           onExpand={() => updateSettings({ compactMode: false })}
           activeSetups={activeSetups}
@@ -425,6 +461,8 @@ export const App: React.FC = () => {
           isListening={isListening}
           onTogglePushToTalk={handleTogglePushToTalk}
           audioVolume={audioVolume}
+          apiEndpoint={settings.apiEndpoint}
+          onSendMessage={handleSendMessage}
         />
       </div>
     );
