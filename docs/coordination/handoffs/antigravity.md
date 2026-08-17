@@ -10,7 +10,106 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (WAVE 2A: WINDOWS-NATIVE TAURI HUD & ACTION RUNTIME)
+## Latest handoff (WAVE 2B: SCREEN AWARENESS + BROWSER CONTROL)
+
+**Status**: COMPLETE — Screen awareness (DPI-aware monitor geometry, active window BMP capture, bounded region capture, secure desktop protection, temp cache eviction, Win32 UI hierarchy), Visual & Semantic targeting engine (strict preference hierarchy, coordinate bounding, sensitive field redaction, zero random click loops), Real Browser automation layer (scheme validation, DOM/accessibility extraction, semantic element finding, safe clicking, sensitive typing, scrolling, history, tabs), Multi-Step Action Planner, and extended HUD UI surface (VisualInspectorCard, BrowserContextCard, MultiStepPlanView) fully implemented and verified.
+**Branch**: `feature/wave2b-vision-browser`
+**Commit SHA**: `905825a0bb97c565cb9aa51547d916e0d45fe240`
+**MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231
+**Windows SDK**: Windows 10.0.26200 x86_64 SDK
+**Cargo Target**: `D:\TARS-cache\cargo-target\release\tars-companion.exe`
+
+**Work completed**:
+1. **Native Screen Awareness & Visual Context (`apps/web/src-tauri/`)**:
+   - `get_monitors_geometry`: Multi-monitor bounds, work areas, and DPI scale factors via Win32 `GetDpiForMonitor` / `GetDpiForWindow`.
+   - `capture_active_window`: Explicit active-window capture using Win32 GDI `BitBlt` with `CAPTUREBLT` and 32-bit BMP encoding.
+   - Secure Desktop Protection: `is_secure_desktop_window` intercepts UAC (`consent.exe`), Windows Logon (`winlogon.exe`, `LogonUI.exe`), and Lock Screen (`LockApp.exe`), returning `is_secure_desktop: true` and refusing capture.
+   - `capture_screen_region`: Bounded coordinate capture with clamp limits (3840x2160) and monitor boundary checking.
+   - `get_active_window_elements`: Enumerates child HWND hierarchy with roles (`button`, `input`, `combobox`, `list`), enabled state, and bounding boxes.
+   - `clear_captures_cache`: Evicts temp captures in `%TEMP%/tars_captures/` with auto-eviction keeping max 10 files.
+
+2. **Visual & Semantic Targeting Engine (`apps/web/src/services/visual-targeting.ts`)**:
+   - Strict preference hierarchy:
+     1. Semantic DOM elements (id, selector, text, placeholder, aria-label).
+     2. Semantic Win32 accessibility UI elements (role, class name, HWND hierarchy).
+     3. Visual coordinates ONLY if semantic target is unavailable or coordinate-explicit.
+   - Coordinate boundary validation against monitor geometry and active window bounds (zero blind off-screen clicks or random click loops).
+   - Sensitive field protection: identifies password, credit card, API key, and auth tokens, automatically replacing values with `[REDACTED_SENSITIVE]`.
+   - Synthesizes valid `ActionRequest` objects with automatic `CONFIRM_REQUIRED` risk assessment for state mutations.
+
+3. **Real Browser Automation & Context Service (`apps/web/src/services/browser-control.ts`)**:
+   - Scheme validation: permits `http://` and `https://`, strictly rejecting `javascript:`, `file:`, and arbitrary URI schemes.
+   - Live DOM / accessibility tree extraction: extracts headings, interactive nodes, buttons, inputs, links, and forms.
+   - Semantic element search (`findElement`).
+   - Safe click dispatch with state-change detection (`CONFIRM_REQUIRED` for order submissions / purchases).
+   - Typing into fields with sensitive value masking in logs/payloads.
+   - History navigation (`back`, `forward`) and scroll control (`scroll`).
+   - Page text reading (`summary`, `headings`, `selection`, `all`).
+   - Tab lifecycle management (`getTabs`, `openTab`, `switchTab`, `closeTab`).
+
+4. **Multi-Step Action Planner (`apps/web/src/services/action-planner.ts`)**:
+   - Synthesizes and coordinates multi-step action sequences with step-by-step progress tracking.
+   - Deterministic workflows for market research (`market_research`), web exploration (`browse_page`), and screen inspection (`inspect_ui`).
+   - Halts and requests user authorization on `CONFIRM_REQUIRED` steps; resumes upon authorization or cancels on denial.
+   - Real-time plan status broadcasting to the HUD overlay.
+
+5. **Extended HUD UI Surface (`apps/web/src/components/hud/`)**:
+   - `VisualInspectorCard`: Visual snapshot preview, DPI scale indicator, secure desktop alerts, native Win32 UI tree, and multi-monitor geometry list.
+   - `BrowserContextCard`: Live URL bar, back/forward history buttons, DOM interactive elements list, and page text summary reader.
+   - `MultiStepPlanView`: Sequential plan progress visualization with step badges, risk indicators, and authorization prompt.
+   - `HUDOverlay`: Unified companion HUD with quick skill pills (`Capture`, `DOM`, `Workflow`, `Terminal`), active window bar, and instant deterministic command execution (zero fake confidence percentages).
+
+6. **Test Suite & Verification**:
+   - `screen-awareness.test.ts` (6 tests): Monitor geometry, active window capture, region capture, secure desktop check, and cache cleanup.
+   - `visual-targeting.test.ts` (7 tests): Semantic DOM/accessibility preference hierarchy, coordinate boundary validation, sensitive value redaction, and ActionRequest synthesis.
+   - `browser-control.test.ts` (12 tests): URL navigation, scheme security, DOM inspection, semantic element finding, safe clicks, sensitive typing, scrolling, history, and tabs.
+   - `action-planner.test.ts` (5 tests): Multi-step plan formulation, deterministic workflows, sequential execution, and confirmation gate pausing/resumption.
+   - `hud-wave2b.test.tsx` (5 tests): VisualInspectorCard, BrowserContextCard, MultiStepPlanView, and HUDOverlay integration.
+   - Full Vitest suite: 16 test files, 94/94 tests passing (100%).
+   - TypeScript check (`tsc --noEmit`): 0 errors.
+   - ESLint (`npm run lint`): 0 errors.
+   - Vite bundle (`npm run build`): Clean production build.
+   - Tauri Native Build (`cargo build --release`): Built successfully targeting `D:\TARS-cache\cargo-target`.
+
+**Files changed**:
+- `apps/web/src-tauri/Cargo.toml`
+- `apps/web/src-tauri/src/lib.rs`
+- `apps/web/src/types/actions.ts`
+- `apps/web/src/services/native-bridge.ts`
+- `apps/web/src/services/actions.ts`
+- `apps/web/src/services/visual-targeting.ts` [NEW]
+- `apps/web/src/services/browser-control.ts` [NEW]
+- `apps/web/src/services/action-planner.ts` [NEW]
+- `apps/web/src/components/hud/VisualInspectorCard.tsx` [NEW]
+- `apps/web/src/components/hud/BrowserContextCard.tsx` [NEW]
+- `apps/web/src/components/hud/MultiStepPlanView.tsx` [NEW]
+- `apps/web/src/components/hud/HUDOverlay.tsx`
+- `apps/web/src/test/screen-awareness.test.ts` [NEW]
+- `apps/web/src/test/visual-targeting.test.ts` [NEW]
+- `apps/web/src/test/browser-control.test.ts` [NEW]
+- `apps/web/src/test/action-planner.test.ts` [NEW]
+- `apps/web/src/test/hud-wave2b.test.tsx` [NEW]
+- `apps/web/src/test/hud.test.tsx`
+- `apps/web/vitest.config.ts`
+- `docs/coordination/wave2/m2b/antigravity.done.json` [NEW]
+
+**Interfaces exposed**:
+- Native Tauri commands: `get_monitors_geometry`, `capture_active_window`, `capture_screen_region`, `get_active_window_elements`, `clear_captures_cache`.
+- Frontend services: `visualTargetingService.resolveTarget()`, `browserControlService.navigate()`, `browserControlService.inspectPage()`, `browserControlService.clickElement()`, `browserControlService.typeText()`, `browserControlService.scroll()`, `actionPlannerService.createPlan()`, `actionPlannerService.executePlan()`.
+- HUD components: `VisualInspectorCard`, `BrowserContextCard`, `MultiStepPlanView`, `HUDOverlay`.
+
+**Known limitations**:
+- Visual coordinates are purely fallbacks when semantic DOM / accessibility targets are not present; coordinate clicks require bounded display verification.
+- Screen capture on Windows secure desktop (UAC / LockApp) is blocked by design for system security.
+
+**Exact dependencies required from other agents**:
+- `claude.md`: Backend `ActionRuntime` endpoint `/api/v1/actions` for receiving synthesized `ActionRequest` payloads and handling long-running background tasks.
+- `codex.md`: Contract verification against `contracts/action-request.schema.json` and `contracts/action-result.schema.json`.
+
+**Next recommended action**:
+- Merge `feature/wave2b-vision-browser` into `integration/v1`.
+
+---
 
 **Status**: COMPLETE — Windows-native desktop shell, system tray lifecycle, Win32 active foreground window bridge, compact HUD overlay, Action Runtime client, confirmation/deny cards, and real ActionResult rendering fully built and verified.
 **Branch**: `feature/wave2-native-shell`
