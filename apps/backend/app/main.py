@@ -8,6 +8,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from actions.permissions import PermissionEngine
+from actions.plan_runtime import PlanRuntime
+from actions.plan_store import PlanStore
 from actions.registry import build_skill_registry
 from actions.runtime import ActionRuntime
 from actions.store import ActionStore
@@ -16,7 +18,7 @@ from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
 from app.observability import configure_tracing
-from app.routers import actions, assistant, events, health, memory, voice, ws
+from app.routers import action_plans, actions, assistant, events, health, memory, voice, ws
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
 from app.ws_manager import ConnectionManager
@@ -89,6 +91,9 @@ async def lifespan(app: FastAPI):
     )
     await action_runtime.initialize()
     app.state.action_runtime = action_runtime
+    plan_runtime = PlanRuntime(PlanStore(db.conn), action_runtime)
+    await plan_runtime.initialize()
+    app.state.plan_runtime = plan_runtime
 
     try:
         app.state.assistant_provider = build_assistant_provider(settings)
@@ -148,6 +153,7 @@ def create_app() -> FastAPI:
     app.include_router(voice.router)
     app.include_router(ws.router)
     app.include_router(actions.router)
+    app.include_router(action_plans.router)
 
     return app
 
