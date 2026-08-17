@@ -137,6 +137,7 @@ def _is_read_only(lowered_command: str) -> bool:
 
 class TerminalSkill(BaseSkill):
     name = "terminal"
+    description = "Run an allow-listed shell command and return its output."
     capabilities: tuple[str, ...] = ("run_command",)
 
     def classify_risk(self, action: str, arguments: dict[str, Any]) -> RiskLevel:
