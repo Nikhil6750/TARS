@@ -8,6 +8,7 @@ from uuid import UUID
 import aiosqlite
 
 from actions.errors import DuplicateActionError
+from actions.safety import redact_sensitive
 from app.action_contracts import ActionRequest, ActionResult, ActionStatus
 
 _SCHEMA = """
@@ -130,7 +131,9 @@ class ActionStore:
                 result.status.value,
                 result.risk_level.value if result.risk_level else None,
                 result.summary,
-                json.dumps(details or {}, separators=(",", ":"), default=str),
+                json.dumps(
+                    redact_sensitive(details or {}), separators=(",", ":"), default=str
+                ),
                 now.isoformat(),
             ),
         )

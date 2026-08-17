@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "milestone": "M2B",
+  "agent": "codex",
+  "stream": "control-runtime",
+  "status": "complete",
+  "branch": "feature/wave2b-control-runtime",
+  "implementation_sha": "9d17e0fda5fa9db1b2f7a37dc03a5767b664ec80",
+  "completed_at": "2026-08-17T07:22:36Z",
+  "tests": {
+    "targeted_pytest": "53 passed",
+    "ruff": "passed",
+    "mypy": "passed; 16 source files"
+  },
+  "capabilities": [
+    "bounded objective ActionPlan and ordered ActionStep models",
+    "synchronous plan validation, execution, observation, verification, and continuation",
+    "per-step authoritative permission classification and one-time confirmation",
+    "structured Windows UI Automation, browser, and native vision observations",
+    "backend-computed VERIFIED, FAILED, and UNKNOWN verification",
+    "bounded retry, re-observation, explicit alternate-target recovery, timeout, and cancellation",
+    "assistant plan proposal adapter whose output remains data only",
+    "SQLite plan state, observation metadata, and append-only redacted audit trail",
+    "password, credential-dialog, secure-desktop, and system-critical context protection"
+  ],
+  "known_gaps": [
+    "Windows UI Automation, browser DOM, and native vision producers are intentionally not implemented in this stream.",
+    "No Tauri plan UI was implemented; callers use the REST control surface.",
+    "Verification is deterministic expected-state subset matching; richer adapter-specific predicates can be added behind the same backend boundary."
+  ]
+}
