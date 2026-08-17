@@ -30,6 +30,7 @@ import { actionRuntimeClient } from '../../services/actions';
 import { nativeBridge } from '../../services/native-bridge';
 import { browserControlService } from '../../services/browser-control';
 import { actionPlannerService } from '../../services/action-planner';
+import { frontendCommandBridge } from '../../services/frontend-command-bridge';
 import { visualTargetingService } from '../../services/visual-targeting';
 import { ActiveContextBar } from './ActiveContextBar';
 import { ActionConfirmationCard } from './ActionConfirmationCard';
@@ -123,6 +124,7 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
   // Subscribe to action results and plan updates
   useEffect(() => {
     actionRuntimeClient.setEndpoint(apiEndpoint);
+    frontendCommandBridge.connect(apiEndpoint);
 
     const unsubAction = actionRuntimeClient.onAnyActionResult((result, request) => {
       setLatestResult(result);

@@ -18,10 +18,25 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         "launch": RiskLevel.LOW_RISK,
         "focus": RiskLevel.LOW_RISK,
         "list_running": RiskLevel.READ_ONLY,
+        "capture_active_window": RiskLevel.READ_ONLY,
+        "get_monitors": RiskLevel.READ_ONLY,
+        "get_ui_elements": RiskLevel.READ_ONLY,
     },
     "browser": {
         "open_url": RiskLevel.LOW_RISK,
         "search": RiskLevel.LOW_RISK,
+        "navigate": RiskLevel.LOW_RISK,
+        "back": RiskLevel.LOW_RISK,
+        "forward": RiskLevel.LOW_RISK,
+        "scroll": RiskLevel.READ_ONLY,
+        "inspect_dom": RiskLevel.READ_ONLY,
+        "read_text": RiskLevel.READ_ONLY,
+        # Floor only -- BrowserSkill.classify_risk() elevates these to
+        # CONFIRM_REQUIRED dynamically for state-changing click targets and
+        # sensitive type fields; classify() takes max(declared, this floor),
+        # so the elevation always wins over this baseline.
+        "click": RiskLevel.LOW_RISK,
+        "type": RiskLevel.LOW_RISK,
     },
     "filesystem": {
         "list": RiskLevel.READ_ONLY,

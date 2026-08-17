@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from app.action_contracts import Skill
 
 if TYPE_CHECKING:
+    from actions.frontend_bridge import FrontendCommandBridge
     from memory.service import MemoryService
 
 
@@ -53,18 +54,22 @@ class SkillRegistry:
         ]
 
 
-def build_skill_registry(memory_service: MemoryService | None = None) -> SkillRegistry:
+def build_skill_registry(
+    memory_service: MemoryService | None = None,
+    frontend_bridge: FrontendCommandBridge | None = None,
+) -> SkillRegistry:
     """Load Claude's skill package when present, while keeping this branch bootable alone.
 
     Imports ``skills.registry`` directly rather than the ``skills`` package --
     the package's ``__init__.py`` intentionally has no re-exports (see its
     docstring), so ``SKILLS``/``build_registry``/``get_skills`` only exist on
-    the submodule. Prefers a ``build_registry(memory_service=...)`` factory
-    when present (Claude's actual integration point, per
+    the submodule. Prefers a ``build_registry(memory_service=..., frontend_bridge=...)``
+    factory when present (Claude's actual integration point, per
     ``skills/registry.py``'s docstring) so a live ``MemoryService`` wires in
-    the ``obsidian`` skill; falls back to a ``SKILLS`` mapping/iterable or a
-    ``get_skills()`` factory for any other layout. Invalid exported
-    registries fail closed at startup.
+    the ``obsidian`` skill and a live ``FrontendCommandBridge`` wires in
+    ``browser``/``windows_app``'s renderer/native-backed actions; falls back
+    to a ``SKILLS`` mapping/iterable or a ``get_skills()`` factory for any
+    other layout. Invalid exported registries fail closed at startup.
     """
 
     registry = SkillRegistry()
@@ -77,7 +82,7 @@ def build_skill_registry(memory_service: MemoryService | None = None) -> SkillRe
 
     builder = getattr(module, "build_registry", None)
     if builder is not None:
-        exported = builder(memory_service=memory_service)
+        exported = builder(memory_service=memory_service, frontend_bridge=frontend_bridge)
     else:
         exported = getattr(module, "SKILLS", None)
         if exported is None:

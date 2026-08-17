@@ -53,6 +53,37 @@ def redact_sensitive(value: Any, *, key: str = "") -> Any:
     return value
 
 
+# Identifying fields (selector/control id/name) that name *what* is being
+# typed into, and content fields that carry *what text* is being typed --
+# a request's arguments only leak a credential through the combination of
+# the two (e.g. {"selector": "#password", "text": "hunter2"}: "text" alone
+# doesn't look like a secret key, so key-based redact_sensitive() can't
+# catch it on its own). Mirrors the pattern skills/browser.py uses to
+# elevate risk for these same arguments.
+_IDENTIFYING_ARG_KEYS = {"selector", "control_id", "target", "name", "automation_id", "field"}
+_CONTENT_ARG_KEYS = {"text", "value", "content"}
+_SENSITIVE_TARGET = re.compile(r"password|secret|card|token|cvv|ssn|pin\b|credential", re.IGNORECASE)
+
+
+def audit_safe_arguments(arguments: Any) -> Any:
+    """Best-effort redaction of an ActionRequest/ActionStep's arguments for
+    the audit trail. Applies key-based redact_sensitive() first, then
+    additionally redacts any content field when a sibling identifying field
+    names a password/credential-shaped target -- never trusts a
+    caller-declared sensitivity flag."""
+    redacted = redact_sensitive(arguments)
+    if not isinstance(redacted, dict) or not isinstance(arguments, Mapping):
+        return redacted
+    identifying_values = " ".join(
+        str(value) for key, value in arguments.items() if key in _IDENTIFYING_ARG_KEYS
+    )
+    if _SENSITIVE_TARGET.search(identifying_values):
+        for key in _CONTENT_ARG_KEYS:
+            if key in redacted:
+                redacted[key] = "[REDACTED]"
+    return redacted
+
+
 def contains_secret_field(value: Any) -> bool:
     if isinstance(value, Mapping):
         return any(

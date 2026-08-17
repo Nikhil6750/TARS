@@ -22,6 +22,7 @@ from actions.plan_store import PlanStore
 from actions.runtime import ActionRuntime
 from actions.safety import (
     SensitiveContext,
+    audit_safe_arguments,
     contains_secret_field,
     detect_sensitive_context,
     redact_sensitive,
@@ -116,7 +117,7 @@ class PlanRuntime:
             now,
             details={
                 "goal": plan.goal,
-                "plan": plan.model_dump(mode="json"),
+                "plan": _audit_safe_plan_dict(plan),
                 "provenance": plan.provenance.value,
             },
         )
@@ -510,7 +511,7 @@ class PlanRuntime:
             details={
                 "skill": step.skill,
                 "action": step.action,
-                "arguments": arguments,
+                "arguments": audit_safe_arguments(arguments),
                 "attempt": attempt,
                 "effective_risk": attempt_risk.value,
             },
@@ -648,7 +649,7 @@ class PlanRuntime:
                 details={
                     "skill": step.skill,
                     "action": step.action,
-                    "arguments": step.arguments,
+                    "arguments": audit_safe_arguments(step.arguments),
                 },
             )
             execution = await self.get(plan.plan_id)
@@ -855,3 +856,20 @@ def _contains_key(value: Any, forbidden: set[str]) -> bool:
 
 def _dump(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), default=str)
+
+
+def _audit_safe_plan_dict(plan: ActionPlan) -> dict[str, Any]:
+    """A plan's JSON dump for PLAN_CREATED audit, with each step's arguments
+    (and recovery.alternate_arguments) redacted the same way a single
+    ActionRequest's arguments are -- a plan step can carry a credential into
+    a text field exactly like a standalone action can."""
+    dumped = plan.model_dump(mode="json")
+    for step in dumped.get("steps", []):
+        step["arguments"] = audit_safe_arguments(step.get("arguments", {}))
+        recovery = step.get("recovery") or {}
+        alternates = recovery.get("alternate_arguments")
+        if isinstance(alternates, list):
+            recovery["alternate_arguments"] = [
+                audit_safe_arguments(alt) if isinstance(alt, dict) else alt for alt in alternates
+            ]
+    return dumped

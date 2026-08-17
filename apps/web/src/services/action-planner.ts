@@ -1,7 +1,25 @@
 /**
- * Wave 2B Multi-Step Action Planner & Execution Engine
- * Formulates and coordinates bounded multi-step action sequences with live step tracking,
- * risk-level assessment, confirmation gating, and real-time HUD event broadcasts.
+ * Wave 2B Multi-Step Action Planner
+ * Formulates bounded multi-step action sequences and coordinates their
+ * execution with live step tracking and real-time HUD event broadcasts.
+ *
+ * This service has NO independent authority: it does not classify risk,
+ * decide whether a step requires confirmation, decide a step succeeded, or
+ * retry anything on its own. Every step is submitted to the backend Codex
+ * Action Runtime via `actionRuntimeClient` (already the sole
+ * permission/execution/audit authority -- see `services/actions.ts`), and
+ * this service only reacts to the real `ActionResult.status` the backend
+ * returns. A step's client-supplied `risk_level` is a display hint only
+ * (mirrors `apps/backend/actions/plan_models.py`'s `ActionStep.risk_level`
+ * docstring: "the runtime always replaces it with
+ * PermissionEngine.classify() before making an execution decision") --
+ * never read here to gate execution or confirmation.
+ *
+ * DOM-level browser steps are NOT executed locally against `document`.
+ * They are submitted like any other action; the backend's `browser` skill
+ * dispatches the already-authorized command back out to this same
+ * renderer via `services/frontend-command-bridge.ts`, which is the only
+ * place `browser-control.ts`'s mutating methods are invoked from.
  */
 
 import {
@@ -10,10 +28,15 @@ import {
   MultiStepActionPlan,
 } from '../types/actions';
 import { actionRuntimeClient } from './actions';
-import { browserControlService } from './browser-control';
+
+interface PendingConfirmation {
+  requestId: string;
+  confirmationToken: string;
+}
 
 export class ActionPlannerService {
   private activePlan: MultiStepActionPlan | null = null;
+  private pendingConfirmation: PendingConfirmation | null = null;
   private planListeners: Set<(plan: MultiStepActionPlan | null) => void> = new Set();
 
   /**
@@ -39,7 +62,9 @@ export class ActionPlannerService {
   }
 
   /**
-   * Synthesizes a structured multi-step plan for a high-level user goal.
+   * Synthesizes a structured multi-step plan proposal for a high-level user
+   * goal. Proposing a plan is display/UX state only -- nothing executes
+   * until executePlan() submits each step to the backend.
    */
   public createPlan(goal: string, steps: Omit<ActionPlanStep, 'step_number' | 'status'>[]): MultiStepActionPlan {
     const planId = `plan_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -64,12 +89,14 @@ export class ActionPlannerService {
     };
 
     this.activePlan = plan;
+    this.pendingConfirmation = null;
     this.notify();
     return plan;
   }
 
   /**
-   * Synthesizes a deterministic plan for common browser & visual workflows.
+   * Synthesizes a deterministic plan proposal for common browser & visual
+   * workflows.
    */
   public createDeterministicWorkflow(type: 'market_research' | 'browse_page' | 'inspect_ui', params: Record<string, string>): MultiStepActionPlan {
     switch (type) {
@@ -78,7 +105,7 @@ export class ActionPlannerService {
         return this.createPlan(`Research market setup for ${symbol}`, [
           {
             skill: 'browser',
-            action: 'open_url',
+            action: 'navigate',
             description: `Open TradingView chart for ${symbol}`,
             arguments: { url: `https://tradingview.com/symbols/${encodeURIComponent(symbol)}` },
             risk_level: 'LOW_RISK',
@@ -105,7 +132,7 @@ export class ActionPlannerService {
         return this.createPlan(`Navigate and inspect ${url}`, [
           {
             skill: 'browser',
-            action: 'open_url',
+            action: 'navigate',
             description: `Navigate to ${url}`,
             arguments: { url },
             risk_level: 'LOW_RISK',
@@ -156,28 +183,19 @@ export class ActionPlannerService {
   }
 
   /**
-   * Executes the active plan sequentially. Pauses if a step requires confirmation.
+   * Executes the active plan sequentially, submitting each step to the
+   * backend Action Runtime and reacting only to its real ActionResult.
+   * Halts for user approval exactly when the backend -- not this service --
+   * reports CONFIRMATION_REQUIRED.
    */
   public async executePlan(): Promise<ActionResult> {
     if (!this.activePlan || this.activePlan.steps.length === 0) {
-      return {
-        schema_version: '1.0.0',
-        request_id: `plan_err_${Date.now()}`,
-        status: 'FAILED',
-        risk_level: 'READ_ONLY',
-        summary: 'No active multi-step plan to execute.',
-        data: {},
-        error: 'No active plan',
-        started_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      };
+      return this.syntheticResult('FAILED', 'No active multi-step plan to execute.', 'No active plan');
     }
 
     const plan = this.activePlan;
     plan.status = 'EXECUTING';
     this.notify();
-
-    const startedAt = new Date().toISOString();
 
     for (let i = plan.current_step_index; i < plan.steps.length; i++) {
       const step = plan.steps[i];
@@ -185,139 +203,99 @@ export class ActionPlannerService {
       step.status = 'RUNNING';
       this.notify();
 
+      let stepResult: ActionResult;
       try {
-        // If step requires confirmation, halt for user approval
-        if (step.risk_level === 'CONFIRM_REQUIRED') {
-          plan.status = 'AWAITING_CONFIRMATION';
-          this.notify();
-          return {
-            schema_version: '1.0.0',
-            request_id: plan.plan_id,
-            status: 'CONFIRMATION_REQUIRED',
-            risk_level: 'CONFIRM_REQUIRED',
-            summary: `Step ${step.step_number} requires user confirmation: ${step.description}`,
-            data: {
-              plan_id: plan.plan_id,
-              step_number: step.step_number,
-              action: `${step.skill}.${step.action}`,
-              description: step.description,
-            },
-            started_at: startedAt,
-            completed_at: null,
-          };
-        }
+        stepResult = await this.submitStep(step);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        step.status = 'FAILED';
+        step.result_summary = errMsg;
+        plan.status = 'FAILED';
+        this.notify();
+        return this.syntheticResult(
+          'FAILED',
+          `Plan execution failed at step ${step.step_number}: ${errMsg}`,
+          errMsg
+        );
+      }
 
-        // Execute step via ActionRuntime or BrowserControl
-        const stepResult = await this.executeStep(step);
-        step.status = stepResult.status === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED';
-        step.result_summary = stepResult.summary;
-
-        if (stepResult.status !== 'SUCCEEDED') {
+      if (stepResult.status === 'CONFIRMATION_REQUIRED') {
+        const token = stepResult.data?.confirmation_token;
+        if (typeof token !== 'string' || !token) {
+          // The backend asked for confirmation but gave us nothing to confirm
+          // with -- this is a real integration failure, not something to
+          // paper over by inventing a token or treating it as approved.
+          step.status = 'FAILED';
+          step.result_summary = 'Backend requested confirmation without a confirmation_token.';
           plan.status = 'FAILED';
           this.notify();
           return stepResult;
         }
-      } catch (err) {
-        step.status = 'FAILED';
-        const errMsg = err instanceof Error ? err.message : String(err);
-        step.result_summary = errMsg;
+        this.pendingConfirmation = { requestId: stepResult.request_id, confirmationToken: token };
+        plan.status = 'AWAITING_CONFIRMATION';
+        step.result_summary = stepResult.summary;
+        this.notify();
+        return stepResult;
+      }
+
+      step.status = stepResult.status === 'SUCCEEDED' ? 'SUCCEEDED' : 'FAILED';
+      step.result_summary = stepResult.summary;
+
+      if (stepResult.status !== 'SUCCEEDED') {
         plan.status = 'FAILED';
         this.notify();
-        return {
-          schema_version: '1.0.0',
-          request_id: plan.plan_id,
-          status: 'FAILED',
-          risk_level: step.risk_level,
-          summary: `Plan execution failed at step ${step.step_number}: ${errMsg}`,
-          data: { failed_step: step.step_number },
-          error: errMsg,
-          started_at: startedAt,
-          completed_at: new Date().toISOString(),
-        };
+        return stepResult;
       }
     }
 
     plan.status = 'COMPLETED';
     this.notify();
 
-    return {
-      schema_version: '1.0.0',
-      request_id: plan.plan_id,
-      status: 'SUCCEEDED',
-      risk_level: 'LOW_RISK',
-      summary: `Successfully completed ${plan.steps.length}-step plan: "${plan.goal}"`,
-      data: {
-        plan_id: plan.plan_id,
-        goal: plan.goal,
-        total_steps: plan.steps.length,
-      },
-      started_at: startedAt,
-      completed_at: new Date().toISOString(),
-    };
+    return this.syntheticResult(
+      'SUCCEEDED',
+      `Successfully completed ${plan.steps.length}-step plan: "${plan.goal}"`,
+      null,
+      { plan_id: plan.plan_id, goal: plan.goal, total_steps: plan.steps.length }
+    );
   }
 
   /**
-   * Resumes a paused plan after user confirmation.
+   * Resumes a paused plan after user confirmation. The approval decision and
+   * its execution both happen on the backend via the real confirmation
+   * endpoint -- this service never re-executes the step itself.
    */
   public async resumeAfterConfirmation(approved: boolean): Promise<ActionResult> {
-    if (!this.activePlan || this.activePlan.status !== 'AWAITING_CONFIRMATION') {
-      return {
-        schema_version: '1.0.0',
-        request_id: `plan_resume_${Date.now()}`,
-        status: 'FAILED',
-        risk_level: 'READ_ONLY',
-        summary: 'No plan is awaiting confirmation.',
-        data: {},
-        error: 'Not awaiting confirmation',
-        started_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      };
+    if (!this.activePlan || this.activePlan.status !== 'AWAITING_CONFIRMATION' || !this.pendingConfirmation) {
+      return this.syntheticResult('FAILED', 'No plan is awaiting confirmation.', 'Not awaiting confirmation');
     }
 
+    const { requestId, confirmationToken } = this.pendingConfirmation;
     const currentStep = this.activePlan.steps[this.activePlan.current_step_index];
-    if (!approved) {
+
+    const result = await actionRuntimeClient.respondToConfirmation(requestId, confirmationToken, approved);
+    this.pendingConfirmation = null;
+
+    if (!approved || result.status === 'DENIED') {
       currentStep.status = 'FAILED';
-      currentStep.result_summary = 'User denied confirmation.';
+      currentStep.result_summary = result.summary || 'User denied confirmation.';
       this.activePlan.status = 'CANCELLED';
       this.notify();
-
-      return {
-        schema_version: '1.0.0',
-        request_id: this.activePlan.plan_id,
-        status: 'DENIED',
-        risk_level: 'CONFIRM_REQUIRED',
-        summary: `Plan cancelled by user at step ${currentStep.step_number}.`,
-        data: { plan_id: this.activePlan.plan_id },
-        error: 'User denied confirmation',
-        started_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      };
+      return result;
     }
 
-    // Step approved, execute step and continue remaining steps
-    try {
-      const stepRes = await this.executeStep(currentStep);
-      currentStep.status = 'SUCCEEDED';
-      currentStep.result_summary = stepRes.summary;
-      this.activePlan.current_step_index += 1;
-      return await this.executePlan();
-    } catch (err) {
+    if (result.status !== 'SUCCEEDED') {
       currentStep.status = 'FAILED';
+      currentStep.result_summary = result.summary;
       this.activePlan.status = 'FAILED';
       this.notify();
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return {
-        schema_version: '1.0.0',
-        request_id: this.activePlan.plan_id,
-        status: 'FAILED',
-        risk_level: currentStep.risk_level,
-        summary: `Error executing confirmed step: ${errMsg}`,
-        data: {},
-        error: errMsg,
-        started_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      };
+      return result;
     }
+
+    currentStep.status = 'SUCCEEDED';
+    currentStep.result_summary = result.summary;
+    this.activePlan.current_step_index += 1;
+    this.notify();
+    return await this.executePlan();
   }
 
   /**
@@ -325,53 +303,16 @@ export class ActionPlannerService {
    */
   public clearPlan(): void {
     this.activePlan = null;
+    this.pendingConfirmation = null;
     this.notify();
   }
 
-  private async executeStep(step: ActionPlanStep): Promise<ActionResult> {
-    if (step.skill === 'browser') {
-      if (step.action === 'open_url' || step.action === 'navigate') {
-        return await browserControlService.navigate(String(step.arguments.url || ''));
-      }
-      if (step.action === 'inspect_dom') {
-        const ctx = browserControlService.inspectPage();
-        return {
-          schema_version: '1.0.0',
-          request_id: `step_${Date.now()}`,
-          status: 'SUCCEEDED',
-          risk_level: 'READ_ONLY',
-          summary: `Inspected DOM: found ${ctx.dom_tree?.length || 0} interactive elements across ${ctx.headings?.length || 0} sections.`,
-          data: { elements_count: ctx.dom_tree?.length || 0, headings: ctx.headings || [] },
-          started_at: new Date().toISOString(),
-          completed_at: new Date().toISOString(),
-        };
-      }
-      if (step.action === 'click') {
-        return await browserControlService.clickElement(String(step.arguments.selector || ''));
-      }
-      if (step.action === 'type') {
-        return await browserControlService.typeText(
-          String(step.arguments.selector || ''),
-          String(step.arguments.text || '')
-        );
-      }
-      if (step.action === 'read_text') {
-        const mode = (typeof step.arguments.mode === 'string' ? step.arguments.mode : 'summary') as 'all' | 'selection' | 'summary' | 'headings';
-        const text = browserControlService.readPageText(mode);
-        return {
-          schema_version: '1.0.0',
-          request_id: `step_${Date.now()}`,
-          status: 'SUCCEEDED',
-          risk_level: 'READ_ONLY',
-          summary: `Extracted page text (${text.length} chars)`,
-          data: { text_preview: text.substring(0, 150), length: text.length },
-          started_at: new Date().toISOString(),
-          completed_at: new Date().toISOString(),
-        };
-      }
-    }
-
-    // Default: submit through Action Runtime
+  /**
+   * Submits one step to the backend Action Runtime -- the sole path for
+   * every skill, including `browser`'s DOM actions. No local execution, no
+   * local risk classification.
+   */
+  private async submitStep(step: ActionPlanStep): Promise<ActionResult> {
     const req = actionRuntimeClient.createRequest({
       skill: step.skill,
       action: step.action,
@@ -380,6 +321,26 @@ export class ActionPlannerService {
     });
 
     return await actionRuntimeClient.submitAction(req);
+  }
+
+  private syntheticResult(
+    status: ActionResult['status'],
+    summary: string,
+    error: string | null,
+    data: Record<string, unknown> = {}
+  ): ActionResult {
+    const now = new Date().toISOString();
+    return {
+      schema_version: '1.0.0',
+      request_id: `plan_${status.toLowerCase()}_${Date.now()}`,
+      status,
+      risk_level: 'READ_ONLY',
+      summary,
+      data,
+      error,
+      started_at: now,
+      completed_at: now,
+    };
   }
 }
 

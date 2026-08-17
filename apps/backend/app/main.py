@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from actions.frontend_bridge import FrontendCommandBridge
 from actions.permissions import PermissionEngine
 from actions.plan_runtime import PlanRuntime
 from actions.plan_store import PlanStore
@@ -81,7 +82,11 @@ async def lifespan(app: FastAPI):
 
     action_ws_manager = ConnectionManager()
     app.state.action_ws_manager = action_ws_manager
-    action_registry = build_skill_registry(memory_service=memory_service)
+    frontend_bridge = FrontendCommandBridge(action_ws_manager)
+    app.state.frontend_bridge = frontend_bridge
+    action_registry = build_skill_registry(
+        memory_service=memory_service, frontend_bridge=frontend_bridge
+    )
     app.state.action_registry = action_registry
     action_runtime = ActionRuntime(
         ActionStore(db.conn),

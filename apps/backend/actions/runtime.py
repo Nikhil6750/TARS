@@ -16,6 +16,7 @@ from actions.errors import (
 )
 from actions.permissions import PermissionEngine
 from actions.registry import SkillRegistry
+from actions.safety import audit_safe_arguments
 from actions.store import ActionStore
 from app.action_contracts import (
     TERMINAL_STATUSES,
@@ -96,7 +97,7 @@ class ActionRuntime:
                     "skill": request.skill,
                     "action": request.action,
                     "source": request.source.value,
-                    "arguments": request.arguments,
+                    "arguments": audit_safe_arguments(request.arguments),
                     "active_context": (
                         request.active_context.model_dump(mode="json")
                         if request.active_context
