@@ -21,6 +21,23 @@ class ClaudeCodeProvider(AssistantProvider):
     def __init__(self, command: str = "claude", timeout_seconds: float = 60.0):
         self._command = command
         self._timeout = timeout_seconds
+        # conversation_id -> claude CLI session_id, process-local only (see
+        # TARS core § Performance: "reusable Claude session/context"). Lets
+        # the CLI's own session carry prior turns instead of this provider
+        # reconstructing history itself (it doesn't touch
+        # AssistantRequest.history -- the deterministic system_context is
+        # still sent fresh every call, since grounding facts can change
+        # turn to turn even within one resumed session). Never persisted;
+        # a process restart just starts fresh sessions, which is fine.
+        self._sessions: dict[str, str] = {}
+
+    def _resume_args(self, conversation_id: str) -> list[str]:
+        session_id = self._sessions.get(conversation_id)
+        return ["--resume", session_id] if session_id else []
+
+    def _remember_session(self, conversation_id: str, session_id: str | None) -> None:
+        if session_id:
+            self._sessions[conversation_id] = session_id
 
     async def respond(self, request: AssistantRequest) -> AssistantReply:
         prompt = request.text
@@ -48,14 +65,43 @@ class ClaudeCodeProvider(AssistantProvider):
             allowed_tools = ["Read"]
             extra_dir = str(Path(request.image_path).parent)
 
-        args = [self._command, "-p", prompt, "--output-format", "json"]
+        base_args = [self._command, "-p", prompt, "--output-format", "json"]
         if request.system_context:
-            args += ["--append-system-prompt", request.system_context]
+            base_args += ["--append-system-prompt", request.system_context]
         if allowed_tools:
-            args += ["--allowedTools", *allowed_tools]
+            base_args += ["--allowedTools", *allowed_tools]
         if extra_dir:
-            args += ["--add-dir", extra_dir]
+            base_args += ["--add-dir", extra_dir]
 
+        resume_args = self._resume_args(request.conversation_id)
+        returncode, stdout, stderr = await self._run_cli(base_args + resume_args)
+        if returncode != 0 and resume_args:
+            # A cached session_id can go stale (CLI restarted, session
+            # expired) -- fall back to a fresh session once rather than
+            # failing the whole request over a perf optimization.
+            self._sessions.pop(request.conversation_id, None)
+            returncode, stdout, stderr = await self._run_cli(base_args)
+        if returncode != 0:
+            raise AssistantProviderError(
+                f"Claude Code CLI exited {returncode}: {stderr.decode(errors='replace')[:500]}"
+            )
+
+        try:
+            payload = json.loads(stdout.decode(errors="replace"))
+        except json.JSONDecodeError as exc:
+            raise AssistantProviderError(
+                "Claude Code CLI did not return valid JSON output"
+            ) from exc
+
+        result = payload.get("result")
+        if not result:
+            raise AssistantProviderError(
+                "Claude Code CLI JSON output had no 'result' field"
+            )
+        self._remember_session(request.conversation_id, payload.get("session_id"))
+        return AssistantReply(text=result, provider=self.name)
+
+    async def _run_cli(self, args: list[str]) -> tuple[int, bytes, bytes]:
         try:
             process = await asyncio.create_subprocess_exec(
                 *args,
@@ -79,26 +125,7 @@ class ClaudeCodeProvider(AssistantProvider):
             raise AssistantProviderError(
                 f"Claude Code CLI timed out after {self._timeout}s"
             ) from exc
-
-        if process.returncode != 0:
-            raise AssistantProviderError(
-                f"Claude Code CLI exited {process.returncode}: "
-                f"{stderr.decode(errors='replace')[:500]}"
-            )
-
-        try:
-            payload = json.loads(stdout.decode(errors="replace"))
-        except json.JSONDecodeError as exc:
-            raise AssistantProviderError(
-                "Claude Code CLI did not return valid JSON output"
-            ) from exc
-
-        result = payload.get("result")
-        if not result:
-            raise AssistantProviderError(
-                "Claude Code CLI JSON output had no 'result' field"
-            )
-        return AssistantReply(text=result, provider=self.name)
+        return process.returncode or 0, stdout, stderr
 
     async def respond_stream(self, request: AssistantRequest):
         prompt = request.text
@@ -116,6 +143,11 @@ class ClaudeCodeProvider(AssistantProvider):
             args += ["--allowedTools", *allowed_tools]
         if extra_dir:
             args += ["--add-dir", extra_dir]
+        # Best-effort session reuse only here (no stale-session retry, unlike
+        # respond() -- streaming may have already yielded partial content by
+        # the time a failure surfaces, so silently restarting isn't safe).
+        args += self._resume_args(request.conversation_id)
+        session_id: str | None = None
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -147,6 +179,9 @@ class ClaudeCodeProvider(AssistantProvider):
                 except json.JSONDecodeError:
                     continue
 
+                if isinstance(event.get("session_id"), str) and event["session_id"]:
+                    session_id = event["session_id"]
+
                 event_type = event.get("type")
                 if event_type == "content_block_delta":
                     delta = event.get("delta", {})
@@ -177,6 +212,7 @@ class ClaudeCodeProvider(AssistantProvider):
                 if not accumulated_text:
                     raise AssistantProviderError(f"Claude Code stream exited {process.returncode}: {err_text[:500]}")
 
+            self._remember_session(request.conversation_id, session_id)
             final_text = final_result_text or accumulated_text
             yield {"type": "complete", "text": final_text, "provider": self.name}
         except Exception:
