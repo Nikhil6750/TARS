@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from app.action_contracts import Skill
 
@@ -49,7 +49,7 @@ class SkillRegistry:
             raise SkillRegistryError(f"Unknown skill: {name}")
         return skill
 
-    async def describe(self) -> list[dict[str, object]]:
+    async def describe(self) -> list[dict[str, Any]]:
         described: list[dict[str, object]] = []
         for name, skill in sorted(self._skills.items()):
             try:

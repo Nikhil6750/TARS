@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0.0",
+  "milestone": "OVERNIGHT_TARS_AGENT_SAFETY_RUNTIME",
+  "agent": "codex",
+  "stream": "agent-runtime",
+  "status": "complete",
+  "branch": "feature/overnight-agent-runtime",
+  "base_sha": "0ff540039dc6333fd11e563789cb65dffa49506a",
+  "implementation_sha": "3582ff1805597cbb0e47a06d2f492264c9ff5050",
+  "completed_at": "2026-08-17T18:50:51Z",
+  "tests": {
+    "targeted_pytest": "64 passed",
+    "ruff": "passed",
+    "mypy": "passed; 12 changed source files"
+  },
+  "capabilities": [
+    "durable ON_DEMAND, SCHEDULED, and CONTINUOUS agent lifecycle",
+    "bounded iterations, retries, provider/action/run timeouts, and lifetime cycles",
+    "cooperative provider and in-flight ActionRuntime cancellation",
+    "duplicate job and dedupe-key rejection",
+    "provider-neutral intelligence and orchestrator decision contracts",
+    "strict skill discovery and secret-free memory context contracts",
+    "StrategyProvider and StrategyDefinition read-only quant_brain boundary",
+    "ActionRuntime-only skill execution with authoritative risk and confirmation",
+    "SQLite lifecycle state, redacted audit, startup interruption detection, and recovery",
+    "REST lifecycle endpoints and scheduler-driven bounded due-job execution"
+  ],
+  "known_gaps": [
+    "No intelligence provider is registered by default; missing providers fail truthfully.",
+    "No quant_brain adapter is configured by default; NOT_CONFIGURED yields zero signals.",
+    "Agent confirmation resumes only after the existing ActionRuntime confirmation flow completes."
+  ]
+}

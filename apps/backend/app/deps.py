@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from actions.frontend_bridge import FrontendCommandBridge
     from actions.plan_runtime import PlanRuntime
     from actions.runtime import ActionRuntime
+    from agent_runtime.runtime import AgentRuntime as AgentJobRuntime
     from agents.base import Agent, AgentRuntime
     from app.voice_state import VoiceProviders
     from assistant.chart_analysis import ChartAnalysisService
@@ -97,11 +98,22 @@ def get_trading_context_builder(request: Request) -> TradingContextBuilder:
 
 
 def get_agent_runtime(request: Request) -> AgentRuntime:
+    """The TARS core stream's bounded ON_DEMAND/SCHEDULED/CONTINUOUS worker
+    framework (agents/base.py) -- see get_agent_job_runtime for the
+    separate, LLM-decision-loop job runtime from the agent-runtime stream."""
     return request.app.state.agent_runtime
 
 
 def get_agents(request: Request) -> dict[str, Agent]:
     return request.app.state.agents
+
+
+def get_agent_job_runtime(request: Request) -> AgentJobRuntime:
+    """The agent-runtime stream's durable, provider-neutral LLM-decision-loop
+    job runtime (agent_runtime/runtime.py) -- distinct from get_agent_runtime
+    above. Renamed at integration time to resolve the naming collision
+    between the two independently-built "agents" packages."""
+    return request.app.state.agent_job_runtime
 
 
 def get_orchestrator(request: Request) -> TarsOrchestrator:

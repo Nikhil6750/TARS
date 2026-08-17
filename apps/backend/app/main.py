@@ -14,6 +14,10 @@ from actions.plan_store import PlanStore
 from actions.registry import build_skill_registry
 from actions.runtime import ActionRuntime
 from actions.store import ActionStore
+from agent_runtime.providers import IntelligenceProviderRegistry
+from agent_runtime.quant_boundary import QuantBrainBoundary
+from agent_runtime.runtime import AgentRuntime as AgentJobRuntime
+from agent_runtime.store import AgentStore as AgentJobStore
 from agents.base import AgentRuntime
 from agents.chart_analysis_agent import ChartAnalysisAgent
 from agents.models import AgentConfig, AgentMode
@@ -35,6 +39,7 @@ from app.routers import (
     voice,
     ws,
 )
+from app.routers import agent_runtime as agent_runtime_router
 from app.routers import agents as agents_router
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
@@ -143,6 +148,35 @@ async def lifespan(app: FastAPI):
     )
     await action_runtime.initialize()
     app.state.action_runtime = action_runtime
+
+    # Two independently-built agent systems, reconciled at integration time
+    # (see the merge commit): `agent_job_runtime` is the agent-runtime
+    # stream's durable, provider-neutral LLM-decision-loop job runtime;
+    # `agent_runtime` (below) is the TARS core stream's simpler bounded
+    # ON_DEMAND/SCHEDULED/CONTINUOUS worker framework with three concrete
+    # trading agents. Both are real, tested, and kept side by side rather
+    # than one being discarded -- see app/routers/agent_runtime.py
+    # (/api/v1/agent-runtime) vs. app/routers/agents.py (/api/v1/agents).
+    agent_job_runtime = AgentJobRuntime(
+        AgentJobStore(db.conn),
+        action_runtime,
+        IntelligenceProviderRegistry(),
+        strategy_boundary=QuantBrainBoundary(),
+    )
+    recovered_jobs = await agent_job_runtime.initialize()
+    if recovered_jobs:
+        logger.warning(
+            "%d interrupted agent job(s) require explicit recovery", len(recovered_jobs)
+        )
+    app.state.agent_job_runtime = agent_job_runtime
+    scheduler.add_job(
+        agent_job_runtime.run_due,
+        "interval",
+        seconds=1,
+        id="agent_due_jobs",
+        max_instances=1,
+        coalesce=True,
+    )
     plan_runtime = PlanRuntime(PlanStore(db.conn), action_runtime)
     await plan_runtime.initialize()
     app.state.plan_runtime = plan_runtime
@@ -221,6 +255,7 @@ def create_app() -> FastAPI:
     app.include_router(actions.router)
     app.include_router(action_plans.router)
     app.include_router(agents_router.router)
+    app.include_router(agent_runtime_router.router)
 
     return app
 
