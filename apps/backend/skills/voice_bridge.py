@@ -27,6 +27,14 @@ _LAUNCH_PATTERN = re.compile(r"^\s*(?:launch|open|start)\s+(.+?)\s*$", re.IGNORE
 _WEB_SEARCH_PATTERN = re.compile(
     r"^\s*search\s+(?:the\s+web\s+)?for\s+(.+?)\s*$", re.IGNORECASE
 )
+# Distinct verbs ("run"/"execute"/"terminal") from the other patterns above,
+# so this cannot shadow or be shadowed by focus/open/launch/search matching.
+# The command itself is still fully re-classified by the permission engine
+# (READ_ONLY / CONFIRM_REQUIRED / BLOCKED) exactly like any other terminal
+# request -- this only builds the ActionRequest, same as every other branch.
+_TERMINAL_PATTERN = re.compile(
+    r"^\s*(?:run(?:\s+command)?|execute|terminal)\s*:?\s+(.+?)\s*$", re.IGNORECASE
+)
 
 
 def build_action_request_from_voice(
@@ -40,6 +48,14 @@ def build_action_request_from_voice(
     existing LLM/assistant path, unchanged, outside this function's
     concern)."""
     if not text or not text.strip():
+        return None
+
+    # Strip trailing sentence punctuation STT commonly appends (e.g. "Open
+    # Notepad." from real speech-to-text) -- left in place, it becomes part
+    # of the captured target/query and fails downstream (e.g. "Notepad."
+    # never resolves via shutil.which, only "Notepad" does).
+    text = re.sub(r"[.!?]+$", "", text.strip()).strip()
+    if not text:
         return None
 
     if match := _FOCUS_PATTERN.match(text):
@@ -85,6 +101,17 @@ def build_action_request_from_voice(
                 skill="windows_app",
                 action="launch",
                 arguments={"target": target},
+                source=source,
+                active_context=active_context,
+            )
+
+    if match := _TERMINAL_PATTERN.match(text):
+        command = match.group(1).strip()
+        if command:
+            return _build(
+                skill="terminal",
+                action="run_command",
+                arguments={"command": command},
                 source=source,
                 active_context=active_context,
             )

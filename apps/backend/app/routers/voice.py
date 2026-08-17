@@ -137,6 +137,7 @@ async def voice_session(
             tts_provider=voice_providers.tts,
             assistant_router=assistant_router,
             conversation_id=conversation_id,
+            action_runtime=websocket.app.state.action_runtime,
         )
     except WebSocketDisconnect:
         pass
