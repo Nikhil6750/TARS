@@ -14,7 +14,7 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 **Status**: COMPLETE — Premium floating TARS voice HUD, quantum orb visualizer (`TARSOrb`) with hardware-accelerated 60fps animations and real-time audio amplitude reactivity, local continuous wake-word phrase detection ("Hey TARS" / "Analyze this chart"), structured chart analysis visualization card (`ChartAnalysisCard`), real-time TTS amplitude synchronization, Esc / close to tray, and demo trigger buttons fully built and verified.
 **Branch**: `feature/linkedin-demo`
-**Commit SHA**: `HEAD` (to be committed after release build)
+**Commit SHA**: `e2ec4351a6d0f4772efe1518dfebd36d99e7c6d0`
 **Work completed**:
 1. **TARS Quantum Orb Visualizer (`apps/web/src/components/character/TARSOrb.tsx`)**:
    - Preserves high-detail generated orb design (`apps/web/public/assets/tars-orb.png`).
