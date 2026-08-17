@@ -28,27 +28,34 @@ from typing import TYPE_CHECKING
 
 from app.action_contracts import Skill
 from skills.browser import BrowserSkill
+from skills.desktop_control import DesktopControlSkill
 from skills.filesystem import FilesystemSkill
 from skills.terminal import TerminalSkill
 from skills.windows_app import WindowsAppSkill
 
 if TYPE_CHECKING:
+    from actions.frontend_bridge import FrontendCommandBridge
     from memory.service import MemoryService
 
 
 def build_registry(
     memory_service: MemoryService | None = None,
     vault_path: str | None = None,
+    frontend_bridge: FrontendCommandBridge | None = None,
 ) -> dict[str, Skill]:
     """Constructs the skill registry. Pass a live `MemoryService` (and
     optionally its vault path -- defaults to `get_settings().obsidian_vault_path`
-    if omitted) to also include `obsidian`; without one, the registry
-    contains the four skills that don't require it."""
+    if omitted) to also include `obsidian`. Pass a live `FrontendCommandBridge`
+    (see `actions/frontend_bridge.py`) so `browser`'s embedded-DOM actions and
+    `windows_app`'s screen/monitor/UIA capture actions can actually reach the
+    connected native shell; without one they validate and risk-classify
+    normally but fail closed at execute() rather than fabricate a result."""
     skills: dict[str, Skill] = {
-        "windows_app": WindowsAppSkill(),
+        "windows_app": WindowsAppSkill(bridge=frontend_bridge),
         "filesystem": FilesystemSkill(),
-        "browser": BrowserSkill(),
+        "browser": BrowserSkill(bridge=frontend_bridge),
         "terminal": TerminalSkill(),
+        "desktop_control": DesktopControlSkill(),
     }
     if memory_service is not None:
         from skills.obsidian import ObsidianSkill

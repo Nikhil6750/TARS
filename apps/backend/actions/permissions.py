@@ -18,10 +18,25 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         "launch": RiskLevel.LOW_RISK,
         "focus": RiskLevel.LOW_RISK,
         "list_running": RiskLevel.READ_ONLY,
+        "capture_active_window": RiskLevel.READ_ONLY,
+        "get_monitors": RiskLevel.READ_ONLY,
+        "get_ui_elements": RiskLevel.READ_ONLY,
     },
     "browser": {
         "open_url": RiskLevel.LOW_RISK,
         "search": RiskLevel.LOW_RISK,
+        "navigate": RiskLevel.LOW_RISK,
+        "back": RiskLevel.LOW_RISK,
+        "forward": RiskLevel.LOW_RISK,
+        "scroll": RiskLevel.READ_ONLY,
+        "inspect_dom": RiskLevel.READ_ONLY,
+        "read_text": RiskLevel.READ_ONLY,
+        # Floor only -- BrowserSkill.classify_risk() elevates these to
+        # CONFIRM_REQUIRED dynamically for state-changing click targets and
+        # sensitive type fields; classify() takes max(declared, this floor),
+        # so the elevation always wins over this baseline.
+        "click": RiskLevel.LOW_RISK,
+        "type": RiskLevel.LOW_RISK,
     },
     "filesystem": {
         "list": RiskLevel.READ_ONLY,
@@ -36,6 +51,21 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         "search": RiskLevel.READ_ONLY,
         "read": RiskLevel.READ_ONLY,
         "read_note": RiskLevel.READ_ONLY,
+    },
+    "desktop_control": {
+        "inspect_current_window": RiskLevel.READ_ONLY,
+        "list_controls": RiskLevel.READ_ONLY,
+        "read_selected_text": RiskLevel.READ_ONLY,
+        "read_clipboard": RiskLevel.READ_ONLY,
+        "focus_control": RiskLevel.LOW_RISK,
+        "scroll_control": RiskLevel.LOW_RISK,
+        # State-changing UI actions: must never be READ_ONLY, and the
+        # generic verb heuristic below would not catch these action names
+        # (no "write"/"create"/"update" substring), so they need an
+        # explicit floor here rather than falling through to it.
+        "invoke_control": RiskLevel.CONFIRM_REQUIRED,
+        "type_into_control": RiskLevel.CONFIRM_REQUIRED,
+        "select_control": RiskLevel.CONFIRM_REQUIRED,
     },
 }
 

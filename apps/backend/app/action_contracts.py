@@ -73,15 +73,65 @@ class WindowBounds(BaseModel):
     height: int
 
 
+class WindowState(str, Enum):
+    normal = "normal"
+    minimized = "minimized"
+    maximized = "maximized"
+    unknown = "unknown"
+
+
+class ContextSource(str, Enum):
+    """Capture mechanism that produced an ActiveWindowContext -- distinct
+    from ActionSource, which is what originated the *action request*."""
+
+    win32 = "win32"
+    ui_automation = "ui_automation"
+
+
+class MonitorInfo(BaseModel):
+    """Geometry of the display containing a window -- no pixel/screenshot
+    data, per M2A_SPEC.md's no-content-capture rule (Wave 2B extends this
+    the same way: metadata only, never a frame buffer)."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+    is_primary: bool
+
+
+class FocusedControlInfo(BaseModel):
+    """Identity metadata of the keyboard-focused UI Automation control --
+    deliberately has no `value`/`text` field. A focused control's *content*
+    (e.g. a password box's characters) is never carried here; see
+    skills/desktop_control.py's read_selected_text/read_clipboard actions
+    for the only paths that return control content, and both redact
+    IsPassword controls."""
+
+    control_type: str | None = None
+    name: str | None = None
+    automation_id: str | None = None
+    class_name: str | None = None
+
+
 class ActiveWindowContext(BaseModel):
-    """Native active-window context (executable/title/bounds only -- no
-    screenshot/content capture in Wave 2A, per M2A_SPEC.md requirement 5)."""
+    """Native active-window context. Wave 2A shipped executable/title/bounds
+    only; Wave 2B adds monitor/window-state/focused-control *metadata* --
+    still no screenshot/content capture (M2A_SPEC.md requirement 5 continues
+    to apply). Selected text and clipboard content are deliberately NOT
+    fields on this struct: they are only ever returned by an explicit,
+    individually-audited read action (desktop_control's read_selected_text /
+    read_clipboard), never attached silently to every action request."""
 
     executable: str = Field(min_length=1)
     process_id: int | None = None
     window_title: str
     window_bounds: WindowBounds | None = None
     captured_at: datetime | None = None
+    window_state: WindowState | None = None
+    monitor: MonitorInfo | None = None
+    focused_control: FocusedControlInfo | None = None
+    source: ContextSource | None = None
 
 
 class ActionRequest(BaseModel):

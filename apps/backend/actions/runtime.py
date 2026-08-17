@@ -16,6 +16,7 @@ from actions.errors import (
 )
 from actions.permissions import PermissionEngine
 from actions.registry import SkillRegistry
+from actions.safety import audit_safe_arguments
 from actions.store import ActionStore
 from app.action_contracts import (
     TERMINAL_STATUSES,
@@ -46,6 +47,7 @@ class ActionRuntime:
         request_max_age: timedelta = timedelta(minutes=5),
         future_tolerance: timedelta = timedelta(seconds=30),
         confirmation_ttl: timedelta = timedelta(minutes=2),
+        execution_timeout: float = 30.0,
         clock: Callable[[], datetime] | None = None,
         token_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -56,6 +58,9 @@ class ActionRuntime:
         self.request_max_age = request_max_age
         self.future_tolerance = future_tolerance
         self.confirmation_ttl = confirmation_ttl
+        if execution_timeout <= 0:
+            raise ValueError("execution_timeout must be positive")
+        self.execution_timeout = execution_timeout
         self._clock = clock or (lambda: datetime.now(UTC))
         self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
         self._lock = asyncio.Lock()
@@ -68,6 +73,7 @@ class ActionRuntime:
         request: ActionRequest,
         *,
         active_context: ActiveWindowContext | None = None,
+        execution_timeout: float | None = None,
     ) -> ActionResult:
         if active_context is not None and request.active_context is None:
             request = request.model_copy(update={"active_context": active_context})
@@ -91,7 +97,7 @@ class ActionRuntime:
                     "skill": request.skill,
                     "action": request.action,
                     "source": request.source.value,
-                    "arguments": request.arguments,
+                    "arguments": audit_safe_arguments(request.arguments),
                     "active_context": (
                         request.active_context.model_dump(mode="json")
                         if request.active_context
@@ -173,9 +179,18 @@ class ActionRuntime:
             if risk == RiskLevel.CONFIRM_REQUIRED:
                 return await self._require_confirmation(request, risk, now)
 
-            return await self._execute(request, skill, risk, now)
+            return await self._execute(
+                request, skill, risk, now, execution_timeout=execution_timeout
+            )
 
-    async def confirm(self, request_id: UUID, token: str, approved: bool) -> ActionResult:
+    async def confirm(
+        self,
+        request_id: UUID,
+        token: str,
+        approved: bool,
+        *,
+        execution_timeout: float | None = None,
+    ) -> ActionResult:
         async with self._lock:
             now = self._now()
             record = await self.store.get_record(request_id)
@@ -292,7 +307,14 @@ class ActionRuntime:
                 ),
                 now,
             )
-            return await self._execute(request, skill, risk, now, consume=True)
+            return await self._execute(
+                request,
+                skill,
+                risk,
+                now,
+                consume=True,
+                execution_timeout=execution_timeout,
+            )
 
     async def get_result(self, request_id: UUID) -> ActionResult:
         result = await self.store.get_result(request_id)
@@ -304,6 +326,32 @@ class ActionRuntime:
         if await self.store.get_record(request_id) is None:
             raise ActionNotFoundError(f"Action request {request_id} was not found")
         return await self.store.list_audit(request_id)
+
+    async def fail_incomplete(self, request: ActionRequest, error: str) -> ActionResult:
+        """Close an interrupted action without inventing a successful outcome."""
+
+        async with self._lock:
+            current = await self.store.get_result(request.id)
+            if current is None:
+                return self._result(
+                    request,
+                    ActionStatus.FAILED,
+                    "Action did not complete.",
+                    risk=RiskLevel.BLOCKED,
+                    error=error,
+                    now=self._now(),
+                )
+            if current.status in TERMINAL_STATUSES:
+                return current
+            result = self._result(
+                request,
+                ActionStatus.FAILED,
+                "Action did not complete.",
+                risk=current.risk_level or RiskLevel.BLOCKED,
+                error=error,
+                now=self._now(),
+            )
+            return await self._finish(result, "INTERRUPTED", self._now())
 
     async def _require_confirmation(
         self, request: ActionRequest, risk: RiskLevel, now: datetime
@@ -344,6 +392,7 @@ class ActionRuntime:
         now: datetime,
         *,
         consume: bool = False,
+        execution_timeout: float | None = None,
     ) -> ActionResult:
         running = self._result(
             request,
@@ -356,8 +405,29 @@ class ActionRuntime:
         await self.store.append_audit(request.id, "RUNNING", running, now)
         await self._broadcast(running)
         try:
-            candidate = await skill.execute(request)
+            candidate = await asyncio.wait_for(
+                skill.execute(request),
+                timeout=execution_timeout or self.execution_timeout,
+            )
             result = self._normalize_skill_result(request, candidate, risk, now)
+        except TimeoutError:
+            result = self._result(
+                request,
+                ActionStatus.FAILED,
+                "Action execution timed out.",
+                risk=risk,
+                error="Execution timeout",
+                now=self._now(),
+            )
+        except asyncio.CancelledError:
+            result = self._result(
+                request,
+                ActionStatus.FAILED,
+                "Action execution was cancelled.",
+                risk=risk,
+                error="Execution cancelled",
+                now=self._now(),
+            )
         except SkillExecutionError as exc:
             result = self._result(
                 request,

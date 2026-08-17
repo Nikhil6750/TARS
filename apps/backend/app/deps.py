@@ -13,6 +13,8 @@ from app.ws_manager import ConnectionManager
 from events.service import EventService
 
 if TYPE_CHECKING:
+    from actions.frontend_bridge import FrontendCommandBridge
+    from actions.plan_runtime import PlanRuntime
     from actions.runtime import ActionRuntime
     from app.voice_state import VoiceProviders
     from assistant.provider import AssistantProvider
@@ -67,3 +69,11 @@ def get_voice_providers(request: Request) -> VoiceProviders:
 
 def get_action_runtime(request: Request) -> ActionRuntime:
     return request.app.state.action_runtime
+
+
+def get_plan_runtime(request: Request) -> PlanRuntime:
+    return request.app.state.plan_runtime
+
+
+def get_frontend_bridge(request: Request) -> FrontendCommandBridge:
+    return request.app.state.frontend_bridge

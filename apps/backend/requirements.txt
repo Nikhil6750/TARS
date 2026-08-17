@@ -20,6 +20,13 @@ jsonschema==4.23.0
 # so this is core, not optional.
 pywin32==312
 
+# Windows UI Automation -- required by skills/desktop_control.py (control
+# enumeration/invoke/type/select/scroll, focused-control metadata, selected
+# -text reads). uiautomation wraps the real Win32 UIA COM interfaces via
+# comtypes; TARS targets Windows only, so this is core, not optional.
+comtypes==1.4.16
+uiautomation==2.0.29
+
 # Testing
 pytest==8.3.3
 pytest-asyncio==0.24.0

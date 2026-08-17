@@ -3,9 +3,11 @@ from __future__ import annotations
 from app.action_contracts import Skill
 from skills.registry import SKILLS, build_registry
 
+_DB_INDEPENDENT_SKILLS = {"windows_app", "filesystem", "browser", "terminal", "desktop_control"}
 
-def test_eager_skills_registry_has_the_four_db_independent_skills():
-    assert set(SKILLS) == {"windows_app", "filesystem", "browser", "terminal"}
+
+def test_eager_skills_registry_has_the_five_db_independent_skills():
+    assert set(SKILLS) == _DB_INDEPENDENT_SKILLS
     for name, instance in SKILLS.items():
         assert isinstance(instance, Skill)
         assert instance.name == name
@@ -13,7 +15,7 @@ def test_eager_skills_registry_has_the_four_db_independent_skills():
 
 def test_build_registry_without_memory_service_matches_eager_skills():
     registry = build_registry()
-    assert set(registry) == {"windows_app", "filesystem", "browser", "terminal"}
+    assert set(registry) == _DB_INDEPENDENT_SKILLS
 
 
 async def test_build_registry_with_memory_service_includes_obsidian(tmp_path):
@@ -29,7 +31,7 @@ async def test_build_registry_with_memory_service_includes_obsidian(tmp_path):
     try:
         memory = MemoryService(conn, vault_path=str(tmp_path / "vault"), sqlite_vec_enabled=False)
         registry = build_registry(memory_service=memory, vault_path=str(tmp_path / "vault"))
-        assert set(registry) == {"windows_app", "filesystem", "browser", "terminal", "obsidian"}
+        assert set(registry) == _DB_INDEPENDENT_SKILLS | {"obsidian"}
         assert isinstance(registry["obsidian"], Skill)
     finally:
         await conn.close()

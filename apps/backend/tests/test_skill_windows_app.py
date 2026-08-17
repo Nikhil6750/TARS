@@ -7,14 +7,29 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from actions.frontend_bridge import FrontendBridgeError
 from app.action_contracts import (
     ActionRequest,
     ActionSource,
     ActionStatus,
     RiskLevel,
+    SkillExecutionError,
     SkillValidationError,
 )
 from skills.windows_app import WindowsAppSkill, _find_window
+
+
+class _FakeBridge:
+    def __init__(self, *, payload: dict | None = None, error: str | None = None) -> None:
+        self.payload = payload
+        self.error = error
+        self.calls: list[tuple] = []
+
+    async def dispatch(self, request_id, skill, action, arguments, *, timeout):
+        self.calls.append((request_id, skill, action, arguments, timeout))
+        if self.error is not None:
+            raise FrontendBridgeError(self.error)
+        return self.payload or {}
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="pywin32/win32gui is Windows-only")
 
@@ -176,3 +191,61 @@ def test_find_window_matches_by_title_substring(real_window):
     match = _find_window(title[:10])
     assert match is not None
     assert match["hwnd"] == hwnd
+
+
+# -- Wave 2B native capture actions (bridged to the Tauri shell) --------
+
+
+def test_classify_risk_capture_actions():
+    skill = WindowsAppSkill()
+    assert skill.classify_risk("capture_active_window", {}) == RiskLevel.READ_ONLY
+    assert skill.classify_risk("get_monitors", {}) == RiskLevel.READ_ONLY
+    assert skill.classify_risk("get_ui_elements", {}) == RiskLevel.READ_ONLY
+
+
+async def test_validate_capture_active_window_rejects_non_bool_flag():
+    skill = WindowsAppSkill()
+    with pytest.raises(SkillValidationError):
+        await skill.validate("capture_active_window", {"include_image_data": "yes"})
+    await skill.validate("capture_active_window", {"include_image_data": True})
+
+
+async def test_execute_capture_without_bridge_refuses_rather_than_fabricates():
+    skill = WindowsAppSkill()  # no bridge wired
+    with pytest.raises(SkillExecutionError):
+        await skill.execute(_request("capture_active_window", {}))
+
+
+async def test_execute_capture_dispatches_through_bridge_and_returns_real_data():
+    bridge = _FakeBridge(
+        payload={"summary": "Captured active window", "width": 1920, "height": 1080}
+    )
+    skill = WindowsAppSkill(bridge=bridge)
+    result = await skill.execute(_request("capture_active_window", {}))
+
+    assert result.status == ActionStatus.SUCCEEDED
+    assert result.data["width"] == 1920
+    assert len(bridge.calls) == 1
+
+
+async def test_execute_capture_never_fabricates_success_on_secure_desktop():
+    bridge = _FakeBridge(
+        payload={
+            "is_secure_desktop": True,
+            "error": "Capture refused: Secure desktop or credential screen active",
+        }
+    )
+    skill = WindowsAppSkill(bridge=bridge)
+    result = await skill.execute(_request("capture_active_window", {}))
+
+    assert result.status == ActionStatus.FAILED
+    assert "secure desktop" in result.error.lower()
+
+
+async def test_execute_capture_surfaces_bridge_timeout_as_failed():
+    bridge = _FakeBridge(error="Frontend did not report a result in time")
+    skill = WindowsAppSkill(bridge=bridge)
+    result = await skill.execute(_request("get_monitors", {}))
+
+    assert result.status == ActionStatus.FAILED
+    assert result.error is not None

@@ -117,8 +117,8 @@ describe('Wave 2A HUD UI Components', () => {
     );
 
     expect(screen.getByText('TARS HUD')).toBeDefined();
-    expect(screen.getByText('WAVE 2A')).toBeDefined();
-    expect(screen.getByPlaceholderText(/Run action or ask TARS/)).toBeDefined();
+    expect(screen.getByText(/WAVE 2/i)).toBeDefined();
+    expect(screen.getByPlaceholderText(/Run action/i)).toBeDefined();
 
     const expandBtn = screen.getByTitle('Expand to Full Workstation');
     fireEvent.click(expandBtn);

@@ -20,11 +20,12 @@ from actions.errors import (
     DuplicateActionError,
     InvalidConfirmationError,
 )
+from actions.frontend_bridge import FrontendCommandBridge
 from actions.requests import ActionRequestFactory, DeterministicActionRouter
 from actions.runtime import ActionRuntime
 from app.action_contracts import ActionRequest, ActionSource
 from app.contracts import ContractValidationError, validate_action_request
-from app.deps import get_action_runtime
+from app.deps import get_action_runtime, get_frontend_bridge
 
 router = APIRouter(tags=["actions"])
 
@@ -173,6 +174,30 @@ async def action_result(
     except ActionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return result.to_contract_dict()
+
+
+@router.post("/api/v1/actions/{request_id}/frontend-report")
+async def report_frontend_command(
+    request_id: UUID,
+    request: Request,
+    bridge: FrontendCommandBridge = Depends(get_frontend_bridge),
+) -> dict[str, Any]:
+    """Frontend-side report of a dispatched `frontend_command` (see
+    `actions/frontend_bridge.py`). Only resolves a command this backend is
+    actually waiting on for this request_id -- an unsolicited or late report
+    has no effect beyond `received: false`, it can never fabricate or alter
+    a result the bridge isn't holding open."""
+    raw = await _json_object(request, "Frontend command report")
+    if set(raw) - {"success", "data", "error"} or "success" not in raw:
+        raise HTTPException(
+            status_code=422, detail="Report requires 'success', with optional 'data'/'error'"
+        )
+    if not isinstance(raw["success"], bool):
+        raise HTTPException(status_code=422, detail="'success' must be a boolean")
+    if "data" in raw and not isinstance(raw["data"], dict):
+        raise HTTPException(status_code=422, detail="'data' must be an object")
+    received = bridge.report(request_id, raw)
+    return {"received": received}
 
 
 @router.websocket("/ws/actions")

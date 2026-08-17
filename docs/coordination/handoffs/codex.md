@@ -8,6 +8,87 @@ integration/quality harness). Only Codex edits this file. See
 
 ## Latest handoff
 
+**Branch**: `feature/wave2b-control-runtime`
+
+**Commit SHA**: `9d17e0fda5fa9db1b2f7a37dc03a5767b664ec80`
+
+**Work completed**:
+
+- Extended the authoritative Wave 2A Action Runtime with persistent,
+  objective `ActionPlan`/`ActionStep` models and a synchronous multi-step
+  plan state machine.
+- Added bounded steps, retries, re-observations, alternate targets, total
+  timeout, execution timeout, cancellation, dependency validation, duplicate
+  and replay rejection, and no detached/background plan executor.
+- Kept permission inheritance per action: every attempt is a fresh canonical
+  `ActionRequest`, runtime classification overrides proposed risk, blocked
+  operations stop, and confirmation-required steps pause with the exact
+  operation and a one-time token.
+- Added structured observations for Windows UI Automation, browser, and native
+  vision sources plus deterministic `VERIFIED`/`FAILED`/`UNKNOWN`
+  verification; missing evidence remains `UNKNOWN` and never succeeds.
+- Added password/credential-dialog/secure-desktop/system-critical detection,
+  state-change blocking in sensitive contexts, executable-code exclusion from
+  plans, credential-field rejection, and recursive audit redaction.
+- Added assistant-to-plan conversion that accepts data only and cannot supply
+  runtime identity, timestamps, status, provenance, or authorization.
+- Added SQLite plan state, observations, and append-only lifecycle audit plus
+  REST endpoints for submit, assistant proposal, get, audit, confirm,
+  observation, and cancellation.
+
+**Files changed**:
+
+- `apps/backend/actions/plan_models.py`, `plan_requests.py`,
+  `plan_runtime.py`, `plan_store.py`, `safety.py`.
+- `apps/backend/actions/runtime.py`, `store.py`, `__init__.py`.
+- `apps/backend/app/routers/action_plans.py`, `app/main.py`, `app/deps.py`.
+- `apps/backend/tests/test_plan_runtime.py`.
+- This handoff and `docs/coordination/wave2/m2b/codex.done.json`.
+
+**Interfaces exposed**:
+
+- `POST /api/v1/action-plans`
+- `POST /api/v1/action-plans/assistant`
+- `GET /api/v1/action-plans/{plan_id}`
+- `GET /api/v1/action-plans/{plan_id}/audit`
+- `POST /api/v1/action-plans/{plan_id}/confirm`
+- `POST /api/v1/action-plans/{plan_id}/observations`
+- `POST /api/v1/action-plans/{plan_id}/cancel`
+- Python: `ActionPlan`, `ActionStep`, `StructuredObservation`,
+  `ActionPlanFactory`, `PlanRuntime`.
+
+**Tests run**:
+
+- `python -m pytest tests/test_action_contracts.py tests/test_action_runtime.py
+  tests/test_plan_runtime.py -q` — 53 passed.
+- Ruff on changed action, router, app wiring, and targeted tests — passed.
+- MyPy on changed backend action/router/app code — passed with no issues in 16
+  source files.
+
+**Known limitations**:
+
+- Observation producers (Windows UI Automation, browser DOM, native
+  screen/vision) are intentionally interfaces only in this stream.
+- Tauri plan visuals are intentionally absent.
+- Verification currently uses deterministic expected-state subset matching;
+  it does not perform fuzzy/model-authored proof.
+
+**Exact dependencies required from other agents**:
+
+- Windows/browser/vision owners: submit strict `StructuredObservation` data
+  bound to the active plan, step, and request IDs; never submit a claimed
+  verification status.
+- Assistant owners: propose only the documented plan data envelope and never
+  call Windows/browser control directly.
+- UI owner: render `pending_operation` exactly and return its one-time token to
+  the plan confirmation endpoint.
+
+**Next recommended action**: Integrate trusted observation producers and the
+plan confirmation/verification UI, then run a real end-to-end control flow
+without weakening backend permission or verification authority.
+
+## Previous handoff — Wave 2A action runtime
+
 **Branch**: `feature/wave2-action-runtime`
 
 **Commit SHA**: `6f9e13770edc10ac64c83fe6f25880033e74b8f4`

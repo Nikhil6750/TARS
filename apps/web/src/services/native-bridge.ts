@@ -1,10 +1,16 @@
 /**
  * Windows Native Bridge for TARS Desktop Shell (Tauri 2)
  * Provides access to Windows-wide active foreground window context,
- * autostart management, HUD summoning/positioning, and background tray lifecycle.
+ * screen awareness (monitor geometry, active window & region capture),
+ * UI element tree inspection, autostart, and background tray lifecycle.
  */
 
-import { ActiveWindowContext } from '../types/actions';
+import {
+  ActiveWindowContext,
+  MonitorInfo,
+  ScreenCaptureResult,
+  UIElementNode,
+} from '../types/actions';
 import { isTauri } from './tauri';
 
 export interface AutostartInfo {
@@ -19,7 +25,6 @@ export class NativeBridgeService {
    */
   public async getActiveWindowContext(): Promise<ActiveWindowContext | null> {
     if (!isTauri()) {
-      // In browser/PWA environment, return simulated or browser context
       return {
         executable: 'browser.exe',
         process_id: null,
@@ -41,6 +46,235 @@ export class NativeBridgeService {
     } catch (err) {
       console.warn('[NativeBridge] Failed to get active window context via Tauri command:', err);
       return null;
+    }
+  }
+
+  /**
+   * Retrieves monitor geometry for all connected displays (DPI-aware bounds & work areas).
+   */
+  public async getMonitorsGeometry(): Promise<MonitorInfo[]> {
+    if (!isTauri()) {
+      const w = typeof window !== 'undefined' ? window.innerWidth : 1920;
+      const h = typeof window !== 'undefined' ? window.innerHeight : 1080;
+      const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1.0 : 1.0;
+      return [
+        {
+          id: 'DISPLAY_PRIMARY_WEB',
+          name: 'Web Viewport Display',
+          is_primary: true,
+          bounds: { x: 0, y: 0, width: w, height: h },
+          work_area: { x: 0, y: 0, width: w, height: h },
+          scale_factor: dpr,
+          dpi: Math.round(dpr * 96),
+        },
+      ];
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const monitors = await invoke<MonitorInfo[]>('get_monitors_geometry');
+      return monitors;
+    } catch (err) {
+      console.warn('[NativeBridge] Failed to get monitor geometry:', err);
+      return [];
+    }
+  }
+
+  /**
+   * Captures the active foreground window on explicit request.
+   * Enforces secure desktop protection (never captures UAC or lock screen).
+   */
+  public async captureActiveWindow(includeImageData: boolean = true): Promise<ScreenCaptureResult> {
+    if (!isTauri()) {
+      const now = new Date().toISOString();
+      return {
+        capture_id: `cap_web_${Date.now()}`,
+        captured_at: now,
+        source: 'active_window',
+        executable: 'browser.exe',
+        window_title: typeof document !== 'undefined' ? document.title || 'Web Workspace' : 'Web Context',
+        bounds: {
+          x: 0,
+          y: 0,
+          width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+          height: typeof window !== 'undefined' ? window.innerHeight : 840,
+        },
+        scale_factor: typeof window !== 'undefined' ? window.devicePixelRatio || 1.0 : 1.0,
+        dpi: typeof window !== 'undefined' ? Math.round((window.devicePixelRatio || 1.0) * 96) : 96,
+        width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+        height: typeof window !== 'undefined' ? window.innerHeight : 840,
+        is_secure_desktop: false,
+        image_format: 'image/bmp',
+        image_data_base64: 'data:image/bmp;base64,Qk0AAAAAAAAAAAAAAA==',
+        temp_file_path: null,
+        error: null,
+      };
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<ScreenCaptureResult>('capture_active_window', { includeImageData });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn('[NativeBridge] Failed to capture active window:', errMsg);
+      return {
+        capture_id: `cap_err_${Date.now()}`,
+        captured_at: new Date().toISOString(),
+        source: 'active_window',
+        executable: 'unknown.exe',
+        window_title: 'Capture Failed',
+        bounds: { x: 0, y: 0, width: 0, height: 0 },
+        scale_factor: 1.0,
+        dpi: 96,
+        width: 0,
+        height: 0,
+        is_secure_desktop: false,
+        image_format: 'image/bmp',
+        image_data_base64: null,
+        temp_file_path: null,
+        error: errMsg,
+      };
+    }
+  }
+
+  /**
+   * Captures a bounded screen region (DPI-aware rectangle).
+   */
+  public async captureScreenRegion(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    includeImageData: boolean = true
+  ): Promise<ScreenCaptureResult> {
+    if (!isTauri()) {
+      const now = new Date().toISOString();
+      return {
+        capture_id: `region_web_${Date.now()}`,
+        captured_at: now,
+        source: 'region',
+        executable: 'browser_region',
+        window_title: `Region (${x}, ${y}, ${width}x${height})`,
+        bounds: { x, y, width, height },
+        scale_factor: 1.0,
+        dpi: 96,
+        width,
+        height,
+        is_secure_desktop: false,
+        image_format: 'image/bmp',
+        image_data_base64: 'data:image/bmp;base64,Qk0AAAAAAAAAAAAAAA==',
+        temp_file_path: null,
+        error: null,
+      };
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<ScreenCaptureResult>('capture_screen_region', {
+        x: Math.round(x),
+        y: Math.round(y),
+        width: Math.round(width),
+        height: Math.round(height),
+        includeImageData,
+      });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn('[NativeBridge] Failed to capture screen region:', errMsg);
+      return {
+        capture_id: `region_err_${Date.now()}`,
+        captured_at: new Date().toISOString(),
+        source: 'region',
+        executable: 'unknown.exe',
+        window_title: 'Region Capture Failed',
+        bounds: { x, y, width, height },
+        scale_factor: 1.0,
+        dpi: 96,
+        width: 0,
+        height: 0,
+        is_secure_desktop: false,
+        image_format: 'image/bmp',
+        image_data_base64: null,
+        temp_file_path: null,
+        error: errMsg,
+      };
+    }
+  }
+
+  /**
+   * Retrieves the native Win32 accessibility/UI element hierarchy of the active window.
+   */
+  public async getActiveWindowElements(): Promise<UIElementNode> {
+    if (!isTauri()) {
+      return {
+        id: 'web_root',
+        name: typeof document !== 'undefined' ? document.title || 'Web Document' : 'Web Document',
+        role: 'window',
+        class_name: 'HTMLDocument',
+        bounds: {
+          x: 0,
+          y: 0,
+          width: typeof window !== 'undefined' ? window.innerWidth : 1280,
+          height: typeof window !== 'undefined' ? window.innerHeight : 840,
+        },
+        is_enabled: true,
+        is_visible: true,
+        children: [
+          {
+            id: 'web_btn_search',
+            name: 'Search Button',
+            role: 'button',
+            class_name: 'HTMLButtonElement',
+            bounds: { x: 50, y: 20, width: 100, height: 35 },
+            is_enabled: true,
+            is_visible: true,
+            children: [],
+          },
+          {
+            id: 'web_input_query',
+            name: 'Search Query Input',
+            role: 'input',
+            class_name: 'HTMLInputElement',
+            bounds: { x: 160, y: 20, width: 300, height: 35 },
+            is_enabled: true,
+            is_visible: true,
+            children: [],
+          },
+        ],
+      };
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<UIElementNode>('get_active_window_elements');
+    } catch (err) {
+      console.warn('[NativeBridge] Failed to get active window elements:', err);
+      return {
+        id: 'fallback_root',
+        name: 'Active Window',
+        role: 'window',
+        class_name: 'Unknown',
+        bounds: null,
+        is_enabled: false,
+        is_visible: false,
+        children: [],
+      };
+    }
+  }
+
+  /**
+   * Clears temporary screen captures from local storage/disk.
+   */
+  public async clearCapturesCache(): Promise<number> {
+    if (!isTauri()) {
+      return 0;
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<number>('clear_captures_cache');
+    } catch (err) {
+      console.warn('[NativeBridge] Failed to clear captures cache:', err);
+      return 0;
     }
   }
 

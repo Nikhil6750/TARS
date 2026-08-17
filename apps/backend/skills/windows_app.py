@@ -5,6 +5,17 @@ for real window enumeration and foreground-window switching -- there is no
 mock/no-op fallback; if pywin32 is not importable this module raises at
 import time (see the try/except below) rather than silently pretending to
 focus a window it never touched.
+
+Wave 2B adds `capture_active_window`/`get_monitors`/`get_ui_elements`.
+Screen/monitor pixel capture is a native (Rust/Tauri) capability -- Antigravity's
+`apps/web/src-tauri/src/lib.rs` implements the real Win32 capture, including
+secure-desktop refusal (`is_secure_desktop_window`). This backend cannot
+grab pixels itself, so these three actions are validated/risk-classified
+here like any other action, then physically carried out via
+`actions.frontend_bridge.FrontendCommandBridge`, which dispatches the
+already-authorized command to the connected native shell and waits for its
+real, truthful report -- including a refused secure-desktop capture, which
+must surface as FAILED here, never as a fabricated SUCCEEDED.
 """
 from __future__ import annotations
 
@@ -14,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from actions.frontend_bridge import FrontendBridgeError, FrontendCommandBridge
 from app.action_contracts import (
     ActionRequest,
     ActionResult,
@@ -108,16 +120,30 @@ def _find_window(target: str) -> dict[str, Any] | None:
     return None
 
 
+_CAPTURE_ACTIONS = {"capture_active_window", "get_monitors", "get_ui_elements"}
+_DEFAULT_BRIDGE_TIMEOUT = 15.0
+
+
 class WindowsAppSkill(BaseSkill):
     name = "windows_app"
-    capabilities: tuple[str, ...] = ("launch", "focus", "list_running")
+    capabilities: tuple[str, ...] = (
+        "launch",
+        "focus",
+        "list_running",
+        "capture_active_window",
+        "get_monitors",
+        "get_ui_elements",
+    )
+
+    def __init__(self, bridge: FrontendCommandBridge | None = None) -> None:
+        self._bridge = bridge
 
     def classify_risk(self, action: str, arguments: dict[str, Any]) -> RiskLevel:
         if action == "launch":
             return RiskLevel.LOW_RISK
         if action == "focus":
             return RiskLevel.LOW_RISK
-        if action == "list_running":
+        if action in ("list_running", "capture_active_window", "get_monitors", "get_ui_elements"):
             return RiskLevel.READ_ONLY
         return RiskLevel.BLOCKED
 
@@ -129,6 +155,12 @@ class WindowsAppSkill(BaseSkill):
             if not isinstance(target, str) or not target.strip():
                 raise SkillValidationError("focus requires non-empty 'target'")
         elif action == "list_running":
+            return
+        elif action == "capture_active_window":
+            include_image = arguments.get("include_image_data")
+            if include_image is not None and not isinstance(include_image, bool):
+                raise SkillValidationError("'include_image_data' must be a boolean")
+        elif action in ("get_monitors", "get_ui_elements"):
             return
         else:
             raise SkillValidationError(f"unsupported windows_app action '{action}'")
@@ -168,7 +200,51 @@ class WindowsAppSkill(BaseSkill):
             return self._execute_focus(request, started)
         if request.action == "list_running":
             return self._execute_list_running(request, started)
+        if request.action in _CAPTURE_ACTIONS:
+            return await self._execute_capture(request, started)
         raise SkillExecutionError(f"unsupported windows_app action '{request.action}'")
+
+    async def _execute_capture(self, request: ActionRequest, started: datetime) -> ActionResult:
+        if self._bridge is None:
+            raise SkillExecutionError(
+                f"windows_app.{request.action}() requires a connected native shell and no "
+                "FrontendCommandBridge is wired -- refusing rather than fabricating a result"
+            )
+        try:
+            data = await self._bridge.dispatch(
+                request.id,
+                self.name,
+                request.action,
+                request.arguments,
+                timeout=_DEFAULT_BRIDGE_TIMEOUT,
+            )
+        except FrontendBridgeError as exc:
+            return self._result(
+                request,
+                ActionStatus.FAILED,
+                f"windows_app.{request.action}() did not complete: {exc}",
+                risk_level=RiskLevel.READ_ONLY,
+                error=str(exc),
+                started_at=started,
+            )
+        if data.get("is_secure_desktop"):
+            return self._result(
+                request,
+                ActionStatus.FAILED,
+                "Capture refused: secure desktop or credential screen active.",
+                risk_level=RiskLevel.READ_ONLY,
+                data=data,
+                error=data.get("error") or "secure desktop capture refused",
+                started_at=started,
+            )
+        return self._result(
+            request,
+            ActionStatus.SUCCEEDED,
+            str(data.get("summary") or f"Executed windows_app.{request.action}()."),
+            risk_level=RiskLevel.READ_ONLY,
+            data=data,
+            started_at=started,
+        )
 
     async def _execute_launch(self, request: ActionRequest, started: datetime) -> ActionResult:
         target = request.arguments["target"].strip()

@@ -4,14 +4,33 @@ from unittest.mock import patch
 
 import pytest
 
+from actions.frontend_bridge import FrontendBridgeError
 from app.action_contracts import (
     ActionRequest,
     ActionSource,
     ActionStatus,
     RiskLevel,
+    SkillExecutionError,
     SkillValidationError,
 )
 from skills.browser import BrowserSkill, validate_http_url
+
+
+class _FakeBridge:
+    """Stands in for FrontendCommandBridge -- returns a canned payload or
+    raises, so tests can assert BrowserSkill never fabricates SUCCEEDED
+    without a real bridge report."""
+
+    def __init__(self, *, payload: dict | None = None, error: str | None = None) -> None:
+        self.payload = payload
+        self.error = error
+        self.calls: list[tuple] = []
+
+    async def dispatch(self, request_id, skill, action, arguments, *, timeout):
+        self.calls.append((request_id, skill, action, arguments, timeout))
+        if self.error is not None:
+            raise FrontendBridgeError(self.error)
+        return self.payload or {}
 
 
 def _request(action: str, arguments: dict) -> ActionRequest:
@@ -103,3 +122,85 @@ async def test_execute_reports_failure_when_no_browser_available():
 
     assert result.status == ActionStatus.FAILED
     assert result.error is not None
+
+
+# -- Wave 2B embedded-DOM actions ---------------------------------------
+
+
+def test_classify_risk_dom_actions():
+    skill = BrowserSkill()
+    assert skill.classify_risk("navigate", {"url": "https://x.test"}) == RiskLevel.LOW_RISK
+    assert skill.classify_risk("back", {}) == RiskLevel.LOW_RISK
+    assert skill.classify_risk("forward", {}) == RiskLevel.LOW_RISK
+    assert skill.classify_risk("inspect_dom", {}) == RiskLevel.READ_ONLY
+    assert skill.classify_risk("read_text", {}) == RiskLevel.READ_ONLY
+    assert skill.classify_risk("scroll", {}) == RiskLevel.READ_ONLY
+
+
+def test_classify_risk_click_elevates_for_state_changing_target():
+    skill = BrowserSkill()
+    assert skill.classify_risk("click", {"target": "Add to cart"}) == RiskLevel.LOW_RISK
+    assert skill.classify_risk("click", {"target": "Submit order"}) == RiskLevel.CONFIRM_REQUIRED
+    assert skill.classify_risk("click", {"target": "Delete account"}) == RiskLevel.CONFIRM_REQUIRED
+    assert skill.classify_risk("click", {"selector": "#buy-now"}) == RiskLevel.CONFIRM_REQUIRED
+
+
+def test_classify_risk_type_elevates_for_sensitive_field():
+    skill = BrowserSkill()
+    assert skill.classify_risk("type", {"selector": "#username", "text": "a"}) == RiskLevel.LOW_RISK
+    assert (
+        skill.classify_risk("type", {"selector": "#password", "text": "hunter2"})
+        == RiskLevel.CONFIRM_REQUIRED
+    )
+    assert (
+        skill.classify_risk("type", {"selector": "#note", "text": "x", "is_sensitive": True})
+        == RiskLevel.CONFIRM_REQUIRED
+    )
+
+
+async def test_validate_navigate_rejects_bad_scheme():
+    skill = BrowserSkill()
+    with pytest.raises(SkillValidationError):
+        await skill.validate("navigate", {"url": "javascript:alert(1)"})
+
+
+async def test_validate_click_requires_target():
+    skill = BrowserSkill()
+    with pytest.raises(SkillValidationError):
+        await skill.validate("click", {})
+    await skill.validate("click", {"target": "Go"})
+
+
+async def test_validate_type_requires_selector_and_text():
+    skill = BrowserSkill()
+    with pytest.raises(SkillValidationError):
+        await skill.validate("type", {"selector": "#x"})
+    await skill.validate("type", {"selector": "#x", "text": "hello"})
+
+
+async def test_execute_dom_action_without_bridge_refuses_rather_than_fabricates():
+    skill = BrowserSkill()  # no bridge wired
+    with pytest.raises(SkillExecutionError):
+        await skill.execute(_request("inspect_dom", {}))
+
+
+async def test_execute_dom_action_dispatches_through_bridge_and_returns_real_data():
+    bridge = _FakeBridge(payload={"summary": "Inspected DOM", "elements_count": 3})
+    skill = BrowserSkill(bridge=bridge)
+    result = await skill.execute(_request("inspect_dom", {}))
+
+    assert result.status == ActionStatus.SUCCEEDED
+    assert result.data["elements_count"] == 3
+    assert len(bridge.calls) == 1
+    request_id, skill_name, action, arguments, timeout = bridge.calls[0]
+    assert skill_name == "browser"
+    assert action == "inspect_dom"
+
+
+async def test_execute_dom_action_surfaces_bridge_failure_as_failed_never_succeeded():
+    bridge = _FakeBridge(error="Element '#missing' not found")
+    skill = BrowserSkill(bridge=bridge)
+    result = await skill.execute(_request("click", {"target": "#missing"}))
+
+    assert result.status == ActionStatus.FAILED
+    assert "not found" in result.error
