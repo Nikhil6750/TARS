@@ -6,7 +6,90 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
-## Latest handoff
+## Latest handoff — overnight agent and safety runtime
+
+**Branch**: `feature/overnight-agent-runtime`
+
+**Commit SHA**: `3582ff1805597cbb0e47a06d2f492264c9ff5050`
+
+**Work completed**:
+
+- Added a durable agent lifecycle runtime with explicit `ON_DEMAND`,
+  `SCHEDULED`, and `CONTINUOUS` modes, bounded iterations, lifetime cycle
+  limits, provider retries, provider/action/run timeouts, cooperative
+  cancellation, due-job scheduling, duplicate ID/dedupe-key protection, and
+  explicit interrupted-job recovery.
+- Added strict provider-neutral intelligence, orchestrator-decision,
+  skill-discovery, and memory-context contracts. Intelligence output is data
+  only; it has no execution, risk, confirmation, or verification authority.
+- Integrated every proposed skill call through the existing authoritative
+  `ActionRuntime`, including pause/resume around one-time confirmation.
+- Added `StrategyProvider`, `StrategyDefinition`, typed strategy signals, and a
+  read-only `QuantBrainBoundary` that emits no signals when the provider is
+  `NOT_CONFIGURED` or failed.
+- Added SQLite lifecycle state and append-only redacted audit records, startup
+  interruption detection, an explicit recovery transition, scheduler polling
+  for due bounded slices, and REST lifecycle endpoints.
+- Added adversarial coverage for direct-execution isolation, risk downgrade,
+  fabricated `VERIFIED`, unbounded continuous loops, missing strategy
+  providers, secret retention, malformed skill calls, provider failures,
+  duplicate jobs, timeout, cancellation races, ActionRuntime cancellation,
+  scheduling, and recovery.
+
+**Files changed**:
+
+- `apps/backend/agents/` — contracts, provider/skill discovery registries,
+  quant boundary, safety, durable store, and lifecycle runtime.
+- `apps/backend/app/routers/agents.py`, `app/main.py`, `app/deps.py` — REST,
+  lifespan, dependency, and scheduler integration.
+- `apps/backend/tests/test_agent_runtime.py` — targeted adversarial suite.
+- This handoff and `docs/coordination/overnight/codex.done.json` in the
+  completion-metadata commit.
+
+**Interfaces exposed**:
+
+- `POST /api/v1/agents`
+- `GET /api/v1/agents/{job_id}`
+- `GET /api/v1/agents/{job_id}/audit`
+- `POST /api/v1/agents/{job_id}/run`
+- `POST /api/v1/agents/{job_id}/cancel`
+- `POST /api/v1/agents/{job_id}/recover`
+- Python: `AgentRuntime`, `AgentStore`, `AgentDefinition`, `AgentJob`,
+  `RuntimeLimits`, `IntelligenceProvider`, `OrchestratorDecision`,
+  `SkillDiscoveryProvider`, `MemoryContext`, `StrategyProvider`,
+  `StrategyDefinition`, and `QuantBrainBoundary`.
+
+**Tests run**:
+
+- `python -m pytest tests/test_agent_runtime.py tests/test_action_runtime.py
+  tests/test_plan_runtime.py -q` — 64 passed.
+- Ruff on all changed backend/runtime/test code — passed.
+- MyPy on all 12 changed backend source files (`--follow-imports=skip`) —
+  passed with no issues.
+
+**Known limitations**:
+
+- No concrete intelligence or `quant_brain` strategy provider is enabled by
+  default; the runtime fails closed until an adapter is explicitly registered.
+- Continuous agents intentionally execute only scheduler-driven bounded slices;
+  there is no detached forever-loop.
+- Confirmation is completed through the existing Action API, then the agent is
+  explicitly resumed; the runtime never self-confirms.
+
+**Exact dependencies required from other agents**:
+
+- Intelligence-provider owners may register adapters implementing
+  `IntelligenceProvider`; adapters return typed decisions only.
+- Future `quant_brain` integration must implement read-only `StrategyProvider`
+  and preserve source/evidence identifiers.
+- UI owners may consume the REST lifecycle and existing ActionRuntime
+  confirmation endpoints; no backend dependency is required for correctness.
+
+**Next recommended action**: Integrate one intelligence adapter and the real
+read-only `quant_brain` adapter, then exercise an end-to-end scheduled slice
+through user confirmation without weakening runtime authority boundaries.
+
+## Previous handoff — Wave 2B control runtime
 
 **Branch**: `feature/wave2b-control-runtime`
 
