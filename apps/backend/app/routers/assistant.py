@@ -10,10 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.responses import StreamingResponse
 
 from app.contracts import ContractValidationError, validate_assistant_message
-from app.deps import get_assistant_router, get_chart_analysis_service
+from app.deps import get_chart_analysis_service, get_orchestrator
 from assistant.chart_analysis import ChartAnalysisError, ChartAnalysisService
 from assistant.errors import AssistantProviderError
-from assistant.router import AssistantRouter
+from orchestrator.orchestrator import TarsOrchestrator
 
 router = APIRouter(tags=["assistant"])
 
@@ -25,7 +25,7 @@ _MAX_IMAGE_BYTES = 15 * 1_048_576
 @router.post("/api/v1/assistant/messages")
 async def assistant_query(
     request: Request,
-    assistant_router: AssistantRouter = Depends(get_assistant_router),
+    orchestrator: TarsOrchestrator = Depends(get_orchestrator),
 ) -> dict:
     try:
         raw: Any = await request.json()
@@ -58,7 +58,7 @@ async def assistant_query(
     if not isinstance(text, str) or not text.strip():
         raise HTTPException(status_code=422, detail="Query text must be a non-empty string")
 
-    reply = await assistant_router.handle_text(
+    reply = await orchestrator.handle_text(
         text=text,
         conversation_id=str(conversation_id) if conversation_id else str(uuid4()),
     )

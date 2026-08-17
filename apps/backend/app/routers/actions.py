@@ -34,7 +34,7 @@ router = APIRouter(tags=["actions"])
 async def action_capabilities(
     runtime: ActionRuntime = Depends(get_action_runtime),
 ) -> dict[str, Any]:
-    return {"skills": runtime.registry.describe()}
+    return {"skills": await runtime.registry.describe()}
 
 
 @router.get("/api/v1/actions/audit")

@@ -14,12 +14,28 @@ from actions.plan_store import PlanStore
 from actions.registry import build_skill_registry
 from actions.runtime import ActionRuntime
 from actions.store import ActionStore
+from agents.base import AgentRuntime
+from agents.chart_analysis_agent import ChartAnalysisAgent
+from agents.models import AgentConfig, AgentMode
+from agents.setup_watch_agent import SetupWatchAgent
+from agents.store import AgentRunStore
+from agents.trading_workspace_agent import TradingWorkspaceAgent
 from app.body_limit import MaxBodySizeMiddleware
 from app.config import get_settings
 from app.db import build_database
 from app.event_bus import EventBus
 from app.observability import configure_tracing
-from app.routers import action_plans, actions, assistant, events, health, memory, voice, ws
+from app.routers import (
+    action_plans,
+    actions,
+    assistant,
+    events,
+    health,
+    memory,
+    voice,
+    ws,
+)
+from app.routers import agents as agents_router
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
 from app.ws_manager import ConnectionManager
@@ -27,7 +43,10 @@ from assistant.chart_analysis import ChartAnalysisService
 from assistant.factory import build_assistant_provider, build_chart_assistant_provider
 from assistant.providers.mock import MockAssistantProvider
 from events.generator import MockEventGenerator
+from events.service import EventService
 from memory.service import MemoryService
+from trading.context import TradingContextBuilder
+from trading.provider import build_strategy_provider
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tars.app")
@@ -90,8 +109,30 @@ async def lifespan(app: FastAPI):
     app.state.action_ws_manager = action_ws_manager
     frontend_bridge = FrontendCommandBridge(action_ws_manager)
     app.state.frontend_bridge = frontend_bridge
+
+    try:
+        app.state.assistant_provider = build_assistant_provider(settings)
+        logger.info("assistant provider: %s", settings.assistant_provider)
+    except Exception:
+        logger.exception(
+            "failed to construct assistant provider '%s' — falling back to mock",
+            settings.assistant_provider,
+        )
+        app.state.assistant_provider = MockAssistantProvider()
+
+    chart_analysis_service = ChartAnalysisService(build_chart_assistant_provider(settings))
+    app.state.chart_analysis_service = chart_analysis_service
+
+    strategy_provider = build_strategy_provider(settings.quant_brain_base_url)
+    app.state.strategy_provider = strategy_provider
+    trading_context_builder = TradingContextBuilder(EventService(db.conn), strategy_provider)
+    app.state.trading_context_builder = trading_context_builder
+
     action_registry = build_skill_registry(
-        memory_service=memory_service, frontend_bridge=frontend_bridge
+        memory_service=memory_service,
+        frontend_bridge=frontend_bridge,
+        chart_analysis_service=chart_analysis_service,
+        trading_context_builder=trading_context_builder,
     )
     app.state.action_registry = action_registry
     action_runtime = ActionRuntime(
@@ -106,19 +147,27 @@ async def lifespan(app: FastAPI):
     await plan_runtime.initialize()
     app.state.plan_runtime = plan_runtime
 
-    try:
-        app.state.assistant_provider = build_assistant_provider(settings)
-        logger.info("assistant provider: %s", settings.assistant_provider)
-    except Exception:
-        logger.exception(
-            "failed to construct assistant provider '%s' — falling back to mock",
-            settings.assistant_provider,
+    agent_runtime = AgentRuntime(AgentRunStore(db.conn))
+    app.state.agent_runtime = agent_runtime
+    app.state.agents = {
+        "chart_analysis_agent": ChartAnalysisAgent(action_runtime, memory_service),
+        "trading_workspace_agent": TradingWorkspaceAgent(action_runtime),
+        "setup_watch_agent": SetupWatchAgent(
+            trading_context_builder,
+            memory_service,
+            config=AgentConfig(
+                mode=AgentMode.CONTINUOUS,
+                interval_seconds=settings.setup_watch_agent_interval_seconds,
+                timeout_seconds=15.0,
+            ),
+        ),
+    }
+    if settings.setup_watch_agent_enabled:
+        await agent_runtime.start_continuous(app.state.agents["setup_watch_agent"])
+        logger.info(
+            "setup_watch_agent started (interval=%.1fs, deterministic state only)",
+            settings.setup_watch_agent_interval_seconds,
         )
-        app.state.assistant_provider = MockAssistantProvider()
-
-    app.state.chart_analysis_service = ChartAnalysisService(
-        build_chart_assistant_provider(settings)
-    )
 
     generator: MockEventGenerator | None = None
     if settings.use_mock_trading_events:
@@ -138,6 +187,8 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         voice_load_task.cancel()
+        if settings.setup_watch_agent_enabled:
+            await agent_runtime.stop_continuous("setup_watch_agent")
         scheduler.shutdown(wait=False)
         if generator is not None:
             await generator.stop()
@@ -169,6 +220,7 @@ def create_app() -> FastAPI:
     app.include_router(ws.router)
     app.include_router(actions.router)
     app.include_router(action_plans.router)
+    app.include_router(agents_router.router)
 
     return app
 

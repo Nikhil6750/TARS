@@ -35,13 +35,17 @@ from skills.windows_app import WindowsAppSkill
 
 if TYPE_CHECKING:
     from actions.frontend_bridge import FrontendCommandBridge
+    from assistant.chart_analysis import ChartAnalysisService
     from memory.service import MemoryService
+    from trading.context import TradingContextBuilder
 
 
 def build_registry(
     memory_service: MemoryService | None = None,
     vault_path: str | None = None,
     frontend_bridge: FrontendCommandBridge | None = None,
+    chart_analysis_service: ChartAnalysisService | None = None,
+    trading_context_builder: TradingContextBuilder | None = None,
 ) -> dict[str, Skill]:
     """Constructs the skill registry. Pass a live `MemoryService` (and
     optionally its vault path -- defaults to `get_settings().obsidian_vault_path`
@@ -49,7 +53,12 @@ def build_registry(
     (see `actions/frontend_bridge.py`) so `browser`'s embedded-DOM actions and
     `windows_app`'s screen/monitor/UIA capture actions can actually reach the
     connected native shell; without one they validate and risk-classify
-    normally but fail closed at execute() rather than fabricate a result."""
+    normally but fail closed at execute() rather than fabricate a result.
+    `chart_analysis_service`/`trading_context_builder` wire the `trading`
+    skill's `analyze_active_chart`/`get_trading_context`/`explain_setup`
+    actions the same way -- always registered, but any action needing an
+    unwired dependency fails closed rather than fabricating a result (see
+    skills/trading.py)."""
     skills: dict[str, Skill] = {
         "windows_app": WindowsAppSkill(bridge=frontend_bridge),
         "filesystem": FilesystemSkill(),
@@ -65,6 +74,15 @@ def build_registry(
 
             vault_path = get_settings().obsidian_vault_path
         skills["obsidian"] = ObsidianSkill(memory_service, vault_path)
+
+    from skills.trading import TradingSkill
+
+    skills["trading"] = TradingSkill(
+        memory_service=memory_service,
+        chart_analysis_service=chart_analysis_service,
+        context_builder=trading_context_builder,
+        bridge=frontend_bridge,
+    )
     return skills
 
 

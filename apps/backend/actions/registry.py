@@ -8,7 +8,9 @@ from app.action_contracts import Skill
 
 if TYPE_CHECKING:
     from actions.frontend_bridge import FrontendCommandBridge
+    from assistant.chart_analysis import ChartAnalysisService
     from memory.service import MemoryService
+    from trading.context import TradingContextBuilder
 
 
 class SkillRegistryError(ValueError):
@@ -47,16 +49,32 @@ class SkillRegistry:
             raise SkillRegistryError(f"Unknown skill: {name}")
         return skill
 
-    def describe(self) -> list[dict[str, object]]:
-        return [
-            {"name": name, "capabilities": list(skill.capabilities)}
-            for name, skill in sorted(self._skills.items())
-        ]
+    async def describe(self) -> list[dict[str, object]]:
+        described: list[dict[str, object]] = []
+        for name, skill in sorted(self._skills.items()):
+            try:
+                health = await skill.health()
+            except Exception as exc:
+                # A broken health check is itself useful information for
+                # the caller (e.g. GET /api/v1/actions/capabilities) --
+                # never let it take down the whole listing.
+                health = {"available": False, "error": str(exc)}
+            described.append(
+                {
+                    "name": name,
+                    "capabilities": list(skill.capabilities),
+                    "description": getattr(skill, "description", ""),
+                    "health": health,
+                }
+            )
+        return described
 
 
 def build_skill_registry(
     memory_service: MemoryService | None = None,
     frontend_bridge: FrontendCommandBridge | None = None,
+    chart_analysis_service: ChartAnalysisService | None = None,
+    trading_context_builder: TradingContextBuilder | None = None,
 ) -> SkillRegistry:
     """Load Claude's skill package when present, while keeping this branch bootable alone.
 
@@ -82,7 +100,12 @@ def build_skill_registry(
 
     builder = getattr(module, "build_registry", None)
     if builder is not None:
-        exported = builder(memory_service=memory_service, frontend_bridge=frontend_bridge)
+        exported = builder(
+            memory_service=memory_service,
+            frontend_bridge=frontend_bridge,
+            chart_analysis_service=chart_analysis_service,
+            trading_context_builder=trading_context_builder,
+        )
     else:
         exported = getattr(module, "SKILLS", None)
         if exported is None:
