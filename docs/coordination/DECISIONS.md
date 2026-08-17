@@ -339,3 +339,52 @@ landed in `integration/v1`, independent of any branch getting deleted or
 force-pushed later.
 **Status**: Accepted. Merging `integration/v1` into `main` remains a
 separate, later coordinator decision — not authorized by this entry.
+
+## ADR-022: Wave 2A (M2A) candidate certified and merged into `integration/wave2`
+
+**Date**: 2026-08-17
+**Decision**: `bbfd4903af5edb59b453baf9f844de73aad78d09` (tip of
+`feature/wave2-m2a-integration`) is the certified Wave 2A milestone
+candidate — Claude's core skills (`f900293`), Codex's action runtime
+(`a664f780fa7f93e12032e4e3f90ce04db791f2d7`), and Antigravity's native
+shell (`f0dd56425e1918d80b93f32e4375d46c31abad5e`) merged with full
+history preserved, plus integration fixes: skill registry/MemoryService
+DI wiring, permission allowlist gaps (`windows_app.list_running`,
+`browser.search`), HUD↔backend contract alignment (argument field names,
+confirmation token flow, removal of a frontend fallback that fabricated
+`ActionResult`s when the native shell's backend was unreachable), a
+filesystem search time bound, and deterministic voice-phrase routing into
+the real Action Runtime (including two bugs found only by testing against
+genuine speech-to-text output — see `apps/backend/skills/voice_bridge.py`
+and `apps/web/src/services/actions.ts`). It was merged into
+`integration/wave2` via an explicit `--no-ff` merge commit
+`5c70fc8f308d0589e2e7dae88b3575ded46ddebb`, preserving full, unsquashed
+commit history. Only a lightweight post-merge sanity check was run
+(merge-conflict-marker scan, JSON contract schema parse, `py_compile` on
+key backend entrypoints, `create_app()`/skill-registry construction
+smoke test) — the full milestone suite was intentionally not re-run since
+this exact candidate SHA was already independently verified prior to this
+merge (238/239 backend tests passing, one pre-existing environment-only
+failure; 59/59 frontend tests; ruff/mypy/typecheck/lint clean; a real
+Tauri release build and native runtime exercise). `integration/wave2` was
+pushed to `origin`. `integration/v1` and `main` were deliberately **not**
+touched by this action.
+**Known non-blocking verification gaps** (see the Wave 2A integration
+owner's final report for full detail): tray-icon click, autostart-toggle
+UI, and native notification are mechanism-reviewed but not literally
+click-exercised; the full live-microphone→speech→app-capture PTT loop is
+unverified (STT itself was verified against real synthesized speech via a
+real faster-whisper model; only the browser microphone-capture link
+inside the Tauri webview was not exercised); wake word remains
+unverified, unchanged from Wave 1/V1. None of these block the milestone —
+each is either a pre-existing gap outside this integration's scope or a
+UI-automation limitation of the verification environment, not a defect in
+the merged code.
+**Why**: Certification already happened against this exact SHA; re-running
+the full suite here would be redundant. Recording the merge as its own ADR
+gives a durable, append-only pointer from the certified SHA to where it
+landed in `integration/wave2`, and records the known gaps in one place so
+Wave 2B doesn't need to rediscover them.
+**Status**: Accepted. Merging `integration/wave2` into `integration/v1` or
+`main` remains a separate, later coordinator decision — not authorized by
+this entry.
