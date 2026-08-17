@@ -91,6 +91,7 @@ export const CompanionHero: React.FC<CompanionHeroProps> = ({
             <div className="mt-3 text-center">
               <p className="text-xs font-mono text-slate-400">
                 {companionState === 'IDLE' && 'Standing by. Monitoring quantitative market streams.'}
+                {companionState === 'WAKE' && 'Waking up... Listening for command.'}
                 {companionState === 'LISTENING' && 'Capturing voice input... (Release button when done)'}
                 {companionState === 'THINKING' && 'Synthesizing market context & checking risk boundaries...'}
                 {companionState === 'SPEAKING' && 'Transmitting response via localized voice synthesis.'}

@@ -34,6 +34,8 @@ import { MemoryView } from './components/memory/MemoryView';
 import { SystemStatusView } from './components/system/SystemStatusView';
 import { SettingsView } from './components/settings/SettingsView';
 import { nativeBridge } from './services/native-bridge';
+import { wakeWordService, WakeWordStatusInfo } from './services/wake-word';
+import { ChartAnalysisData } from './components/hud/ChartAnalysisCard';
 
 const ANALYZE_CHART_PATTERN = /\b(analy[sz]e)\s+(this|the|my)?\s*chart\b/i;
 
@@ -52,6 +54,12 @@ export const App: React.FC = () => {
   const [chatMessages, setChatMessages] = useState<TARSAssistantMessage[]>(loadStoredChat);
   const [criticalWarnings, setCriticalWarnings] = useState<string[]>([]);
   const [protocolErrors, setProtocolErrors] = useState<Array<{ title: string; errors: string[] }>>([]);
+
+  // Chart Analysis & Demo State
+  const [latestChartAnalysis, setLatestChartAnalysis] = useState<ChartAnalysisData | null>(null);
+  const [isAnalyzingChart, setIsAnalyzingChart] = useState(false);
+  const [liveTranscript, setLiveTranscript] = useState<string>('');
+  const [wakeStatus, setWakeStatus] = useState<WakeWordStatusInfo>(() => wakeWordService.getStatus());
 
   // Audio / Mic State
   const [isListening, setIsListening] = useState(false);
@@ -197,16 +205,24 @@ export const App: React.FC = () => {
     if (msg.role === 'assistant') {
       setCompanionState('SPEAKING');
       if (settings.audioEnabled && msg.content) {
-        audioService.synthesizeAndPlay(msg.content, settings.apiEndpoint)
+        audioService.synthesizeAndPlay(msg.content, settings.apiEndpoint, (vol) => {
+          setAudioVolume(vol);
+        })
           .catch((ttsErr) => {
             console.warn('[TARS TTS] Backend synthesis error, fallback to browser synthesis:', ttsErr);
-            return audioService.speakText(msg.content, settings.speechRate, settings.speechVolume);
+            return audioService.speakText(msg.content, settings.speechRate, settings.speechVolume, (vol) => {
+              setAudioVolume(vol);
+            });
           })
           .finally(() => {
             setCompanionState('IDLE');
+            setAudioVolume(0);
           });
       } else {
-        setTimeout(() => setCompanionState('IDLE'), 2000);
+        setTimeout(() => {
+          setCompanionState('IDLE');
+          setAudioVolume(0);
+        }, 2000);
       }
     }
   }, [settings.audioEnabled, settings.apiEndpoint, settings.speechRate, settings.speechVolume]);
@@ -233,6 +249,7 @@ export const App: React.FC = () => {
       providers: providerName ? { assistant: providerName } : undefined,
     });
 
+    setIsAnalyzingChart(true);
     setCompanionState('THINKING');
     try {
       const [activeContext, capture] = await Promise.all([
@@ -270,6 +287,7 @@ export const App: React.FC = () => {
       }
 
       const result = await response.json();
+      setLatestChartAnalysis(result);
       const spoken: string =
         typeof result.speech_text === 'string' && result.speech_text
           ? result.speech_text
@@ -278,8 +296,57 @@ export const App: React.FC = () => {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       handleIncomingAssistantMessage(newMessage(`Chart analysis error: ${msg}`, msg));
+    } finally {
+      setIsAnalyzingChart(false);
     }
   }, [settings.apiEndpoint, handleIncomingAssistantMessage]);
+
+  // Local continuous wake listener ("Hey TARS" / "Analyze this chart")
+  useEffect(() => {
+    wakeWordService.startListening({
+      onWakeDetected: (phrase) => {
+        console.info('[TARS Wake] Phrase detected:', phrase);
+        setSettings((prev) => {
+          if (!prev.compactMode) {
+            const next = { ...prev, compactMode: true };
+            saveSettings(next);
+            return next;
+          }
+          return prev;
+        });
+        nativeBridge.summonHUD('compact');
+        setCompanionState('WAKE');
+        setTimeout(async () => {
+          setCompanionState('LISTENING');
+          setIsListening(true);
+          await audioService.startPushToTalk((vol) => setAudioVolume(vol));
+        }, 400);
+      },
+      onAnalyzeChartDetected: async (phrase) => {
+        console.info('[TARS Wake] Direct chart analysis command detected:', phrase);
+        setSettings((prev) => {
+          if (!prev.compactMode) {
+            const next = { ...prev, compactMode: true };
+            saveSettings(next);
+            return next;
+          }
+          return prev;
+        });
+        nativeBridge.summonHUD('compact');
+        await handleAnalyzeChart();
+      },
+      onTranscriptInterim: (text) => {
+        setLiveTranscript(text);
+      },
+      onStateChange: (status) => {
+        setWakeStatus(status);
+      },
+    });
+
+    return () => {
+      wakeWordService.stopListening();
+    };
+  }, [handleAnalyzeChart]);
 
   // Fetch initial state from HTTP backend on mount
   useEffect(() => {
@@ -542,6 +609,9 @@ export const App: React.FC = () => {
         <HUDOverlay
           companionState={companionState}
           onExpand={() => updateSettings({ compactMode: false })}
+          onHideHUD={() => {
+            nativeBridge.hideHUD();
+          }}
           activeSetups={activeSetups}
           criticalWarnings={criticalWarnings}
           isListening={isListening}
@@ -549,6 +619,30 @@ export const App: React.FC = () => {
           audioVolume={audioVolume}
           apiEndpoint={settings.apiEndpoint}
           onSendMessage={handleSendMessage}
+          onAnalyzeChart={handleAnalyzeChart}
+          latestChartAnalysis={latestChartAnalysis}
+          onClearChartAnalysis={() => setLatestChartAnalysis(null)}
+          wakeStatus={wakeStatus}
+          onToggleWakeListening={() => {
+            if (wakeStatus.isActive) {
+              wakeWordService.stopListening();
+              setWakeStatus(wakeWordService.getStatus());
+            } else {
+              wakeWordService.startListening({
+                onWakeDetected: () => {
+                  setSettings((prev) => ({ ...prev, compactMode: true }));
+                  setCompanionState('WAKE');
+                  setTimeout(() => setCompanionState('LISTENING'), 400);
+                },
+                onAnalyzeChartDetected: () => handleAnalyzeChart(),
+                onTranscriptInterim: (text) => setLiveTranscript(text),
+                onStateChange: (status) => setWakeStatus(status),
+              });
+              setWakeStatus(wakeWordService.getStatus());
+            }
+          }}
+          liveTranscript={liveTranscript}
+          isAnalyzingChart={isAnalyzingChart}
         />
       </div>
     );

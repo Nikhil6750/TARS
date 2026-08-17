@@ -282,8 +282,13 @@ export class AudioService {
    * Synthesize text to speech using backend TTS endpoint and play returned audio bytes
    * @param text Text to synthesize
    * @param apiEndpoint Backend HTTP URL
+   * @param onAudioVolume Optional real-time volume callback (0.0 to 1.0)
    */
-  public async synthesizeAndPlay(text: string, apiEndpoint: string): Promise<void> {
+  public async synthesizeAndPlay(
+    text: string,
+    apiEndpoint: string,
+    onAudioVolume?: (volume: number) => void
+  ): Promise<void> {
     if (!text || !text.trim()) return;
 
     let res = await fetch(`${apiEndpoint}/api/v1/voice/synthesize`, {
@@ -305,43 +310,122 @@ export class AudioService {
     }
 
     const audioBytes = await res.arrayBuffer();
-    await this.playAudioBytes(audioBytes);
+    if (onAudioVolume) {
+      await this.playAudioBytes(audioBytes, onAudioVolume);
+    } else {
+      await this.playAudioBytes(audioBytes);
+    }
   }
 
   /**
-   * Play raw audio bytes received from backend TTS
+   * Play raw audio bytes received from backend TTS with real-time amplitude analysis
    */
-  public playAudioBytes(audioBytes: ArrayBuffer): Promise<void> {
+  public playAudioBytes(
+    audioBytes: ArrayBuffer,
+    onPlaybackVolume?: (volume: number) => void
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
-        const blob = new Blob([audioBytes], { type: 'audio/wav' });
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        this.activeAudioElement = audio;
+        const AudioContextClass =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
 
-        audio.onended = () => {
-          URL.revokeObjectURL(url);
-          this.activeAudioElement = null;
-          resolve();
-        };
+        if (AudioContextClass) {
+          const ctx = new AudioContextClass();
+          ctx.decodeAudioData(
+            audioBytes.slice(0),
+            (buffer) => {
+              const source = ctx.createBufferSource();
+              source.buffer = buffer;
 
-        audio.onerror = (err) => {
-          URL.revokeObjectURL(url);
-          this.activeAudioElement = null;
-          reject(err);
-        };
+              const analyser = ctx.createAnalyser();
+              analyser.fftSize = 64;
+              analyser.smoothingTimeConstant = 0.8;
 
-        audio.play().catch(reject);
+              source.connect(analyser);
+              analyser.connect(ctx.destination);
+
+              let animId: number | null = null;
+              if (onPlaybackVolume) {
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                const volumeLoop = () => {
+                  analyser.getByteFrequencyData(dataArray);
+                  let sum = 0;
+                  for (let i = 0; i < dataArray.length; i++) {
+                    sum += dataArray[i];
+                  }
+                  const vol = Math.min(1.0, (sum / dataArray.length / 128) * 1.5);
+                  onPlaybackVolume(vol);
+                  animId = requestAnimationFrame(volumeLoop);
+                };
+                volumeLoop();
+              }
+
+              source.onended = () => {
+                if (animId !== null) cancelAnimationFrame(animId);
+                if (onPlaybackVolume) onPlaybackVolume(0);
+                try {
+                  ctx.close();
+                } catch {
+                  // ignore
+                }
+                resolve();
+              };
+
+              source.start(0);
+            },
+            (err) => {
+              console.warn('[TARS Audio] decodeAudioData error, falling back to HTMLAudioElement:', err);
+              this.fallbackPlayBlob(audioBytes, resolve, reject);
+            }
+          );
+        } else {
+          this.fallbackPlayBlob(audioBytes, resolve, reject);
+        }
       } catch (err) {
         reject(err);
       }
     });
   }
 
+  private fallbackPlayBlob(
+    audioBytes: ArrayBuffer,
+    resolve: () => void,
+    reject: (err: unknown) => void
+  ) {
+    try {
+      const blob = new Blob([audioBytes], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      this.activeAudioElement = audio;
+
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        this.activeAudioElement = null;
+        resolve();
+      };
+
+      audio.onerror = (err) => {
+        URL.revokeObjectURL(url);
+        this.activeAudioElement = null;
+        reject(err);
+      };
+
+      audio.play().catch(reject);
+    } catch (e) {
+      reject(e);
+    }
+  }
+
   /**
    * Non-certified browser speech synthesis fallback (dev / offline only)
    */
-  public speakText(text: string, rate = 1.0, volume = 0.9): Promise<void> {
+  public speakText(
+    text: string,
+    rate = 1.0,
+    volume = 0.9,
+    onAudioVolume?: (volume: number) => void
+  ): Promise<void> {
     return new Promise((resolve) => {
       if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
         resolve();
@@ -367,8 +451,23 @@ export class AudioService {
         utterance.voice = preferred;
       }
 
-      utterance.onend = () => resolve();
-      utterance.onerror = () => resolve();
+      let interval: NodeJS.Timeout | null = null;
+      if (onAudioVolume) {
+        interval = setInterval(() => {
+          onAudioVolume(0.2 + Math.random() * 0.4);
+        }, 100);
+      }
+
+      utterance.onend = () => {
+        if (interval) clearInterval(interval);
+        if (onAudioVolume) onAudioVolume(0);
+        resolve();
+      };
+      utterance.onerror = () => {
+        if (interval) clearInterval(interval);
+        if (onAudioVolume) onAudioVolume(0);
+        resolve();
+      };
 
       window.speechSynthesis.speak(utterance);
     });

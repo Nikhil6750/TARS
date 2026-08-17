@@ -6,14 +6,14 @@ import {
   Send,
   Zap,
   Terminal,
-  Globe,
   AlertTriangle,
-  Eye,
   Camera,
   Layers,
   Sparkles,
+  X,
+  Radio,
 } from 'lucide-react';
-import { TARSCharacter } from '../character/TARSCharacter';
+import { TARSOrb } from '../character/TARSOrb';
 import { CompanionVisualState } from '../../types/companion';
 import { TARSTradingEvent } from '../../types/trading-event';
 import {
@@ -32,16 +32,19 @@ import { browserControlService } from '../../services/browser-control';
 import { actionPlannerService } from '../../services/action-planner';
 import { frontendCommandBridge } from '../../services/frontend-command-bridge';
 import { visualTargetingService } from '../../services/visual-targeting';
+import { WakeWordStatusInfo } from '../../services/wake-word';
 import { ActiveContextBar } from './ActiveContextBar';
 import { ActionConfirmationCard } from './ActionConfirmationCard';
 import { ActionResultView } from './ActionResultView';
 import { VisualInspectorCard } from './VisualInspectorCard';
 import { BrowserContextCard } from './BrowserContextCard';
 import { MultiStepPlanView } from './MultiStepPlanView';
+import { ChartAnalysisCard, ChartAnalysisData } from './ChartAnalysisCard';
 
 interface HUDOverlayProps {
   companionState: CompanionVisualState;
   onExpand: () => void;
+  onHideHUD?: () => void;
   activeSetups: TARSTradingEvent[];
   criticalWarnings: string[];
   isListening: boolean;
@@ -49,11 +52,19 @@ interface HUDOverlayProps {
   audioVolume: number;
   apiEndpoint?: string;
   onSendMessage?: (text: string) => void;
+  onAnalyzeChart?: () => Promise<void> | void;
+  latestChartAnalysis?: ChartAnalysisData | null;
+  onClearChartAnalysis?: () => void;
+  wakeStatus?: WakeWordStatusInfo;
+  onToggleWakeListening?: () => void;
+  liveTranscript?: string;
+  isAnalyzingChart?: boolean;
 }
 
 export const HUDOverlay: React.FC<HUDOverlayProps> = ({
   companionState,
   onExpand,
+  onHideHUD,
   activeSetups,
   criticalWarnings,
   isListening,
@@ -61,6 +72,13 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
   audioVolume,
   apiEndpoint = 'http://127.0.0.1:8000',
   onSendMessage,
+  onAnalyzeChart,
+  latestChartAnalysis,
+  onClearChartAnalysis,
+  wakeStatus,
+  onToggleWakeListening,
+  liveTranscript,
+  isAnalyzingChart = false,
 }) => {
   // Active foreground window context & monitors
   const [activeContext, setActiveContext] = useState<ActiveWindowContext | null>(null);
@@ -120,6 +138,22 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
     refreshActiveContext();
     inputRef.current?.focus();
   }, [refreshActiveContext]);
+
+  // Handle Esc key to hide HUD to tray
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (onHideHUD) {
+          onHideHUD();
+        } else {
+          nativeBridge.hideHUD();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onHideHUD]);
 
   // Subscribe to action results and plan updates
   useEffect(() => {
@@ -207,7 +241,16 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
 
     setIsSubmitting(true);
     try {
-      // 1. Check for multi-step workflow command (e.g. "research AAPL" or "workflow browse")
+      // 1. Check for chart analysis keyword
+      if (/\b(analy[sz]e)\s+(this|the|my)?\s*chart\b/i.test(text)) {
+        setInputText('');
+        if (onAnalyzeChart) {
+          await onAnalyzeChart();
+          return;
+        }
+      }
+
+      // 2. Check for multi-step workflow command
       const researchMatch = text.match(/^(?:research|analyze|find\s+setup\s+for)\s+([a-zA-Z0-9_-]+)$/i);
       if (researchMatch) {
         const symbol = researchMatch[1].toUpperCase();
@@ -217,7 +260,7 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
         return;
       }
 
-      // 2. Check for deterministic command (bypasses LLM)
+      // 3. Check for deterministic command (bypasses LLM)
       const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
         text,
         activeContext,
@@ -244,7 +287,7 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
           setPendingConfirmationToken(typeof token === 'string' ? token : null);
         }
       } else {
-        // 3. Visual/UI Target Query Resolution
+        // 4. Visual/UI Target Query Resolution
         const isTargeting = /^(?:click|find|press|select|focus|tap)\s+/i.test(text);
         if (isTargeting) {
           const resolution = visualTargetingService.resolveTarget(
@@ -258,144 +301,154 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
             }
           );
 
-          if (resolution.target_type !== 'unresolved') {
-            const req = visualTargetingService.createActionFromTarget(resolution, activeContext);
+          if (resolution.target_type !== 'unresolved' && resolution.proposed_action) {
             setInputText('');
+            const req = actionRuntimeClient.createRequest({
+              skill: resolution.proposed_action.skill as ActionRequest['skill'],
+              action: resolution.proposed_action.action,
+              arguments: resolution.proposed_action.arguments,
+              source: 'hud',
+              activeContext,
+            });
             const res = await actionRuntimeClient.submitAction(req);
             setLatestResult(res);
             return;
           }
         }
 
-        // 4. Natural language prompt
+        // 5. Normal Assistant Chat / Intent Query
         if (onSendMessage) {
           onSendMessage(text);
           setInputText('');
-        } else {
-          const req = actionRuntimeClient.createRequest({
-            skill: 'windows_app',
-            action: 'prompt',
-            arguments: { prompt: text },
-            source: 'hud',
-            activeContext,
-          });
-          setInputText('');
-          await actionRuntimeClient.submitAction(req);
         }
       }
-    } catch (err) {
-      console.error('[HUDOverlay] Submit command error:', err);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Handle Action Confirmation / Denial
-  const handleConfirmAction = async (requestId: string) => {
-    if (!pendingConfirmationToken) {
-      console.error('[HUDOverlay] Confirm error: no confirmation token available for', requestId);
-      return;
-    }
+  // Confirm / Deny Pending Action
+  const handleConfirmAction = async () => {
+    if (!pendingConfirmation || !pendingConfirmationToken) return;
     try {
-      await actionRuntimeClient.respondToConfirmation(requestId, pendingConfirmationToken, true);
+      const res = await actionRuntimeClient.respondToConfirmation(
+        pendingConfirmation.id,
+        pendingConfirmationToken,
+        true
+      );
       setPendingConfirmation(null);
       setPendingConfirmationToken(null);
+      setLatestResult(res);
     } catch (err) {
-      console.error('[HUDOverlay] Confirm error:', err);
+      console.error('[HUDOverlay] Failed to confirm action:', err);
     }
   };
 
-  const handleDenyAction = async (requestId: string, reason?: string) => {
-    if (!pendingConfirmationToken) {
-      console.error('[HUDOverlay] Deny error: no confirmation token available for', requestId);
-      return;
+  const handleDenyAction = async () => {
+    if (pendingConfirmation && pendingConfirmationToken) {
+      try {
+        const res = await actionRuntimeClient.respondToConfirmation(
+          pendingConfirmation.id,
+          pendingConfirmationToken,
+          false
+        );
+        setLatestResult(res);
+      } catch (err) {
+        console.error('[HUDOverlay] Failed to deny action:', err);
+      }
     }
-    try {
-      await actionRuntimeClient.respondToConfirmation(requestId, pendingConfirmationToken, false, reason);
-      setPendingConfirmation(null);
-      setPendingConfirmationToken(null);
-    } catch (err) {
-      console.error('[HUDOverlay] Deny error:', err);
-    }
+    setPendingConfirmation(null);
+    setPendingConfirmationToken(null);
   };
 
-  // Quick Skill Helpers
-  const handleQuickSkill = (skill: string, action: string, args: Record<string, unknown>) => {
+  const handleQuickSkill = async (skill: string, action: string, args: Record<string, unknown> = {}) => {
     const req = actionRuntimeClient.createRequest({
-      skill,
+      skill: skill as ActionRequest['skill'],
       action,
       arguments: args,
       source: 'hud',
       activeContext,
     });
-    actionRuntimeClient.submitAction(req);
+    const res = await actionRuntimeClient.submitAction(req);
+    if (res.status === 'CONFIRMATION_REQUIRED') {
+      setPendingConfirmation(req);
+      const token = res.data?.confirmation_token;
+      setPendingConfirmationToken(typeof token === 'string' ? token : null);
+    } else {
+      setLatestResult(res);
+    }
+  };
+
+  const handleTriggerAnalyzeChart = async () => {
+    if (onAnalyzeChart) {
+      await onAnalyzeChart();
+    }
   };
 
   return (
-    <div className="w-full h-full flex flex-col justify-between p-3.5 bg-[#040810]/95 backdrop-blur-md border-2 border-cyan-500/40 rounded-2xl select-none font-sans text-slate-100 shadow-[0_0_35px_rgba(6,182,212,0.15)] overflow-hidden">
-      {/* Top HUD Header */}
-      <div className="flex items-center justify-between pb-2 border-b border-slate-800/90 shrink-0">
+    <div
+      data-testid="hud-overlay"
+      className="w-full h-full flex flex-col bg-[#03060a]/98 text-slate-100 font-sans select-none border border-cyan-500/30 rounded-xl p-2.5 shadow-[0_0_40px_rgba(0,240,255,0.15)] backdrop-blur-xl relative overflow-hidden"
+    >
+      {/* HUD Header Bar */}
+      <div className="flex items-center justify-between pb-2 border-b border-cyan-500/20 shrink-0">
         <div className="flex items-center gap-2">
-          <span className="relative flex h-2.5 w-2.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500" />
-          </span>
-          <div>
-            <span className="font-display-title font-bold text-xs tracking-wider text-slate-100">
+          <div className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse shadow-[0_0_8px_#00f0ff]" />
+          <div className="flex flex-col">
+            <span className="font-mono text-xs font-bold tracking-widest text-cyan-300">
               TARS HUD
             </span>
-            <span className="ml-1.5 px-1.5 py-0.2 rounded text-[9px] font-mono bg-cyan-950/80 text-cyan-300 border border-cyan-500/30">
-              WAVE 2B
+            <span className="font-mono text-[9px] text-slate-400">
+              WAVE 2B · VOICE & VISION
             </span>
           </div>
         </div>
 
-        {/* Top Control Drawers Toggle */}
-        <div className="flex items-center gap-1.5">
+        {/* Center: Wake-word Listener Status Pill */}
+        {wakeStatus && (
           <button
-            onClick={() => {
-              setShowVisualInspector(!showVisualInspector);
-              setShowBrowserCard(false);
-            }}
-            className={`p-1 rounded border transition-colors text-xs flex items-center gap-1 ${
-              showVisualInspector
-                ? 'bg-cyan-950 text-cyan-300 border-cyan-500/50'
-                : 'bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-700/80'
+            type="button"
+            onClick={onToggleWakeListening}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[9px] font-mono transition-all ${
+              wakeStatus.isActive
+                ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-300 shadow-[0_0_8px_rgba(16,185,129,0.3)]'
+                : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'
             }`}
-            title="Toggle Visual & Screen Awareness Inspector"
+            title={wakeStatus.isActive ? 'Local Wake Listener: Active ("Hey TARS") - Click to mute' : 'Local Wake Listener: Muted - Click to activate'}
           >
-            <Eye className="w-3.5 h-3.5" />
+            <Radio className={`w-2.5 h-2.5 ${wakeStatus.isActive ? 'text-emerald-400 animate-pulse' : 'text-slate-500'}`} />
+            <span>{wakeStatus.isActive ? 'WAKE: ON' : 'WAKE: OFF'}</span>
           </button>
+        )}
 
-          <button
-            onClick={() => {
-              setShowBrowserCard(!showBrowserCard);
-              setShowVisualInspector(false);
-            }}
-            className={`p-1 rounded border transition-colors text-xs flex items-center gap-1 ${
-              showBrowserCard
-                ? 'bg-blue-950 text-blue-300 border-blue-500/50'
-                : 'bg-slate-900 hover:bg-slate-800 text-slate-400 border-slate-700/80'
-            }`}
-            title="Toggle Browser Automation Context"
-          >
-            <Globe className="w-3.5 h-3.5" />
-          </button>
-
-          <button
-            onClick={() => nativeBridge.hideHUD()}
-            className="p-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700/80 transition-colors text-xs"
-            title="Minimize to Tray"
-          >
-            <Minimize2 className="w-3.5 h-3.5" />
-          </button>
-
+        {/* Actions: Expand / Hide / Close */}
+        <div className="flex items-center gap-1 text-slate-400">
           <button
             onClick={onExpand}
-            className="p-1 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-cyan-400 border border-slate-700/80 transition-colors text-xs"
+            className="p-1 hover:text-cyan-300 hover:bg-slate-800/60 rounded transition-colors"
             title="Expand to Full Workstation"
           >
             <Maximize2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => {
+              if (onHideHUD) onHideHUD();
+              else nativeBridge.hideHUD();
+            }}
+            className="p-1 hover:text-amber-300 hover:bg-slate-800/60 rounded transition-colors"
+            title="Hide HUD to Tray (Esc)"
+          >
+            <Minimize2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={() => {
+              if (onHideHUD) onHideHUD();
+              else nativeBridge.hideHUD();
+            }}
+            className="p-1 hover:text-rose-400 hover:bg-rose-950/40 rounded transition-colors"
+            title="Close to Background Tray"
+          >
+            <X className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
@@ -410,7 +463,7 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
       </div>
 
       {/* Center Interactive Stage */}
-      <div className="flex-1 my-1.5 overflow-y-auto space-y-2 pr-0.5 custom-scrollbar min-h-0 flex flex-col justify-center">
+      <div className="flex-1 my-1.5 overflow-y-auto space-y-2 pr-0.5 custom-scrollbar min-h-0 flex flex-col justify-start">
         {/* Visual Inspector Drawer */}
         {showVisualInspector ? (
           <VisualInspectorCard
@@ -450,24 +503,52 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
             result={latestResult}
             onDismiss={() => setLatestResult(null)}
           />
+        ) : latestChartAnalysis ? (
+          /* Structured Chart Analysis Read */
+          <div className="py-1">
+            <ChartAnalysisCard
+              analysis={latestChartAnalysis}
+              onDismiss={onClearChartAnalysis}
+              isSpeaking={companionState === 'SPEAKING'}
+            />
+          </div>
         ) : (
-          /* Companion Avatar Visualizer */
-          <div className="flex flex-col items-center justify-center py-1">
-            <TARSCharacter
+          /* Primary TARS Quantum Voice Core & Hero Visualizer */
+          <div className="flex flex-col items-center justify-center py-2 flex-1">
+            <TARSOrb
               state={companionState}
               audioVolume={audioVolume}
-              size="compact"
+              size="hud"
               onClick={onTogglePushToTalk}
             />
-            <span className="text-[11px] font-mono text-slate-400 mt-1.5">
-              {companionState === 'LISTENING'
-                ? 'LISTENING... (RELEASE TO PROCESS)'
-                : companionState === 'THINKING'
-                ? 'ANALYZING SCREEN & ACTION PERMISSION...'
-                : companionState === 'ALERT'
-                ? 'MARKET SIGNAL TRIGGERED'
-                : 'SCREEN-AWARE COMPANION READY'}
-            </span>
+
+            {/* Live Transcript / Speech Indicator */}
+            {liveTranscript && isListening && (
+              <div className="mt-3 px-3 py-1 bg-slate-900/90 border border-emerald-500/40 rounded-full text-[11px] font-mono text-emerald-300 animate-pulse text-center max-w-[90%] truncate">
+                &ldquo;{liveTranscript}&rdquo;
+              </div>
+            )}
+
+            {/* Primary Demo Trigger: Analyze Active Chart Button */}
+            <div className="mt-4 w-full px-2">
+              <button
+                type="button"
+                onClick={handleTriggerAnalyzeChart}
+                disabled={isAnalyzingChart || companionState === 'THINKING'}
+                className="w-full group relative flex items-center justify-center gap-2 py-2.5 px-4 bg-gradient-to-r from-cyan-950/80 via-[#0a182c] to-cyan-950/80 hover:from-cyan-900 hover:to-cyan-900 border border-cyan-500/50 hover:border-cyan-400 rounded-xl text-xs font-mono font-bold text-cyan-200 hover:text-cyan-100 shadow-[0_0_20px_rgba(0,240,255,0.2)] hover:shadow-[0_0_30px_rgba(0,240,255,0.4)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <div className="absolute inset-0 rounded-xl bg-cyan-400/5 group-hover:bg-cyan-400/10 transition-colors" />
+                <Sparkles className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
+                <span>
+                  {isAnalyzingChart || companionState === 'THINKING'
+                    ? 'ANALYZING ACTIVE CHART...'
+                    : '⚡ ANALYZE ACTIVE CHART'}
+                </span>
+                <span className="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-500/40 text-cyan-300 font-normal">
+                  Say &quot;Analyze this chart&quot;
+                </span>
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -579,6 +660,13 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
             <Mic className="w-3.5 h-3.5" />
           </button>
         </form>
+
+        {/* Subtle Hotkey Reference */}
+        <div className="mt-1.5 flex items-center justify-between text-[9px] font-mono text-slate-400 px-0.5">
+          <span>Wake: &quot;Hey TARS&quot;</span>
+          <span>Summon: Ctrl+Shift+Space</span>
+          <span>Close: Esc</span>
+        </div>
       </div>
     </div>
   );

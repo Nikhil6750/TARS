@@ -10,7 +10,49 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (WAVE 2B: SCREEN AWARENESS + BROWSER CONTROL)
+## Latest handoff (LINKEDIN DEMO UI + WAKE EXPERIENCE)
+
+**Status**: COMPLETE — Premium floating TARS voice HUD, quantum orb visualizer (`TARSOrb`) with hardware-accelerated 60fps animations and real-time audio amplitude reactivity, local continuous wake-word phrase detection ("Hey TARS" / "Analyze this chart"), structured chart analysis visualization card (`ChartAnalysisCard`), real-time TTS amplitude synchronization, Esc / close to tray, and demo trigger buttons fully built and verified.
+**Branch**: `feature/linkedin-demo`
+**Commit SHA**: `HEAD` (to be committed after release build)
+**Work completed**:
+1. **TARS Quantum Orb Visualizer (`apps/web/src/components/character/TARSOrb.tsx`)**:
+   - Preserves high-detail generated orb design (`apps/web/public/assets/tars-orb.png`).
+   - 60fps hardware-accelerated transforms (`scale3d`, `translate3d`, `opacity`).
+   - State-driven animations:
+     - `IDLE`: Subtle breathing scale (0.98 <-> 1.02), low cyan ambient glow (opacity 0.22), minimal outer ring rotation.
+     - `WAKE`: Quick smooth expansion (scale 1.12), bright shockwave burst (`animate-ping`, opacity 0.85), ~400ms duration.
+     - `LISTENING`: Concentric rings and waveform arcs react dynamically to REAL microphone amplitude via spring interpolation (no jitter).
+     - `THINKING`: Counter-rotating gyroscopic orbital rings, restrained violet/cyan scanner arc, zero fake progress percentages.
+     - `SPEAKING`: Reacts to REAL TTS audio volume from backend voice synthesis via live `AudioContext` FFT analyser node.
+     - `ALERT` / `WARNING`: Gold/amber setup alert and crimson risk warnings.
+2. **Local Continuous Wake Phrase Listener (`apps/web/src/services/wake-word.ts`)**:
+   - Truthful architecture: Does NOT claim openWakeWord has a custom TARS model.
+   - Implements local continuous phrase listener using WebView2 / Web Speech API (`"Hey TARS"`, `"Analyze this chart"`) with local Whisper VAD fallback.
+   - Zero wake audio sent to cloud services.
+   - User-toggleable state displayed truthfully in HUD header (`WAKE: ON` / `WAKE: OFF`).
+   - Transitions state: `WAKE` -> `LISTENING` -> captures command -> `THINKING` -> `SPEAKING`.
+3. **Structured Chart Analysis Presentation (`apps/web/src/components/hud/ChartAnalysisCard.tsx`)**:
+   - Displays ticker/instrument and timeframe badge (`EURUSD · 4H`), market context summary, key levels chips, hedged possible read, invalidation condition, and risk notes.
+   - Mandatory non-negotiable disclaimer clearly rendered: "Qualitative read from TARS assistant. Not a quant_brain signal. No confidence score."
+   - Replay Voice Read button allowing re-triggering speech playback with live waveform reactivity.
+4. **Elevated Floating Voice HUD (`apps/web/src/components/hud/HUDOverlay.tsx`)**:
+   - Centered `TARSOrb` hero visualizer.
+   - One-click backup demo trigger: "⚡ ANALYZE ACTIVE CHART" button.
+   - Live transcript preview pill when speaking.
+   - `Esc` key down listener and Close 'X' button to hide HUD back to tray.
+   - `Ctrl+Shift+Space` global summon shortcut integration.
+5. **Real-Time TTS Amplitude Reactivity (`apps/web/src/services/audio.ts`)**:
+   - Enhanced `synthesizeAndPlay` and `playAudioBytes` with live `AnalyserNode` frequency bin summation callback (`onAudioVolume`) to drive real-time audio reactivity during speech synthesis.
+6. **Tests & Verification**:
+   - `linkedin-demo.test.tsx` (7 tests): TARSOrb states, ChartAnalysisCard presentation, disclaimer verification, demo trigger click handler, and truthful wake status.
+   - 17 test files, 104/104 tests passing (100%).
+   - Production Vite bundle (`npm run build`) succeeds cleanly.
+   - Tauri native Windows release build compiled.
+
+---
+
+## Previous handoff (WAVE 2B: SCREEN AWARENESS + BROWSER CONTROL)
 
 **Status**: COMPLETE — Screen awareness (DPI-aware monitor geometry, active window BMP capture, bounded region capture, secure desktop protection, temp cache eviction, Win32 UI hierarchy), Visual & Semantic targeting engine (strict preference hierarchy, coordinate bounding, sensitive field redaction, zero random click loops), Real Browser automation layer (scheme validation, DOM/accessibility extraction, semantic element finding, safe clicking, sensitive typing, scrolling, history, tabs), Multi-Step Action Planner, and extended HUD UI surface (VisualInspectorCard, BrowserContextCard, MultiStepPlanView) fully implemented and verified.
 **Branch**: `feature/wave2b-vision-browser`

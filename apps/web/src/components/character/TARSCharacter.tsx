@@ -29,6 +29,7 @@ export const TARSCharacter: React.FC<TARSCharacterProps> = ({
   // Theme color palette based on companion state
   const stateColorMap: Record<CompanionVisualState, { primary: string; glow: string; label: string }> = {
     IDLE: { primary: '#00f0ff', glow: 'rgba(0, 240, 255, 0.35)', label: 'READY' },
+    WAKE: { primary: '#38bdf8', glow: 'rgba(56, 189, 248, 0.8)', label: 'WAKING UP' },
     LISTENING: { primary: '#00ff66', glow: 'rgba(0, 255, 102, 0.45)', label: 'LISTENING' },
     THINKING: { primary: '#a855f7', glow: 'rgba(168, 85, 247, 0.45)', label: 'ANALYZING' },
     SPEAKING: { primary: '#00f0ff', glow: 'rgba(0, 240, 255, 0.5)', label: 'TRANSMITTING' },
