@@ -14,7 +14,7 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 **Status**: COMPLETE — Premium floating TARS voice HUD, quantum orb visualizer (`TARSOrb`) with hardware-accelerated 60fps animations and real-time audio amplitude reactivity, local continuous wake-word phrase detection ("Hey TARS" / "Analyze this chart"), real-time SSE chart analysis streaming from Claude Code (`/api/v1/assistant/analyze-chart/stream`), progressive token rendering card with live blinking cursor, structured chart analysis visualization card (`ChartAnalysisCard`), real-time TTS amplitude synchronization, Esc / close to tray, and native release build compiled and verified.
 **Branch**: `feature/linkedin-demo`
-**Commit SHA**: `HEAD` (to be recorded)
+**Commit SHA**: `189fd694d3f5db119afddaca7df0d6c6b8bb63ca`
 **Work completed**:
 1. **Orb/HUD Native Summon & Default Experience (`apps/web/src-tauri/tauri.conf.json`, `apps/web/src/services/storage.ts`, `apps/web/src/App.tsx`)**:
    - Configured native window size to `440x740`, `alwaysOnTop: true`, `title: "TARS — Trading Companion"`.
