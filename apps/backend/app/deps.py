@@ -16,11 +16,15 @@ if TYPE_CHECKING:
     from actions.frontend_bridge import FrontendCommandBridge
     from actions.plan_runtime import PlanRuntime
     from actions.runtime import ActionRuntime
+    from agents.base import Agent, AgentRuntime
     from app.voice_state import VoiceProviders
     from assistant.chart_analysis import ChartAnalysisService
     from assistant.provider import AssistantProvider
     from assistant.router import AssistantRouter
     from memory.service import MemoryService
+    from orchestrator.orchestrator import TarsOrchestrator
+    from trading.context import TradingContextBuilder
+    from trading.provider import StrategyProvider
 
 
 def get_db(request: Request) -> Database:
@@ -82,3 +86,34 @@ def get_frontend_bridge(request: Request) -> FrontendCommandBridge:
 
 def get_chart_analysis_service(request: Request) -> ChartAnalysisService:
     return request.app.state.chart_analysis_service
+
+
+def get_strategy_provider(request: Request) -> StrategyProvider:
+    return request.app.state.strategy_provider
+
+
+def get_trading_context_builder(request: Request) -> TradingContextBuilder:
+    return request.app.state.trading_context_builder
+
+
+def get_agent_runtime(request: Request) -> AgentRuntime:
+    return request.app.state.agent_runtime
+
+
+def get_agents(request: Request) -> dict[str, Agent]:
+    return request.app.state.agents
+
+
+def get_orchestrator(request: Request) -> TarsOrchestrator:
+    from assistant.conversation_store import ConversationStore
+    from orchestrator.orchestrator import TarsOrchestrator
+
+    db: Database = request.app.state.db
+    return TarsOrchestrator(
+        assistant_router=get_assistant_router(request),
+        action_runtime=request.app.state.action_runtime,
+        memory_service=request.app.state.memory_service,
+        conversation_store=ConversationStore(db.conn),
+        agent_runtime=getattr(request.app.state, "agent_runtime", None),
+        agents=getattr(request.app.state, "agents", None),
+    )
