@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-5"
     claude_code_command: str = "claude"
     claude_code_timeout_seconds: float = 60.0
+    # Chart analysis reads an image (Claude's own Read tool) on top of the
+    # ordinary text turn, so it gets a longer allowance than chat replies.
+    chart_analysis_timeout_seconds: float = 120.0
 
     # ---- Memory ----
     obsidian_vault_path: str = "./vault"

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from actions.plan_runtime import PlanRuntime
     from actions.runtime import ActionRuntime
     from app.voice_state import VoiceProviders
+    from assistant.chart_analysis import ChartAnalysisService
     from assistant.provider import AssistantProvider
     from assistant.router import AssistantRouter
     from memory.service import MemoryService
@@ -77,3 +78,7 @@ def get_plan_runtime(request: Request) -> PlanRuntime:
 
 def get_frontend_bridge(request: Request) -> FrontendCommandBridge:
     return request.app.state.frontend_bridge
+
+
+def get_chart_analysis_service(request: Request) -> ChartAnalysisService:
+    return request.app.state.chart_analysis_service

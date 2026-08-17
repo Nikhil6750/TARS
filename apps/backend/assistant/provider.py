@@ -22,6 +22,12 @@ class AssistantRequest:
     # Prior turns for this conversation, oldest first, as
     # {"role": "user"|"assistant", "content": str} dicts.
     history: list[dict] = field(default_factory=list)
+    # Path to an image on disk for the provider to look at (e.g. a captured
+    # chart screenshot). None for ordinary text turns. A path rather than
+    # inline bytes because the only current image-capable adapter
+    # (ClaudeCodeProvider) drives a CLI subprocess that reads files itself
+    # via its own Read tool -- see its respond() for how this is used.
+    image_path: str | None = None
 
 
 @dataclass

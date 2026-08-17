@@ -35,3 +35,16 @@ def build_assistant_provider(settings: Settings) -> AssistantProvider:
         f"Unknown ASSISTANT_PROVIDER '{settings.assistant_provider}' — expected "
         "one of: mock, claude_code, ollama, anthropic_api"
     )
+
+
+def build_chart_assistant_provider(settings: Settings) -> AssistantProvider:
+    """Chart analysis always uses ClaudeCodeProvider specifically (it's the
+    only adapter here that can look at an image, via its own Read tool),
+    regardless of which provider ASSISTANT_PROVIDER configures for ordinary
+    chat. Still the same AssistantProvider interface -- not a second
+    provider framework, just a second choke-point call for a feature that
+    has a fixed adapter requirement."""
+    return ClaudeCodeProvider(
+        command=settings.claude_code_command,
+        timeout_seconds=settings.chart_analysis_timeout_seconds,
+    )

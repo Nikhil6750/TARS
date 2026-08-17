@@ -42,6 +42,12 @@ models/
 *.sqlite
 *.sqlite3
 
+# Chart-analysis scratch images (assistant/chart_analysis.py) -- written
+# inside the project tree rather than the OS temp dir so Claude Code's own
+# Read tool can reach them without depending on --add-dir working against
+# whatever the OS temp location happens to be; deleted after each request.
+apps/backend/storage/tmp/
+
 # Logs
 *.log
 npm-debug.log*

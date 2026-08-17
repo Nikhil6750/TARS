@@ -23,7 +23,8 @@ from app.routers import action_plans, actions, assistant, events, health, memory
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
 from app.ws_manager import ConnectionManager
-from assistant.factory import build_assistant_provider
+from assistant.chart_analysis import ChartAnalysisService
+from assistant.factory import build_assistant_provider, build_chart_assistant_provider
 from assistant.providers.mock import MockAssistantProvider
 from events.generator import MockEventGenerator
 from memory.service import MemoryService
@@ -31,7 +32,12 @@ from memory.service import MemoryService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tars.app")
 
-MAX_BODY_BYTES = 1_048_576  # 1 MiB ceiling per security review
+# 16 MiB ceiling per security review, raised from the original 1 MiB to fit
+# a base64-encoded full-monitor screenshot for POST /api/v1/assistant/
+# analyze-chart (a 1920x1080 BMP capture is ~6 MiB raw, ~8 MiB base64) --
+# still a bounded ceiling appropriate for this backend's localhost-only,
+# single-user threat model (see the 0.0.0.0-binding warning below).
+MAX_BODY_BYTES = 16 * 1_048_576
 
 
 @asynccontextmanager
@@ -109,6 +115,10 @@ async def lifespan(app: FastAPI):
             settings.assistant_provider,
         )
         app.state.assistant_provider = MockAssistantProvider()
+
+    app.state.chart_analysis_service = ChartAnalysisService(
+        build_chart_assistant_provider(settings)
+    )
 
     generator: MockEventGenerator | None = None
     if settings.use_mock_trading_events:

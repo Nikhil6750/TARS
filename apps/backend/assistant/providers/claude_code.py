@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 from assistant.errors import AssistantProviderError
 from assistant.provider import AssistantProvider, AssistantReply, AssistantRequest
@@ -22,9 +23,38 @@ class ClaudeCodeProvider(AssistantProvider):
         self._timeout = timeout_seconds
 
     async def respond(self, request: AssistantRequest) -> AssistantReply:
-        args = [self._command, "-p", request.text, "--output-format", "json"]
+        prompt = request.text
+        allowed_tools: list[str] = []
+        extra_dir: str | None = None
+        if request.image_path:
+            # Claude Code's own Read tool opens local image files given a
+            # path -- no separate multimodal API call needed. Three things
+            # are required for this to actually happen rather than Claude
+            # replying that nothing was attached or that the read was
+            # blocked: (1) an explicit instruction to use the Read tool
+            # (naming the path alone is not read as an instruction to open
+            # it), (2) allow-listing exactly the Read tool, since a
+            # headless `-p` run has no TTY to approve a tool call
+            # interactively and it is otherwise silently skipped, and (3)
+            # `--add-dir` naming the image's own temp directory, since
+            # Claude Code scopes file access to the invocation's working
+            # directory by default and the image lives outside it. All
+            # three are scoped to exactly one read-only tool, against
+            # exactly the one directory holding the one file this backend
+            # itself just wrote (see assistant/chart_analysis.py) -- never
+            # write/execute access, and never an arbitrary caller-supplied
+            # path or directory.
+            prompt = f"Use the Read tool to open the image file at {request.image_path}, then: {prompt}"
+            allowed_tools = ["Read"]
+            extra_dir = str(Path(request.image_path).parent)
+
+        args = [self._command, "-p", prompt, "--output-format", "json"]
         if request.system_context:
             args += ["--append-system-prompt", request.system_context]
+        if allowed_tools:
+            args += ["--allowedTools", *allowed_tools]
+        if extra_dir:
+            args += ["--add-dir", extra_dir]
 
         try:
             process = await asyncio.create_subprocess_exec(

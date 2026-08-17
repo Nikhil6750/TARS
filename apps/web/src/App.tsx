@@ -35,6 +35,8 @@ import { SystemStatusView } from './components/system/SystemStatusView';
 import { SettingsView } from './components/settings/SettingsView';
 import { nativeBridge } from './services/native-bridge';
 
+const ANALYZE_CHART_PATTERN = /\b(analy[sz]e)\s+(this|the|my)?\s*chart\b/i;
+
 export const App: React.FC = () => {
   // App Settings
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
@@ -209,6 +211,76 @@ export const App: React.FC = () => {
     }
   }, [settings.audioEnabled, settings.apiEndpoint, settings.speechRate, settings.speechVolume]);
 
+  // "Analyze this chart": captures the active window through the real,
+  // backend-authorized capture flow (nativeBridge -> Tauri, same path the
+  // HUD's own screen-capture button uses) and the active-window context
+  // alongside it, then asks the backend's /analyze-chart endpoint (Claude,
+  // via the existing AssistantProvider architecture) for a qualitative,
+  // uncertainty-aware read. Reuses handleIncomingAssistantMessage for
+  // display, TTS, and the THINKING/SPEAKING/IDLE state machine -- no new
+  // UI or state plumbing.
+  const handleAnalyzeChart = useCallback(async () => {
+    const convId = 'conv_main_session';
+    const newMessage = (content: string, error?: string, providerName?: string): TARSAssistantMessage => ({
+      schema_version: '1.0.0',
+      message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
+      conversation_id: convId,
+      timestamp: new Date().toISOString(),
+      role: 'assistant',
+      content,
+      input_mode: 'text',
+      error: error ?? null,
+      providers: providerName ? { assistant: providerName } : undefined,
+    });
+
+    setCompanionState('THINKING');
+    try {
+      const [activeContext, capture] = await Promise.all([
+        nativeBridge.getActiveWindowContext(),
+        nativeBridge.captureActiveWindow(true),
+      ]);
+
+      if (capture.is_secure_desktop) {
+        handleIncomingAssistantMessage(
+          newMessage(
+            "I can't capture the screen right now — a secure desktop or credential prompt is active.",
+            'secure_desktop_blocked'
+          )
+        );
+        return;
+      }
+      if (capture.error) {
+        handleIncomingAssistantMessage(
+          newMessage(`I couldn't capture the screen to analyze it: ${capture.error}`, capture.error)
+        );
+        return;
+      }
+
+      const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/analyze-chart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext }),
+      });
+
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+        const detail = typeof errBody.detail === 'string' ? errBody.detail : `HTTP ${response.status}`;
+        handleIncomingAssistantMessage(newMessage(`Chart analysis failed: ${detail}`, detail));
+        return;
+      }
+
+      const result = await response.json();
+      const spoken: string =
+        typeof result.speech_text === 'string' && result.speech_text
+          ? result.speech_text
+          : String(result.market_context || 'No analysis available.');
+      handleIncomingAssistantMessage(newMessage(spoken, undefined, result.provider));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      handleIncomingAssistantMessage(newMessage(`Chart analysis error: ${msg}`, msg));
+    }
+  }, [settings.apiEndpoint, handleIncomingAssistantMessage]);
+
   // Fetch initial state from HTTP backend on mount
   useEffect(() => {
     async function fetchInitialBackendState() {
@@ -351,6 +423,14 @@ export const App: React.FC = () => {
           return;
         }
 
+        // Step 2.75: "Analyze this chart" also bypasses the general LLM
+        // query -- it needs a screen capture attached, which the plain
+        // /assistant/query endpoint doesn't accept.
+        if (ANALYZE_CHART_PATTERN.test(transcript)) {
+          await handleAnalyzeChart();
+          return;
+        }
+
         // Step 3: Query assistant endpoint with transcribed text
         const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
           method: 'POST',
@@ -400,6 +480,12 @@ export const App: React.FC = () => {
     };
 
     handleIncomingAssistantMessage(userMsg);
+
+    if (ANALYZE_CHART_PATTERN.test(text)) {
+      await handleAnalyzeChart();
+      return;
+    }
+
     setCompanionState('THINKING');
 
     try {
