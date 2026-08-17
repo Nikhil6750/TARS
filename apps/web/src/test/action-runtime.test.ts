@@ -5,7 +5,7 @@ describe('Wave 2A ActionRuntimeClient', () => {
   let client: ActionRuntimeClient;
 
   beforeEach(() => {
-    client = new ActionRuntimeClient('http://127.0.0.1:8000');
+    client = new ActionRuntimeClient('http://127.0.0.1:59999');
     vi.restoreAllMocks();
   });
 

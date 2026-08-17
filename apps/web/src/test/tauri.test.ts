@@ -29,9 +29,9 @@ describe('Tauri 2 Configuration & Service Compatibility', () => {
     expect(tauriConfig.app.windows.length).toBeGreaterThan(0);
     const mainWindow = tauriConfig.app.windows[0];
     expect(mainWindow.label).toBe('main');
-    expect(mainWindow.width).toBe(1280);
-    expect(mainWindow.height).toBe(840);
-    expect(mainWindow.minWidth).toBe(380);
+    expect(mainWindow.width).toBe(440);
+    expect(mainWindow.height).toBe(740);
+    expect(mainWindow.minWidth).toBe(360);
     expect(mainWindow.minHeight).toBe(480);
 
     // Capabilities

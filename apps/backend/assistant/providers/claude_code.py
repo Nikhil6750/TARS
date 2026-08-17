@@ -59,6 +59,7 @@ class ClaudeCodeProvider(AssistantProvider):
         try:
             process = await asyncio.create_subprocess_exec(
                 *args,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -98,3 +99,87 @@ class ClaudeCodeProvider(AssistantProvider):
                 "Claude Code CLI JSON output had no 'result' field"
             )
         return AssistantReply(text=result, provider=self.name)
+
+    async def respond_stream(self, request: AssistantRequest):
+        prompt = request.text
+        allowed_tools: list[str] = []
+        extra_dir: str | None = None
+        if request.image_path:
+            prompt = f"Use the Read tool to open the image file at {request.image_path}, then: {prompt}"
+            allowed_tools = ["Read"]
+            extra_dir = str(Path(request.image_path).parent)
+
+        args = [self._command, "-p", prompt, "--output-format", "stream-json", "--verbose"]
+        if request.system_context:
+            args += ["--append-system-prompt", request.system_context]
+        if allowed_tools:
+            args += ["--allowedTools", *allowed_tools]
+        if extra_dir:
+            args += ["--add-dir", extra_dir]
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *args,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise AssistantProviderError(
+                f"Claude Code CLI ('{self._command}') not found on PATH — "
+                "install it or set CLAUDE_CODE_COMMAND to its full path"
+            ) from exc
+
+        accumulated_text = ""
+        last_emitted_len = 0
+        final_result_text = ""
+
+        try:
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                decoded = line.decode(errors="replace").strip()
+                if not decoded or not decoded.startswith("{"):
+                    continue
+                try:
+                    event = json.loads(decoded)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type")
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {})
+                    text_chunk = delta.get("text", "")
+                    if text_chunk:
+                        accumulated_text += text_chunk
+                        yield {"type": "delta", "text": text_chunk}
+                elif event_type == "assistant":
+                    msg = event.get("message", {})
+                    content_list = msg.get("content", [])
+                    curr_full = "".join(c.get("text", "") for c in content_list if isinstance(c, dict))
+                    if len(curr_full) > last_emitted_len:
+                        new_piece = curr_full[last_emitted_len:]
+                        last_emitted_len = len(curr_full)
+                        accumulated_text = curr_full
+                        yield {"type": "delta", "text": new_piece}
+                elif event_type == "result":
+                    final_result_text = event.get("result", "")
+                    if final_result_text and len(final_result_text) > len(accumulated_text):
+                        new_piece = final_result_text[len(accumulated_text):]
+                        accumulated_text = final_result_text
+                        yield {"type": "delta", "text": new_piece}
+
+            await process.wait()
+            if process.returncode != 0:
+                stderr_bytes = await process.stderr.read()
+                err_text = stderr_bytes.decode(errors="replace")
+                if not accumulated_text:
+                    raise AssistantProviderError(f"Claude Code stream exited {process.returncode}: {err_text[:500]}")
+
+            final_text = final_result_text or accumulated_text
+            yield {"type": "complete", "text": final_text, "provider": self.name}
+        except Exception:
+            process.kill()
+            await process.wait()
+            raise

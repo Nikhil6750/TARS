@@ -24,7 +24,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ttsVoice: 'default',
   speechRate: 1.0,
   speechVolume: 0.9,
-  compactMode: false,
+  compactMode: true,
   hapticFeedback: true,
   mockGeneratorActive: false, // Default connected to real backend
   mockIntervalSeconds: 8,

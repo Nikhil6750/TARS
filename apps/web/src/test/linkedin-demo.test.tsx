@@ -113,6 +113,28 @@ describe('LinkedIn Demo UI & Wake Experience Tests', () => {
       expect(onAnalyzeChart).toHaveBeenCalledOnce();
     });
 
+    it('renders progressive live streaming text directly under the Orb when analyzing', async () => {
+      await act(async () => {
+        render(
+          <HUDOverlay
+            companionState="THINKING"
+            onExpand={vi.fn()}
+            activeSetups={[]}
+            criticalWarnings={[]}
+            isListening={false}
+            onTogglePushToTalk={vi.fn()}
+            audioVolume={0}
+            isAnalyzingChart={true}
+            streamedAnalysisText="Observing breakout above 1.0850 key level with elevated volume..."
+          />
+        );
+      });
+
+      expect(screen.getAllByText(/ANALYZING ACTIVE CHART.../i).length).toBeGreaterThan(0);
+      expect(screen.getByText(/Observing breakout above 1.0850 key level/i)).toBeInTheDocument();
+      expect(screen.getByText(/Claude Code · Live/i)).toBeInTheDocument();
+    });
+
     it('wakeWordService reports local status truthfully without claiming external cloud', () => {
       const status = wakeWordService.getStatus();
       expect(status.targetPhrase).toBe('Hey TARS');

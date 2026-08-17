@@ -10,45 +10,32 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (LINKEDIN DEMO UI + WAKE EXPERIENCE)
+## Latest handoff (LINKEDIN DEMO UI + WAKE EXPERIENCE + STREAMING FIX)
 
-**Status**: COMPLETE — Premium floating TARS voice HUD, quantum orb visualizer (`TARSOrb`) with hardware-accelerated 60fps animations and real-time audio amplitude reactivity, local continuous wake-word phrase detection ("Hey TARS" / "Analyze this chart"), structured chart analysis visualization card (`ChartAnalysisCard`), real-time TTS amplitude synchronization, Esc / close to tray, and demo trigger buttons fully built and verified.
+**Status**: COMPLETE — Premium floating TARS voice HUD, quantum orb visualizer (`TARSOrb`) with hardware-accelerated 60fps animations and real-time audio amplitude reactivity, local continuous wake-word phrase detection ("Hey TARS" / "Analyze this chart"), real-time SSE chart analysis streaming from Claude Code (`/api/v1/assistant/analyze-chart/stream`), progressive token rendering card with live blinking cursor, structured chart analysis visualization card (`ChartAnalysisCard`), real-time TTS amplitude synchronization, Esc / close to tray, and native release build compiled and verified.
 **Branch**: `feature/linkedin-demo`
-**Commit SHA**: `e2ec4351a6d0f4772efe1518dfebd36d99e7c6d0`
+**Commit SHA**: `HEAD` (to be recorded)
 **Work completed**:
-1. **TARS Quantum Orb Visualizer (`apps/web/src/components/character/TARSOrb.tsx`)**:
+1. **Orb/HUD Native Summon & Default Experience (`apps/web/src-tauri/tauri.conf.json`, `apps/web/src/services/storage.ts`, `apps/web/src/App.tsx`)**:
+   - Configured native window size to `440x740`, `alwaysOnTop: true`, `title: "TARS — Trading Companion"`.
+   - Set `DEFAULT_SETTINGS.compactMode = true` so floating Orb HUD is the primary surface on startup.
+   - Updated `handleSummonHUD` to set `compactMode: true` and summon/focus the window on `Ctrl+Shift+Space`, `Ctrl+Shift+T`, and tray summon.
+   - Initialized microphone permission check on mount.
+2. **Real-Time Claude Code SSE Streaming (`apps/backend/`, `apps/web/src/App.tsx`, `apps/web/src/components/hud/HUDOverlay.tsx`)**:
+   - `ClaudeCodeProvider.respond_stream`: Uses `claude -p "<prompt>" --output-format stream-json --verbose` with `stdin=asyncio.subprocess.DEVNULL` for zero prompt timeout delay, streaming token deltas in real-time.
+   - `ChartAnalysisService.analyze_stream`: Async generator streaming stdout chunks from vision-read Claude process.
+   - `POST /api/v1/assistant/analyze-chart/stream`: FastAPI `StreamingResponse` emitting Server-Sent Events (`data: {"type": "delta", "text": "..."}`).
+   - Frontend `handleAnalyzeChart`: Consumes SSE stream, progressively rendering text generation under the Orb in real-time like ChatGPT.
+   - Seamlessly transitions from live stream card -> `ChartAnalysisCard` -> TTS speech with waveform reactivity.
+3. **TARS Quantum Orb Visualizer (`apps/web/src/components/character/TARSOrb.tsx`)**:
    - Preserves high-detail generated orb design (`apps/web/public/assets/tars-orb.png`).
    - 60fps hardware-accelerated transforms (`scale3d`, `translate3d`, `opacity`).
-   - State-driven animations:
-     - `IDLE`: Subtle breathing scale (0.98 <-> 1.02), low cyan ambient glow (opacity 0.22), minimal outer ring rotation.
-     - `WAKE`: Quick smooth expansion (scale 1.12), bright shockwave burst (`animate-ping`, opacity 0.85), ~400ms duration.
-     - `LISTENING`: Concentric rings and waveform arcs react dynamically to REAL microphone amplitude via spring interpolation (no jitter).
-     - `THINKING`: Counter-rotating gyroscopic orbital rings, restrained violet/cyan scanner arc, zero fake progress percentages.
-     - `SPEAKING`: Reacts to REAL TTS audio volume from backend voice synthesis via live `AudioContext` FFT analyser node.
-     - `ALERT` / `WARNING`: Gold/amber setup alert and crimson risk warnings.
-2. **Local Continuous Wake Phrase Listener (`apps/web/src/services/wake-word.ts`)**:
-   - Truthful architecture: Does NOT claim openWakeWord has a custom TARS model.
-   - Implements local continuous phrase listener using WebView2 / Web Speech API (`"Hey TARS"`, `"Analyze this chart"`) with local Whisper VAD fallback.
-   - Zero wake audio sent to cloud services.
-   - User-toggleable state displayed truthfully in HUD header (`WAKE: ON` / `WAKE: OFF`).
-   - Transitions state: `WAKE` -> `LISTENING` -> captures command -> `THINKING` -> `SPEAKING`.
-3. **Structured Chart Analysis Presentation (`apps/web/src/components/hud/ChartAnalysisCard.tsx`)**:
-   - Displays ticker/instrument and timeframe badge (`EURUSD · 4H`), market context summary, key levels chips, hedged possible read, invalidation condition, and risk notes.
-   - Mandatory non-negotiable disclaimer clearly rendered: "Qualitative read from TARS assistant. Not a quant_brain signal. No confidence score."
-   - Replay Voice Read button allowing re-triggering speech playback with live waveform reactivity.
-4. **Elevated Floating Voice HUD (`apps/web/src/components/hud/HUDOverlay.tsx`)**:
-   - Centered `TARSOrb` hero visualizer.
-   - One-click backup demo trigger: "⚡ ANALYZE ACTIVE CHART" button.
-   - Live transcript preview pill when speaking.
-   - `Esc` key down listener and Close 'X' button to hide HUD back to tray.
-   - `Ctrl+Shift+Space` global summon shortcut integration.
-5. **Real-Time TTS Amplitude Reactivity (`apps/web/src/services/audio.ts`)**:
-   - Enhanced `synthesizeAndPlay` and `playAudioBytes` with live `AnalyserNode` frequency bin summation callback (`onAudioVolume`) to drive real-time audio reactivity during speech synthesis.
-6. **Tests & Verification**:
-   - `linkedin-demo.test.tsx` (7 tests): TARSOrb states, ChartAnalysisCard presentation, disclaimer verification, demo trigger click handler, and truthful wake status.
-   - 17 test files, 104/104 tests passing (100%).
+   - Full state transitions: `IDLE` -> `WAKE` -> `LISTENING` -> `THINKING` -> `SPEAKING`.
+4. **Tests & Verification**:
+   - `linkedin-demo.test.tsx` (8 tests): TARSOrb states, progressive streaming card, ChartAnalysisCard presentation, disclaimer verification, demo trigger click handler, and truthful wake status.
+   - 17 test files, 105/105 tests passing (100%).
    - Production Vite bundle (`npm run build`) succeeds cleanly.
-   - Tauri native Windows release build compiled.
+   - Tauri native Windows release build compiled (`tars-companion.exe` and `TARS_1.0.0_x64-setup.exe`).
 
 ---
 

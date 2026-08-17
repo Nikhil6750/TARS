@@ -168,6 +168,58 @@ class ChartAnalysisService:
 
         return _parse_reply(reply.text, reply.provider)
 
+    async def analyze_stream(
+        self,
+        *,
+        image_bytes: bytes,
+        image_format: str,
+        conversation_id: str,
+        active_context_text: str = "",
+        goal_text: str = "Analyze this chart.",
+    ):
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
+            image.load()
+        except UnidentifiedImageError as exc:
+            raise ChartAnalysisError(
+                f"Captured image bytes could not be decoded (declared format "
+                f"'{image_format}'); refusing to send an unreadable capture "
+                "to the model."
+            ) from exc
+
+        _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+        image_path = _SCRATCH_DIR / f"chart-{uuid4().hex}.png"
+        image.convert("RGB").save(image_path, format="PNG")
+        try:
+            system_context = _SYSTEM_PROMPT
+            if active_context_text:
+                system_context += (
+                    "\n\nActive window context (for grounding only, not "
+                    f"necessarily part of the chart itself): {active_context_text}"
+                )
+
+            request = AssistantRequest(
+                text=goal_text,
+                conversation_id=conversation_id,
+                system_context=system_context,
+                image_path=str(image_path),
+            )
+            if hasattr(self._provider, "respond_stream"):
+                async for event in self._provider.respond_stream(request):
+                    if event.get("type") == "delta":
+                        yield {"type": "delta", "text": event.get("text", "")}
+                    elif event.get("type") == "complete":
+                        final_text = event.get("text", "")
+                        provider_name = event.get("provider", self._provider.name)
+                        result = _parse_reply(final_text, provider_name)
+                        yield {"type": "complete", "result": result.to_dict()}
+            else:
+                reply = await self._provider.respond(request)
+                result = _parse_reply(reply.text, reply.provider)
+                yield {"type": "complete", "result": result.to_dict()}
+        finally:
+            image_path.unlink(missing_ok=True)
+
 
 def _parse_reply(text: str, provider: str) -> ChartAnalysisResult:
     match = _JSON_OBJECT.search(text)

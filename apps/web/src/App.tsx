@@ -58,6 +58,7 @@ export const App: React.FC = () => {
   // Chart Analysis & Demo State
   const [latestChartAnalysis, setLatestChartAnalysis] = useState<ChartAnalysisData | null>(null);
   const [isAnalyzingChart, setIsAnalyzingChart] = useState(false);
+  const [streamedAnalysisText, setStreamedAnalysisText] = useState<string>('');
   const [liveTranscript, setLiveTranscript] = useState<string>('');
   const [wakeStatus, setWakeStatus] = useState<WakeWordStatusInfo>(() => wakeWordService.getStatus());
 
@@ -84,6 +85,11 @@ export const App: React.FC = () => {
     });
   }, []);
 
+  // Request microphone permission on mount so WebView2 / browser allows voice right away
+  useEffect(() => {
+    audioService.requestMicrophonePermission().catch(() => {});
+  }, []);
+
   // Handle Compact Window Mode for Tauri
   useEffect(() => {
     toggleCompactWindow(settings.compactMode);
@@ -91,34 +97,35 @@ export const App: React.FC = () => {
 
   // Register Global & In-App Shortcuts (Ctrl+Shift+Space / Ctrl+Shift+T / Ctrl+Shift+V)
   useEffect(() => {
-    const handleToggleHUD = () => {
+    const handleSummonHUD = () => {
       setSettings((prev) => {
-        const next = { ...prev, compactMode: !prev.compactMode };
+        const next = { ...prev, compactMode: true };
         saveSettings(next);
         return next;
       });
+      nativeBridge.summonHUD('compact');
     };
 
     // 1. In-App Keydown Listener (for web, PWA, and direct in-window input)
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === ' ' || e.code === 'Space')) {
         e.preventDefault();
-        handleToggleHUD();
+        handleSummonHUD();
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
         e.preventDefault();
-        handleToggleHUD();
+        handleSummonHUD();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
 
     // 2. Native OS Global Shortcuts
-    registerGlobalShortcut('CommandOrControl+Shift+Space', handleToggleHUD);
-    registerGlobalShortcut('CommandOrControl+Shift+T', handleToggleHUD);
+    registerGlobalShortcut('CommandOrControl+Shift+Space', handleSummonHUD);
+    registerGlobalShortcut('CommandOrControl+Shift+T', handleSummonHUD);
 
     // 3. Native event bridge listeners (tars://summon-hud and tars://ptt-toggle)
     let cleanupNativeListeners: (() => void) | undefined;
     nativeBridge.listenToNativeEvents(
-      () => handleToggleHUD(),
+      () => handleSummonHUD(),
       () => handleTogglePushToTalk()
     ).then((cleanup) => {
       cleanupNativeListeners = cleanup;
@@ -251,6 +258,9 @@ export const App: React.FC = () => {
 
     setIsAnalyzingChart(true);
     setCompanionState('THINKING');
+    setStreamedAnalysisText('Capturing active screen and analyzing chart...');
+    setLatestChartAnalysis(null);
+
     try {
       const [activeContext, capture] = await Promise.all([
         nativeBridge.getActiveWindowContext(),
@@ -258,6 +268,7 @@ export const App: React.FC = () => {
       ]);
 
       if (capture.is_secure_desktop) {
+        setStreamedAnalysisText('');
         handleIncomingAssistantMessage(
           newMessage(
             "I can't capture the screen right now — a secure desktop or credential prompt is active.",
@@ -267,34 +278,99 @@ export const App: React.FC = () => {
         return;
       }
       if (capture.error) {
+        setStreamedAnalysisText('');
         handleIncomingAssistantMessage(
           newMessage(`I couldn't capture the screen to analyze it: ${capture.error}`, capture.error)
         );
         return;
       }
 
-      const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/analyze-chart`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext }),
-      });
+      setStreamedAnalysisText('Chart captured. Streaming Claude analysis...\n');
 
-      if (!response.ok) {
-        const errBody = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
-        const detail = typeof errBody.detail === 'string' ? errBody.detail : `HTTP ${response.status}`;
-        handleIncomingAssistantMessage(newMessage(`Chart analysis failed: ${detail}`, detail));
-        return;
+      let streamCompleted = false;
+      try {
+        const streamRes = await fetch(`${settings.apiEndpoint}/api/v1/assistant/analyze-chart/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext }),
+        });
+
+        if (streamRes.ok && streamRes.body) {
+          const reader = streamRes.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let buffer = '';
+          let accumulatedText = '';
+          let finalData: ChartAnalysisData | null = null;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('data: ')) {
+                try {
+                  const event = JSON.parse(trimmed.slice(6));
+                  if (event.type === 'delta' && typeof event.text === 'string') {
+                    accumulatedText += event.text;
+                    setStreamedAnalysisText(accumulatedText);
+                  } else if (event.type === 'complete' && event.result) {
+                    finalData = event.result as ChartAnalysisData;
+                    streamCompleted = true;
+                  }
+                } catch {
+                  // ignore non-json SSE frames
+                }
+              }
+            }
+          }
+
+          if (finalData) {
+            setLatestChartAnalysis(finalData);
+            setStreamedAnalysisText('');
+            const spoken: string =
+              typeof finalData.speech_text === 'string' && finalData.speech_text
+                ? finalData.speech_text
+                : String(finalData.market_context || 'Chart analysis complete.');
+            handleIncomingAssistantMessage(newMessage(spoken, undefined, finalData.provider));
+            return;
+          }
+        }
+      } catch (streamErr) {
+        console.warn('[TARS Chart Stream] Stream error, falling back to standard endpoint:', streamErr);
       }
 
-      const result = await response.json();
-      setLatestChartAnalysis(result);
-      const spoken: string =
-        typeof result.speech_text === 'string' && result.speech_text
-          ? result.speech_text
-          : String(result.market_context || 'No analysis available.');
-      handleIncomingAssistantMessage(newMessage(spoken, undefined, result.provider));
+      // Fallback: standard HTTP endpoint if stream was unavailable
+      if (!streamCompleted) {
+        const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/analyze-chart`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext }),
+        });
+
+        if (!response.ok) {
+          const errBody = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+          const detail = typeof errBody.detail === 'string' ? errBody.detail : `HTTP ${response.status}`;
+          setStreamedAnalysisText('');
+          handleIncomingAssistantMessage(newMessage(`Chart analysis failed: ${detail}`, detail));
+          return;
+        }
+
+        const result = await response.json();
+        setLatestChartAnalysis(result);
+        setStreamedAnalysisText('');
+        const spoken: string =
+          typeof result.speech_text === 'string' && result.speech_text
+            ? result.speech_text
+            : String(result.market_context || 'No analysis available.');
+        handleIncomingAssistantMessage(newMessage(spoken, undefined, result.provider));
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      setStreamedAnalysisText('');
       handleIncomingAssistantMessage(newMessage(`Chart analysis error: ${msg}`, msg));
     } finally {
       setIsAnalyzingChart(false);
@@ -643,6 +719,7 @@ export const App: React.FC = () => {
           }}
           liveTranscript={liveTranscript}
           isAnalyzingChart={isAnalyzingChart}
+          streamedAnalysisText={streamedAnalysisText}
         />
       </div>
     );

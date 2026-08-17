@@ -59,6 +59,7 @@ interface HUDOverlayProps {
   onToggleWakeListening?: () => void;
   liveTranscript?: string;
   isAnalyzingChart?: boolean;
+  streamedAnalysisText?: string;
 }
 
 export const HUDOverlay: React.FC<HUDOverlayProps> = ({
@@ -79,6 +80,7 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
   onToggleWakeListening,
   liveTranscript,
   isAnalyzingChart = false,
+  streamedAnalysisText,
 }) => {
   // Active foreground window context & monitors
   const [activeContext, setActiveContext] = useState<ActiveWindowContext | null>(null);
@@ -503,18 +505,9 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
             result={latestResult}
             onDismiss={() => setLatestResult(null)}
           />
-        ) : latestChartAnalysis ? (
-          /* Structured Chart Analysis Read */
-          <div className="py-1">
-            <ChartAnalysisCard
-              analysis={latestChartAnalysis}
-              onDismiss={onClearChartAnalysis}
-              isSpeaking={companionState === 'SPEAKING'}
-            />
-          </div>
         ) : (
           /* Primary TARS Quantum Voice Core & Hero Visualizer */
-          <div className="flex flex-col items-center justify-center py-2 flex-1">
+          <div className="flex flex-col items-center justify-start py-1 flex-1">
             <TARSOrb
               state={companionState}
               audioVolume={audioVolume}
@@ -524,21 +517,47 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
 
             {/* Live Transcript / Speech Indicator */}
             {liveTranscript && isListening && (
-              <div className="mt-3 px-3 py-1 bg-slate-900/90 border border-emerald-500/40 rounded-full text-[11px] font-mono text-emerald-300 animate-pulse text-center max-w-[90%] truncate">
+              <div className="mt-2 px-3 py-1 bg-slate-900/90 border border-emerald-500/40 rounded-full text-[11px] font-mono text-emerald-300 animate-pulse text-center max-w-[90%] truncate">
                 &ldquo;{liveTranscript}&rdquo;
               </div>
             )}
 
+            {/* Progressive Live Streaming Text Generation Card */}
+            {streamedAnalysisText ? (
+              <div className="mt-2.5 w-full bg-[#050c18]/95 border border-cyan-500/40 rounded-xl p-3 shadow-[0_0_25px_rgba(0,240,255,0.15)] backdrop-blur-md animate-fade-in">
+                <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-cyan-500/20 text-[10px] font-mono text-cyan-300">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                    <span className="font-bold">ANALYZING ACTIVE CHART...</span>
+                  </div>
+                  <span className="text-[9px] text-slate-400">Claude Code · Live</span>
+                </div>
+                <div className="font-mono text-[11px] text-slate-200 whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto custom-scrollbar">
+                  {streamedAnalysisText}
+                  <span className="inline-block w-2 h-3 bg-cyan-400 animate-pulse ml-0.5 align-middle" />
+                </div>
+              </div>
+            ) : latestChartAnalysis ? (
+              /* Structured Chart Analysis Read */
+              <div className="mt-2 w-full">
+                <ChartAnalysisCard
+                  analysis={latestChartAnalysis}
+                  onDismiss={onClearChartAnalysis}
+                  isSpeaking={companionState === 'SPEAKING'}
+                />
+              </div>
+            ) : null}
+
             {/* Primary Demo Trigger: Analyze Active Chart Button */}
-            <div className="mt-4 w-full px-2">
+            <div className="mt-3 w-full px-1">
               <button
                 type="button"
                 onClick={handleTriggerAnalyzeChart}
                 disabled={isAnalyzingChart || companionState === 'THINKING'}
-                className="w-full group relative flex items-center justify-center gap-2 py-2.5 px-4 bg-gradient-to-r from-cyan-950/80 via-[#0a182c] to-cyan-950/80 hover:from-cyan-900 hover:to-cyan-900 border border-cyan-500/50 hover:border-cyan-400 rounded-xl text-xs font-mono font-bold text-cyan-200 hover:text-cyan-100 shadow-[0_0_20px_rgba(0,240,255,0.2)] hover:shadow-[0_0_30px_rgba(0,240,255,0.4)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full group relative flex items-center justify-center gap-2 py-2 px-3 bg-gradient-to-r from-cyan-950/80 via-[#0a182c] to-cyan-950/80 hover:from-cyan-900 hover:to-cyan-900 border border-cyan-500/50 hover:border-cyan-400 rounded-xl text-xs font-mono font-bold text-cyan-200 hover:text-cyan-100 shadow-[0_0_20px_rgba(0,240,255,0.2)] hover:shadow-[0_0_30px_rgba(0,240,255,0.4)] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <div className="absolute inset-0 rounded-xl bg-cyan-400/5 group-hover:bg-cyan-400/10 transition-colors" />
-                <Sparkles className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
+                <Sparkles className="w-3.5 h-3.5 text-cyan-400 group-hover:scale-110 transition-transform" />
                 <span>
                   {isAnalyzingChart || companionState === 'THINKING'
                     ? 'ANALYZING ACTIVE CHART...'
