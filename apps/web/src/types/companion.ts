@@ -52,6 +52,10 @@ export interface AppSettings {
   mockGeneratorActive: boolean;
   mockIntervalSeconds: number;
   theme: 'dark-terminal' | 'cyber-amber' | 'deep-void' | 'emerald-matrix';
+  autostartEnabled?: boolean;
+  closeToTray?: boolean;
+  globalSummonHotkey?: string;
+  globalPttHotkey?: string;
 }
 
 export interface MemoryItem {

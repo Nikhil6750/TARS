@@ -10,7 +10,98 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (NATIVE CERTIFICATION BLOCKERS RESOLVED & VERIFIED)
+## Latest handoff (WAVE 2A: WINDOWS-NATIVE TAURI HUD & ACTION RUNTIME)
+
+**Status**: COMPLETE — Windows-native desktop shell, system tray lifecycle, Win32 active foreground window bridge, compact HUD overlay, Action Runtime client, confirmation/deny cards, and real ActionResult rendering fully built and verified.
+**Branch**: `feature/wave2-native-shell`
+**Commit SHA**: `7f47480a26e4930eabd3ccd521ac25c1429a3555`
+**MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231
+**Windows SDK**: Windows 10.0.26200 x86_64 SDK
+**Cargo Target**: `D:\TARS-cache\cargo-target\release\tars-companion.exe`
+
+**Work completed**:
+1. **Windows-Native Shell & Background Lifecycle (`apps/web/src-tauri/`)**:
+   - Implemented close-to-tray window event interception in `lib.rs`: `WindowEvent::CloseRequested` prevents window destroy and calls `window.hide()`, keeping TARS background-active.
+   - Built full Windows System Tray menu with "Summon TARS HUD (Ctrl+Shift+Space)", "Open Main Dashboard", "Trigger Voice PTT (Ctrl+Shift+V)", and "Quit TARS", plus left-click toggle.
+   - Implemented user-controlled Windows autostart toggle via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\TARS` using the `winreg` crate.
+   - Registered global hotkeys (`Ctrl+Shift+Space`, `Ctrl+Shift+T`, `Ctrl+Shift+V`) triggering HUD summon and PTT broadcast events.
+   - Implemented Win32 active foreground window bridge (`GetForegroundWindow`, `GetWindowTextW`, `GetWindowThreadProcessId`, `QueryFullProcessImageNameW`, `GetWindowRect`) returning `{ executable, process_id, window_title, window_bounds, captured_at }` without screen capture.
+   - Verified native build with `cargo build --release` targeting `D:\TARS-cache\cargo-target` (completed cleanly in 3m 45s).
+
+2. **Action Runtime Client & Deterministic Interpreter (`apps/web/src/services/actions.ts`, `apps/web/src/contracts/action-validator.ts`)**:
+   - Defined canonical TypeScript types matching `contracts/action-request.schema.json` and `contracts/action-result.schema.json`.
+   - Built strict JSON schema validator for runtime payload verification.
+   - Implemented `ActionRuntimeClient` for dispatching actions (`POST /api/v1/actions`), polling/subscribing, and responding to confirmations (`POST /api/v1/actions/{id}/confirm` and `/deny`).
+   - Implemented zero-latency deterministic command interpreter (M2A Criterion 12) for `focus`, `launch`, `terminal`, `open url`, `search files`, and `search obsidian` with automatic `RiskLevel` evaluation (`CONFIRM_REQUIRED` for terminal, `BLOCKED` for destructive commands).
+
+3. **Interactive Compact HUD Surface (`apps/web/src/components/hud/`)**:
+   - `ActiveContextBar`: Foreground executable badge, window title, and live Win32 refresh button.
+   - `ActionConfirmationCard`: Interactive authorization card for `CONFIRM_REQUIRED` requests with explicit confirmation/denial flow and reason tracking.
+   - `ActionResultView`: Renders canonical execution results, risk levels, structured JSON payloads, and errors with one-click copy.
+   - `HUDOverlay`: Assembles active context bar, companion character visualizer, command input with instant deterministic bypass preview, market setup alerts, and global PTT trigger.
+   - Updated `SettingsView.tsx` with Windows autostart toggle and global shortcut reference.
+
+4. **Test Suite**:
+   - `action-contracts.test.ts` (5 tests): Strict schema validation for requests/results.
+   - `action-runtime.test.ts` (11 tests): Deterministic parsing, endpoint dispatch, confirmation resolution, and blocked risk levels.
+   - `native-bridge.test.ts` (4 tests): Tauri command invocations and browser mock fallbacks.
+   - `hud.test.tsx` (4 tests): HUD UI components rendering, confirmation cards, and result views.
+   - Full Vitest suite: 11 test files, 57/57 tests passing (100%).
+
+**Files changed**:
+- `apps/web/src-tauri/Cargo.toml`
+- `apps/web/src-tauri/Cargo.lock`
+- `apps/web/src-tauri/src/lib.rs`
+- `apps/web/src/types/actions.ts`
+- `apps/web/src/types/companion.ts`
+- `apps/web/src/contracts/action-validator.ts`
+- `apps/web/src/services/actions.ts`
+- `apps/web/src/services/native-bridge.ts`
+- `apps/web/src/services/tauri.ts`
+- `apps/web/src/services/storage.ts`
+- `apps/web/src/components/hud/ActiveContextBar.tsx`
+- `apps/web/src/components/hud/ActionConfirmationCard.tsx`
+- `apps/web/src/components/hud/ActionResultView.tsx`
+- `apps/web/src/components/hud/HUDOverlay.tsx`
+- `apps/web/src/components/settings/SettingsView.tsx`
+- `apps/web/src/App.tsx`
+- `apps/web/vitest.config.ts`
+- `apps/web/src/test/action-contracts.test.ts`
+- `apps/web/src/test/action-runtime.test.ts`
+- `apps/web/src/test/native-bridge.test.ts`
+- `apps/web/src/test/hud.test.tsx`
+- `docs/coordination/wave2/m2a/antigravity.done.json`
+- `docs/coordination/handoffs/antigravity.md`
+
+**Interfaces exposed**:
+- `nativeBridge.getActiveWindowContext()`: Win32 active foreground process and window metadata.
+- `nativeBridge.getAutostartStatus()` / `nativeBridge.setAutostart(enabled)`: Windows registry autostart.
+- `nativeBridge.summonHUD(mode)` / `hideHUD()` / `toggleHUD()` / `exitApp()`: Native window control.
+- `actionRuntimeClient.submitAction(request)`: Submits ActionRequest to Action Runtime.
+- `actionRuntimeClient.respondToConfirmation(requestId, confirmed, reason)`: Confirms/denies actions.
+- `actionRuntimeClient.parseDeterministicCommand(text, context)`: Instant deterministic shortcut compiler.
+- `validateActionRequest(raw)` / `validateActionResult(raw)`: Contract validation functions.
+
+**Tests run**:
+- `vitest run` — 11 test files, 57 passed (100%).
+- `tsc --noEmit` — 0 errors.
+- `npm run lint` — 0 errors, 0 warnings.
+- `npm run build` — Successful Vite production bundle with PWA service worker.
+- `cargo build --release` — Successful native Windows `.exe` build with optimizations.
+
+**Known limitations**:
+- None within web/desktop shell ownership.
+
+**Exact dependencies required from other agents**:
+- Claude Code (`apps/backend/`): Implement backend Action Runtime (`/api/v1/actions` endpoints) and Windows skills execution engine.
+- Codex (`tests/`, `tools/`): M2A contract verification across frontend/backend boundary.
+
+**Next recommended action**:
+- Hand off to coordinator for integration verification with backend Action Runtime and cross-agent validation.
+
+---
+
+## Previous handoff (NATIVE CERTIFICATION BLOCKERS RESOLVED & VERIFIED)
 
 **Status**: COMPLETE — All native Tauri certification blockers identified by independent certification have been fully resolved and runtime verified.
 **Branch**: `fix/v1-native-cert-blockers`
