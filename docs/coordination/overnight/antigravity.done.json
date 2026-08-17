@@ -1,0 +1,28 @@
+{
+  "agent": "Antigravity",
+  "task": "OVERNIGHT TARS VOICE-FIRST NATIVE EXPERIENCE",
+  "branch": "feature/overnight-voice-native",
+  "base_commit": "0ff540039dc6333fd11e563789cb65dffa49506a",
+  "completed_at": "2026-08-18T00:19:30+05:30",
+  "status": "COMPLETE",
+  "summary": {
+    "voice_first_ui": "Minimal dark floating voice panel (FloatingVoicePanel.tsx) with animated waveform visualizer, live transcript, progressive streamed Claude reasoning, active context badge, and barge-in button. Zero decorative orb as primary interface.",
+    "native_microphone_lifecycle": "Reliable native microphone permissions on boot and continuous background audio capture via Web Audio PCM / LocalVadEngine.",
+    "local_wake_pipeline": "Local VAD energy segmentation + faster-whisper wake phrase matching ('Hey TARS', 'Analyze this chart'). No cloud browser SpeechRecognition required.",
+    "window_preservation_and_sizing": "LAST_EXTERNAL_HWND foreground window preservation in Win32 GDI bridge, ensuring underlying trading chart is captured without self-capture. Native window sized dynamically to 420x260 for voice panel, 440x740 for HUD, and 1280x840 for workstation.",
+    "barge_in_and_streaming_tts": "Instant barge-in interruption (onSpeechStart in VAD immediately halts Web Audio playback source and resets generation counter). Streaming sentence playback queue.",
+    "auto_dismiss": "Auto-dismiss timer (2.8s) returns focus and hides floating voice panel back to system tray upon speech completion.",
+    "tests_passed": "18 test files, 118 unit and integration tests passing (100%).",
+    "native_release_build": "Successfully built and packaged with MSVC / Tauri 2 at D:\\TARS-cache\\cargo-target\\release\\bundle\\nsis\\TARS_1.0.0_x64-setup.exe and tars-companion.exe."
+  },
+  "artifacts": [
+    "apps/web/src/components/voice/FloatingVoicePanel.tsx",
+    "apps/web/src/services/local-vad.ts",
+    "apps/web/src/services/wake-word.ts",
+    "apps/web/src/services/audio.ts",
+    "apps/web/src/services/native-bridge.ts",
+    "apps/web/src/App.tsx",
+    "apps/web/src-tauri/src/lib.rs",
+    "apps/web/src/test/voice-native.test.tsx"
+  ]
+}

@@ -43,6 +43,8 @@ export interface WakeWordCallbacks {
   onStateChange?: (status: WakeWordStatusInfo) => void;
   /** Real-time mic amplitude (0..1), for HUD visualization during background listening. */
   onAudioLevel?: (level: number) => void;
+  /** Fires immediately upon speech onset (crucial for barge-in / interrupting active TTS). */
+  onSpeechStart?: () => void;
 }
 
 // Regex patterns for wake phrase and chart analysis commands — matched
@@ -99,6 +101,7 @@ export class WakeWordService {
     this.mode = 'wake';
     const started = await this.engine.start({
       onUtterance: (utterance) => this.handleUtterance(utterance),
+      onSpeechStart: () => this.callbacks?.onSpeechStart?.(),
       onLevel: (level) => this.callbacks?.onAudioLevel?.(level),
       onError: (err) => {
         console.warn('[WakeWordService] VAD engine error:', err);
@@ -134,12 +137,18 @@ export class WakeWordService {
     this.updateStatus({ isActive: false });
   }
 
+  /** Force start command capture (e.g. on manual wake / PTT). */
+  public async beginCommandCaptureManual(): Promise<void> {
+    await this.beginCommandCapture();
+  }
+
   /** Re-enters continuous wake listening after a completed/timed-out command capture. */
-  private async resumeWakeListening(): Promise<void> {
+  public async resumeWakeListening(): Promise<void> {
     if (!this.isRunning) return;
     this.mode = 'wake';
     await this.engine.start({
       onUtterance: (utterance) => this.handleUtterance(utterance),
+      onSpeechStart: () => this.callbacks?.onSpeechStart?.(),
       onLevel: (level) => this.callbacks?.onAudioLevel?.(level),
       onError: (err) => console.warn('[WakeWordService] VAD engine error:', err),
     });
@@ -198,6 +207,7 @@ export class WakeWordService {
     await this.engine.start(
       {
         onUtterance: (utterance) => this.handleUtterance(utterance),
+        onSpeechStart: () => this.callbacks?.onSpeechStart?.(),
         onLevel: (level) => this.callbacks?.onAudioLevel?.(level),
         onError: (err) => console.warn('[WakeWordService] VAD engine error:', err),
         onTimeout: () => {

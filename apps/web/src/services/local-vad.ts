@@ -18,6 +18,7 @@ export interface VadUtterance {
 
 export interface VadEngineCallbacks {
   onUtterance: (utterance: VadUtterance) => void;
+  onSpeechStart?: () => void;
   onLevel?: (rms: number) => void;
   onError?: (err: unknown) => void;
   /** Only used when `once` is set: fires if no utterance completes before `timeoutMs`. */
@@ -193,6 +194,7 @@ export class LocalVadEngine {
       }
       if (isSpeechFrame) {
         this.speechActive = true;
+        this.callbacks?.onSpeechStart?.();
         this.speechFrames = [...this.preRoll, frame];
         this.speechDurationMs = this.speechFrames.length * this.frameDurationMs;
         this.silenceStreakMs = 0;

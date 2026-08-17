@@ -62,6 +62,11 @@ export class AudioService {
   private mediaRecorder: MediaRecorder | null = null;
   private recordedBlobs: Blob[] = [];
 
+  private activeBufferSource: AudioBufferSourceNode | null = null;
+  private activePlaybackContext: AudioContext | null = null;
+  private playbackGeneration = 0;
+  private activePlaybackAnimId: number | null = null;
+
   public async requestMicrophonePermission(): Promise<boolean> {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       return false;
@@ -290,6 +295,7 @@ export class AudioService {
     onAudioVolume?: (volume: number) => void
   ): Promise<void> {
     if (!text || !text.trim()) return;
+    const currentGen = ++this.playbackGeneration;
 
     let res = await fetch(`${apiEndpoint}/api/v1/voice/synthesize`, {
       method: 'POST',
@@ -309,11 +315,36 @@ export class AudioService {
       throw new Error(`Backend speech synthesis failed with status ${res.status}`);
     }
 
+    if (this.playbackGeneration !== currentGen) {
+      return; // Interrupted while synthesizing
+    }
+
     const audioBytes = await res.arrayBuffer();
+    if (this.playbackGeneration !== currentGen) {
+      return; // Interrupted
+    }
+
     if (onAudioVolume) {
       await this.playAudioBytes(audioBytes, onAudioVolume);
     } else {
       await this.playAudioBytes(audioBytes);
+    }
+  }
+
+  /**
+   * Play multiple sentences sequentially, supporting early interruption/barge-in.
+   */
+  public async playSentenceQueue(
+    sentences: string[],
+    apiEndpoint: string,
+    onAudioVolume?: (volume: number) => void
+  ): Promise<void> {
+    const currentGen = ++this.playbackGeneration;
+    for (const sentence of sentences) {
+      if (this.playbackGeneration !== currentGen) break;
+      const trimmed = sentence.trim();
+      if (!trimmed) continue;
+      await this.synthesizeAndPlay(trimmed, apiEndpoint, onAudioVolume);
     }
   }
 
@@ -332,11 +363,14 @@ export class AudioService {
 
         if (AudioContextClass) {
           const ctx = new AudioContextClass();
+          this.activePlaybackContext = ctx;
+
           ctx.decodeAudioData(
             audioBytes.slice(0),
             (buffer) => {
               const source = ctx.createBufferSource();
               source.buffer = buffer;
+              this.activeBufferSource = source;
 
               const analyser = ctx.createAnalyser();
               analyser.fftSize = 64;
@@ -357,18 +391,22 @@ export class AudioService {
                   const vol = Math.min(1.0, (sum / dataArray.length / 128) * 1.5);
                   onPlaybackVolume(vol);
                   animId = requestAnimationFrame(volumeLoop);
+                  this.activePlaybackAnimId = animId;
                 };
                 volumeLoop();
               }
 
               source.onended = () => {
                 if (animId !== null) cancelAnimationFrame(animId);
+                this.activePlaybackAnimId = null;
                 if (onPlaybackVolume) onPlaybackVolume(0);
+                this.activeBufferSource = null;
                 try {
                   ctx.close();
                 } catch {
                   // ignore
                 }
+                this.activePlaybackContext = null;
                 resolve();
               };
 
@@ -473,13 +511,52 @@ export class AudioService {
     });
   }
 
+  /**
+   * Immediately stops any speech synthesis or audio playback in progress (barge-in / interrupt)
+   */
   public stopSpeaking(): void {
+    this.playbackGeneration++;
+
+    if (this.activePlaybackAnimId !== null) {
+      cancelAnimationFrame(this.activePlaybackAnimId);
+      this.activePlaybackAnimId = null;
+    }
+
+    if (this.activeBufferSource) {
+      try {
+        this.activeBufferSource.stop();
+        this.activeBufferSource.disconnect();
+      } catch {
+        // ignore
+      }
+      this.activeBufferSource = null;
+    }
+
+    if (this.activePlaybackContext && this.activePlaybackContext.state !== 'closed') {
+      try {
+        this.activePlaybackContext.close();
+      } catch {
+        // ignore
+      }
+      this.activePlaybackContext = null;
+    }
+
     if (this.activeAudioElement) {
-      this.activeAudioElement.pause();
+      try {
+        this.activeAudioElement.pause();
+        this.activeAudioElement.src = '';
+      } catch {
+        // ignore
+      }
       this.activeAudioElement = null;
     }
+
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
     }
   }
 }
