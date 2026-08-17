@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "milestone": "M2A",
+  "agent": "codex",
+  "stream": "action-runtime",
+  "status": "complete",
+  "branch": "feature/wave2-action-runtime",
+  "implementation_sha": "6f9e13770edc10ac64c83fe6f25880033e74b8f4",
+  "completed_at": "2026-08-17T02:43:41Z",
+  "tests": {
+    "targeted_pytest": "33 passed",
+    "ruff": "passed",
+    "mypy": "passed; 10 source files"
+  },
+  "capabilities": [
+    "action runtime and skill registry dispatch",
+    "deterministic RiskLevel permission enforcement",
+    "one-time confirmation lifecycle with expiry",
+    "request duplicate and timestamp replay protection",
+    "durable append-only action audit trail",
+    "active-window context attachment without screenshot or content capture",
+    "REST Action API and WebSocket result stream",
+    "strict structured assistant-to-ActionRequest adapter",
+    "fixed-phrase deterministic ActionRequest routing"
+  ],
+  "known_gaps": [
+    "Concrete Windows skills arrive from feature/wave2-core-skills.",
+    "Native HUD, tray, and global-hotkey UI arrive from feature/wave2-native-shell.",
+    "The custom wake-word path remains UNVERIFIED."
+  ]
+}

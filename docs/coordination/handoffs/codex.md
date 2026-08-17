@@ -8,6 +8,101 @@ integration/quality harness). Only Codex edits this file. See
 
 ## Latest handoff
 
+**Branch**: `feature/wave2-action-runtime`
+
+**Commit SHA**: `6f9e13770edc10ac64c83fe6f25880033e74b8f4`
+
+**Work completed**:
+
+- Built the Wave 2A action runtime as the only skill-execution path, with
+  request-age validation, duplicate-ID rejection, deterministic permission
+  classification, dispatch, result normalization, and failure conversion.
+- Added an independently derived permission floor for all M2A skill families,
+  explicit fail-closed policies for unknown capabilities, and terminal-command
+  analysis that blocks destructive/elevated/system-critical operations while
+  requiring confirmation for other state-changing commands.
+- Implemented one-time, expiring confirmation capabilities. Only token hashes
+  are persisted; user-supplied `confirmed`/risk fields have no authorization
+  effect; blocked actions can never reach confirmation or execution.
+- Added durable SQLite request/result state plus append-only audit transitions,
+  including requests, validation denials, policy blocks, invalid confirmation
+  attempts, confirmation decisions, execution starts, successes, and failures.
+- Added strict active-window context attachment (process/title/bounds only), a
+  safe assistant proposal adapter that accepts only skill/action/arguments, and
+  fixed-phrase deterministic action routing that does not call an LLM.
+- Added REST endpoints for intake, result lookup, audit, capabilities,
+  confirmation, assistant proposals, and deterministic resolution, plus a
+  dedicated `/ws/actions` result stream.
+- Added adversarial tests for bypass attempts, duplicates, malformed actions,
+  stale/future replay, confirmation replay/expiry, blocked commands, invalid
+  tokens, dishonest/malformed skill results, execution failure, context
+  smuggling, audit history, and WebSocket delivery.
+
+**Files changed**:
+
+- `apps/backend/actions/` — runtime, permission engine, skill registry, durable
+  store, request adapters, and errors.
+- `apps/backend/app/routers/actions.py` — Wave 2A Action API and WebSocket.
+- `apps/backend/app/main.py`, `apps/backend/app/deps.py` — runtime lifecycle and
+  dependency wiring.
+- `apps/backend/tests/test_action_runtime.py` — targeted action security and
+  lifecycle suite.
+- This Codex handoff and `docs/coordination/wave2/m2a/codex.done.json` in the
+  follow-up completion-metadata commit.
+
+**Interfaces exposed**:
+
+- `POST /api/v1/actions`
+- `GET /api/v1/actions/{request_id}`
+- `POST /api/v1/actions/{request_id}/confirm`
+- `GET /api/v1/actions/{request_id}/audit`
+- `GET /api/v1/actions/audit`
+- `GET /api/v1/actions/capabilities`
+- `POST /api/v1/actions/assistant`
+- `POST /api/v1/actions/resolve`
+- `WS /ws/actions`
+- Python: `ActionRuntime`, `SkillRegistry`, `PermissionEngine`,
+  `ActionRequestFactory`, and `DeterministicActionRouter`.
+- Skill loading: `skills.SKILLS` mapping/iterable or `skills.get_skills()`.
+
+**Tests run**:
+
+- `python -m pytest tests/test_action_contracts.py tests/test_action_runtime.py -q`
+  — 33 passed.
+- `python -m ruff check actions app/routers/actions.py app/main.py app/deps.py
+  tests/test_action_contracts.py tests/test_action_runtime.py` — passed.
+- `python -m mypy actions app/routers/actions.py app/main.py app/deps.py` — passed
+  with no issues in 10 source files.
+- Full V1 certification was intentionally not rerun, per Wave 2A validation
+  cadence and the user's instruction.
+
+**Known limitations**:
+
+- Concrete Windows skill execution is intentionally absent from this branch;
+  the runtime currently starts with an empty registry until Claude's
+  `apps/backend/skills/` stream is integrated.
+- Native HUD/tray/global-hotkey confirmation rendering is intentionally absent;
+  Antigravity owns that stream.
+- The custom wake-word path remains `UNVERIFIED`; this stream makes no claim
+  that it works end-to-end.
+
+**Exact dependencies required from other agents**:
+
+- Claude Code: expose concrete skill instances through `skills.SKILLS` or
+  `skills.get_skills()` and feed recognized global PTT/wake-word actions through
+  `ActionRuntime.submit()` / the Action API, never direct skill execution.
+- Antigravity: consume the Action API and `/ws/actions`, render exact requested
+  arguments for confirmation, and return the one-time confirmation token to the
+  confirmation endpoint.
+- Integration coordinator: merge all three Wave 2A streams without squashing
+  and run the single full M2A integration validation gate.
+
+**Next recommended action**: Integrate the concrete Windows skill registry and
+native HUD streams, then run M2A end-to-end validation across request → confirm
+→ skill → audit/result.
+
+## Previous handoff — final codegen remediation
+
 **Branch**: `fix/v1-final-codegen`
 
 **Commit SHA**: `b071208ba9710f307f9399c38b1d6a3c2c86ba0e` (last implementation commit
