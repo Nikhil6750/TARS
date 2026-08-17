@@ -20,6 +20,7 @@ import { audioService } from './services/audio';
 import { sendNotification } from './services/notifications';
 import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut } from './services/tauri';
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
+import { actionRuntimeClient } from './services/actions';
 
 import { DesktopHeader } from './components/navigation/DesktopHeader';
 import { MobileTabBar } from './components/navigation/MobileTabBar';
@@ -329,6 +330,26 @@ export const App: React.FC = () => {
           providers: { stt: 'faster-whisper' }
         };
         handleIncomingAssistantMessage(userVoiceMsg);
+
+        // Step 2.5: A recognized deterministic action phrase bypasses the LLM
+        // (not the Action Runtime) -- submitted through the same shared
+        // actionRuntimeClient the HUD uses, so its permission classification,
+        // skill dispatch, and CONFIRMATION_REQUIRED handling are identical,
+        // and the HUD's own onAnyActionResult listener picks up the real
+        // result automatically. Anything not recognized falls through
+        // unchanged to the assistant/LLM query below.
+        actionRuntimeClient.setEndpoint(settings.apiEndpoint);
+        const activeContext = await nativeBridge.getActiveWindowContext();
+        const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
+          transcript,
+          activeContext,
+          'voice_ptt'
+        );
+        if (deterministicReq) {
+          await actionRuntimeClient.submitAction(deterministicReq);
+          setCompanionState('IDLE');
+          return;
+        }
 
         // Step 3: Query assistant endpoint with transcribed text
         const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {

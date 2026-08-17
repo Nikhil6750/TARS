@@ -43,6 +43,30 @@ describe('Wave 2A ActionRuntimeClient', () => {
       expect(req?.arguments.target).toBe('Calculator');
     });
 
+    it('parses bare "open notepad" (no "app"/"application" keyword) into windows_app.launch', () => {
+      // Regression: the bare-form launch pattern originally accepted only
+      // "launch X" / "start X", not "open X" -- so the single most natural
+      // phrasing for launching an app fell through to the LLM/chat path
+      // instead of the deterministic bypass.
+      const req = client.parseDeterministicCommand('open notepad');
+      expect(req).not.toBeNull();
+      expect(req?.skill).toBe('windows_app');
+      expect(req?.action).toBe('launch');
+      expect(req?.arguments.target).toBe('notepad');
+    });
+
+    it('strips trailing STT punctuation so "Open Notepad." still resolves a launchable target', () => {
+      // Regression: verified against real faster-whisper output for spoken
+      // "open notepad" -- it comes back as "Open Notepad." (trailing
+      // period). Left unstripped, the captured target "Notepad." never
+      // resolves via shutil.which on the backend (only "Notepad" does).
+      const req = client.parseDeterministicCommand('Open Notepad.');
+      expect(req).not.toBeNull();
+      expect(req?.skill).toBe('windows_app');
+      expect(req?.action).toBe('launch');
+      expect(req?.arguments.target).toBe('Notepad');
+    });
+
     it('parses "open url https://tradingview.com" into deterministic browser.open_url ActionRequest', () => {
       const req = client.parseDeterministicCommand('open url https://tradingview.com');
       expect(req).not.toBeNull();

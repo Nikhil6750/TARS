@@ -72,7 +72,11 @@ export class ActionRuntimeClient {
     activeContext?: ActiveWindowContext | null,
     source: ActionSource = 'deterministic'
   ): ActionRequest | null {
-    const text = rawText.trim();
+    // Strip trailing sentence punctuation STT commonly appends (e.g. "Open
+    // Notepad." from real speech-to-text) -- left in place, it would become
+    // part of the captured target/query and fail downstream (e.g.
+    // "Notepad." never resolves via shutil.which, only "Notepad" does).
+    const text = rawText.trim().replace(/[.!?]+$/, '').trim();
     if (!text) return null;
 
     // 1. Focus application
@@ -90,7 +94,7 @@ export class ActionRuntimeClient {
 
     // 2. Launch application
     const launchMatch = text.match(/^(?:launch|open|start)\s+app(?:lication)?\s+([a-zA-Z0-9_.\s-]+)$/i) ||
-      text.match(/^(?:launch|start)\s+([a-zA-Z0-9_.\s-]+)$/i);
+      text.match(/^(?:launch|open|start)\s+([a-zA-Z0-9_.\s-]+)$/i);
     if (launchMatch) {
       const appName = launchMatch[1].trim();
       return this.createRequest({
