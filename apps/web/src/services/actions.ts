@@ -107,7 +107,7 @@ export class ActionRuntimeClient {
     }
 
     // 3. Open URL / browser
-    const urlMatch = text.match(/^(?:open\s+url|browse|visit)\s+(https?:\/\/[^\s]+)$/i) ||
+    const urlMatch = text.match(/^(?:open\s+url|browse|visit|navigate\s+to)\s+(https?:\/\/[^\s]+)$/i) ||
       text.match(/^(https?:\/\/[^\s]+)$/i);
     if (urlMatch) {
       return this.createRequest({
@@ -119,14 +119,87 @@ export class ActionRuntimeClient {
       });
     }
 
-    // 4. Search files
+    // 4. Browser Navigation (Back / Forward / Scroll)
+    if (/^(?:go\s+back|navigate\s+back|browser\s+back)$/i.test(text)) {
+      return this.createRequest({
+        skill: 'browser',
+        action: 'back',
+        arguments: {},
+        source,
+        activeContext,
+      });
+    }
+    if (/^(?:go\s+forward|navigate\s+forward|browser\s+forward)$/i.test(text)) {
+      return this.createRequest({
+        skill: 'browser',
+        action: 'forward',
+        arguments: {},
+        source,
+        activeContext,
+      });
+    }
+    const scrollMatch = text.match(/^(?:scroll|page\s+scroll)\s+(down|up|top|bottom)$/i);
+    if (scrollMatch) {
+      const dir = scrollMatch[1].toLowerCase();
+      const delta = dir === 'down' ? 400 : dir === 'up' ? -400 : dir;
+      return this.createRequest({
+        skill: 'browser',
+        action: 'scroll',
+        arguments: { deltaY: delta },
+        source,
+        activeContext,
+      });
+    }
+
+    // 5. Inspect Page / DOM / Screen Capture
+    if (/^(?:inspect\s+page|inspect\s+dom|inspect\s+structure|what\s+do\s+you\s+see|read\s+page)$/i.test(text)) {
+      return this.createRequest({
+        skill: 'browser',
+        action: 'inspect_dom',
+        arguments: {},
+        source,
+        activeContext,
+      });
+    }
+
+    if (/^(?:capture\s+screen|snapshot(?:\s+window)?|take\s+screenshot|screen\s+capture)$/i.test(text)) {
+      return this.createRequest({
+        skill: 'windows_app',
+        action: 'capture_active_window',
+        arguments: { include_image_data: true },
+        source,
+        activeContext,
+      });
+    }
+
+    // 6. Browser Click / Type
+    const clickMatch = text.match(/^(?:click|click\s+on|press)\s+(?:element\s+|button\s+)?(.+)$/i);
+    if (clickMatch) {
+      return this.createRequest({
+        skill: 'browser',
+        action: 'click',
+        arguments: { target: clickMatch[1].trim() },
+        source,
+        activeContext,
+      });
+    }
+
+    const typeMatch = text.match(/^(?:type|enter|input)\s+["']?([^"']+)["']?\s+(?:into|in)\s+(.+)$/i);
+    if (typeMatch) {
+      return this.createRequest({
+        skill: 'browser',
+        action: 'type',
+        arguments: { text: typeMatch[1].trim(), selector: typeMatch[2].trim() },
+        source,
+        activeContext,
+      });
+    }
+
+    // 7. Search files
     const fileSearchMatch = text.match(/^(?:search\s+files?|find\s+file)\s+(?:for\s+)?(.+)$/i);
     if (fileSearchMatch) {
       return this.createRequest({
         skill: 'filesystem',
-        // The backend resolves a relative 'path' against the user's home
-        // directory (the only allowed search root), so '.' searches the
-        // whole home tree when the phrase doesn't name a directory.
         action: 'search',
         arguments: { path: '.', query: fileSearchMatch[1].trim() },
         source,
@@ -134,7 +207,7 @@ export class ActionRuntimeClient {
       });
     }
 
-    // 5. Search Obsidian
+    // 8. Search Obsidian
     const obsidianMatch = text.match(/^(?:search\s+obsidian|obsidian\s+search|search\s+notes?)\s+(?:for\s+)?(.+)$/i);
     if (obsidianMatch) {
       return this.createRequest({
@@ -146,7 +219,7 @@ export class ActionRuntimeClient {
       });
     }
 
-    // 6. Terminal command (explicit terminal prefix or run prefix)
+    // 9. Terminal command (explicit terminal prefix or run prefix)
     const terminalMatch = text.match(/^(?:run|exec|terminal|cmd|powershell)\s*:\s*(.+)$/i) ||
       text.match(/^(?:run\s+command)\s+(.+)$/i);
     if (terminalMatch) {
@@ -452,15 +525,64 @@ export class ActionRuntimeClient {
           const app = String(request.arguments.target || 'application');
           summary = `Launched application "${app}"`;
           data.launched_app = app;
+        } else if (request.action === 'capture_active_window') {
+          riskLevel = 'READ_ONLY';
+          summary = 'Captured active window snapshot with monitor geometry & DPI awareness';
+          data.capture_source = 'active_window';
+          data.is_secure_desktop = false;
+        } else if (request.action === 'get_monitors') {
+          riskLevel = 'READ_ONLY';
+          summary = 'Enumerated connected displays and DPI scale factors';
+          data.monitors_count = 1;
+        } else if (request.action === 'get_ui_elements') {
+          riskLevel = 'READ_ONLY';
+          summary = 'Inspected native Win32 accessibility UI hierarchy';
+          data.elements_count = 2;
         }
         break;
 
       case 'browser':
         riskLevel = 'LOW_RISK';
-        if (request.action === 'open_url') {
+        if (request.action === 'open_url' || request.action === 'navigate') {
           const url = String(request.arguments.url || '');
           summary = `Opened URL in default browser: ${url}`;
           data.url = url;
+        } else if (request.action === 'inspect_dom') {
+          riskLevel = 'READ_ONLY';
+          summary = 'Inspected DOM accessibility structure & interactive elements';
+          data.inspected_elements = 12;
+        } else if (request.action === 'click') {
+          const target = String(request.arguments.target || request.arguments.selector || 'element');
+          const isStateChange = /submit|buy|purchase|delete|confirm|pay/i.test(target);
+          riskLevel = isStateChange ? 'CONFIRM_REQUIRED' : 'LOW_RISK';
+          if (isStateChange) {
+            status = 'CONFIRMATION_REQUIRED';
+            summary = `Requires confirmation to click state-changing element: "${target}"`;
+          } else {
+            summary = `Clicked browser element: "${target}"`;
+          }
+          data.target = target;
+        } else if (request.action === 'type') {
+          const sel = String(request.arguments.selector || 'input');
+          const isSensitive = !!request.arguments.is_sensitive || /password|secret|card|token/i.test(sel);
+          summary = `Typed into browser input "${sel}" (${isSensitive ? '[REDACTED_SENSITIVE]' : 'text'})`;
+          data.selector = sel;
+          data.is_sensitive = isSensitive;
+        } else if (request.action === 'scroll') {
+          riskLevel = 'READ_ONLY';
+          const dy = request.arguments.deltaY || 'down';
+          summary = `Scrolled browser page (${dy})`;
+          data.deltaY = dy;
+        } else if (request.action === 'back' || request.action === 'forward') {
+          riskLevel = 'LOW_RISK';
+          summary = `Browser history navigation (${request.action})`;
+        } else if (request.action === 'read_text') {
+          riskLevel = 'READ_ONLY';
+          summary = 'Extracted readable text content from active page';
+          data.text_length = 350;
+        } else if (request.action === 'switch_tab' || request.action === 'open_tab' || request.action === 'close_tab') {
+          riskLevel = 'LOW_RISK';
+          summary = `Browser tab operation: ${request.action}`;
         }
         break;
 
