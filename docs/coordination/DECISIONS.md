@@ -317,3 +317,25 @@ starts, not after the first conflict.
 **Status**: Accepted, permanent. Recorded in full in `AGENTS.md` § Git
 workflow, which is the operational copy agents should follow day-to-day —
 this ADR is the decision record for *why*.
+
+## ADR-021: V1 candidate certified and merged into `integration/v1`
+
+**Date**: 2026-08-17
+**Decision**: `fe8f787ab6a1565ad8e1f3b6cbacc5ef6a4bd1ee` (tip of
+`feature/v1-final-candidate-2`) is the independently certified V1 release
+candidate. It was merged into `integration/v1` via an explicit `--no-ff`
+merge commit `f25566ac34aef1868ee09ee826d5ef82fc407aec`, preserving full,
+unsquashed commit history (no rebase, no squash, no rewrite). Only a
+lightweight post-merge sanity check was run (merge-conflict-marker scan,
+JSON contract schema parse, `py_compile` on key backend entrypoints) — full
+certification was intentionally not re-run since the exact candidate SHA
+was already independently certified prior to this merge. `integration/v1`
+was pushed to `origin`. `main` was deliberately **not** merged in this
+action.
+**Why**: Certification already happened against this exact SHA; re-running
+the full suite here would be redundant. Recording the merge as its own ADR
+gives a durable, append-only pointer from the certified SHA to where it
+landed in `integration/v1`, independent of any branch getting deleted or
+force-pushed later.
+**Status**: Accepted. Merging `integration/v1` into `main` remains a
+separate, later coordinator decision — not authorized by this entry.

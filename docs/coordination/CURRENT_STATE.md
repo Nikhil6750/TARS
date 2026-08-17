@@ -6,6 +6,14 @@ shared/read-only, see [AGENTS.md](../../AGENTS.md)).
 
 ## Stage
 
+**V1 RELEASE INTEGRATION (COMPLETE).**
+Certified V1 candidate `fe8f787ab6a1565ad8e1f3b6cbacc5ef6a4bd1ee`
+(`feature/v1-final-candidate-2`) merged into `integration/v1` via an
+explicit `--no-ff` merge commit `f25566ac34aef1868ee09ee826d5ef82fc407aec`,
+preserving full unsquashed history (no rebase/squash). Pushed to
+`origin/integration/v1`. `main` intentionally not touched — that merge is
+a separate, later coordinator decision. See ADR-021 in `DECISIONS.md`.
+
 **Wave 1 Integration & End-to-End Verification (COMPLETE).**
 All three Wave 1 branches (`feature/v1-backend-voice`, `feature/v1-quality-contracts`,
 `feature/v1-web-pwa`) were cleanly integrated into `feature/v1-integration` on the dedicated
@@ -17,7 +25,9 @@ implemented and verified end-to-end against all contract, unit, and black-box ac
 ## Branches & Workspaces
 
 - `main` — mirrors the bootstrap baseline commit. Untouched.
-- `integration/v1` — integration trunk holding the merged architecture baseline.
+- `integration/v1` — integration trunk. Now at `f25566ac34aef1868ee09ee826d5ef82fc407aec`,
+  containing the certified V1 candidate (`fe8f787ab6a1565ad8e1f3b6cbacc5ef6a4bd1ee`)
+  merged in full, unsquashed. Not yet merged into `main`.
 - `feature/v1-backend-voice` — Claude Code backend/voice/memory implementation (SHA: `5f5a1fb`).
 - `feature/v1-quality-contracts` — Codex contracts/acceptance harness (SHA: `2c67932`).
 - `feature/v1-web-pwa` — Antigravity React/Tauri/PWA foundation (SHA: `5d677db`).
@@ -44,5 +54,6 @@ implemented and verified end-to-end against all contract, unit, and black-box ac
 
 ## Next recommended action
 
-Codex independently inspects and certifies `feature/v1-integration`.
-Coordinator prepares merge of `feature/v1-integration` into `integration/v1`.
+`integration/v1` merge is done and pushed. Remaining decision: when to
+merge `integration/v1` into `main`. Per this integration's instructions,
+that merge is explicitly deferred — not yet authorized.
