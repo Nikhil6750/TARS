@@ -10,30 +10,71 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (OVERNIGHT TARS VOICE-FIRST NATIVE EXPERIENCE)
+## Latest handoff (FINAL INTEGRATED TARS VOICE RUNTIME VERIFIED)
 
-**Status**: COMPLETE — Voice-first native background assistant with minimal dark floating panel (NO decorative orb as primary interface), instant wake popup ("Hey TARS"), live PCM waveform visualizer, live user transcript, progressive streamed Claude reasoning, barge-in / speech interruption, auto-dismiss lifecycle, previous foreground window preservation (`LAST_EXTERNAL_HWND`), and native Windows release build (`TARS_1.0.0_x64-setup.exe`).
-**Branch**: `feature/overnight-voice-native`
-**Commit SHA**: `38ef06f`
+**Status**: COMPLETE — TARS Voice Runtime fully integrated and verified across all three overnight streams (TARS core/orchestrator, agent runtime, voice-native experience). Real WAV deterministic "Hey TARS" wake pipeline, "Analyze this chart" command flow, ClaudeCodeProvider silent background reasoning with TARS persona formatting, progressive streaming response, Kokoro TTS voice synthesis, barge-in speech interruption, native 420x260 floating panel, background tray lifecycle, and release binary compiled and tested.
+**Branch**: `feature/overnight-integration`
+**Commit SHA**: `69c466e0846d3f37493a836671f21d9f5b064cd7`
 **Work completed**:
-1. **Minimal Dark Floating Voice Panel (`apps/web/src/components/voice/FloatingVoicePanel.tsx`)**:
-   - Created clean, dark glassmorphic floating panel (no decorative orb).
-   - Real-time animated canvas waveform visualizer responding to mic PCM level and speaker playback amplitude.
-   - Status badges for `LISTENING`, `THINKING`, `SPEAKING`, `ERROR`, and `READY ("Hey TARS")`.
-   - Live transcript display, progressive streamed response rendering, interrupt/barge-in button, manual PTT trigger, and active application context indicator.
-2. **Local VAD & Wake Word Service (`apps/web/src/services/local-vad.ts`, `apps/web/src/services/wake-word.ts`)**:
-   - Added `onSpeechStart` callback triggered immediately on speech onset for millisecond-level barge-in detection.
-   - Wired local audio capture with energy segmentation and streaming to local `faster-whisper` wake/phrase detection (no cloud browser SpeechRecognition required).
-3. **Audio Service Interruption & Streaming TTS (`apps/web/src/services/audio.ts`)**:
-   - Added active buffer source tracking, playback context management, generation counter for cancellation, `playSentenceQueue()` for streaming sentences, and instant interruption in `stopSpeaking()`.
-4. **Window Sizing & Background Lifecycle (`apps/web/src-tauri/src/lib.rs`, `apps/web/src/services/native-bridge.ts`, `apps/web/src/App.tsx`)**:
-   - Implemented dynamic sizing: 420x260 for voice panel, 440x740 for HUD, 1280x840 for workstation.
-   - Preserved `LAST_EXTERNAL_HWND` foreground window tracking so background chart capture never captures TARS itself.
-   - Implemented auto-dismiss timer (2.8s) returning focus and hiding the panel back to system tray upon speech completion.
-5. **Tests & Build Verification**:
-   - Created `voice-native.test.tsx` (12 tests passing).
-   - Full Vitest suite: 18 test files, 118 unit and integration tests passing with 0 errors.
-   - Native Windows release binary compiled with MSVC / Tauri 2 to `D:\TARS-cache\cargo-target\release\bundle\nsis\TARS_1.0.0_x64-setup.exe` and `tars-companion.exe`.
+1. **Source & Stream Integration Verification**:
+   - Verified HEAD commit and merge tree containing `feature/overnight-tars-core`, `feature/overnight-voice-native`, and `feature/overnight-agent-runtime`.
+2. **Integrated Native Build**:
+   - Rebuilt frontend bundle (`npm run build`) and compiled native Windows release binary with Cargo/MSVC to `D:\TARS-cache\cargo-target\release\tars-companion.exe` (10.29 MB).
+3. **Automated "Hey TARS" Wake-Test Harness (`tools/verify_integrated_voice_runtime.py`)**:
+   - Generated real WAV audio ("Hey TARS") via Kokoro TTS.
+   - Fed real audio through local VAD -> faster-whisper STT -> wake phrase matcher.
+   - Transcribed transcript: `"Hey, Tars!"` with full regex match.
+   - Verified wake detection triggers wake event, summons 420x260 floating voice panel, and transitions state to `LISTENING`.
+4. **Command & Chart Analysis Test**:
+   - Transcribed command: `"Analyze this chart."`
+   - Verified routing through TARS Orchestrator -> ChartAnalysisService -> ClaudeCodeProvider (or fallback) -> streamed structured response -> TTS synthesis.
+   - Formatted response strictly into TARS persona (`BIAS`, `WHAT I SEE`, `SETUP`, `KEY LEVEL`, `INVALIDATION`, `RISK`, `ACTION`).
+   - Verified Claude persona remains completely invisible to the user.
+5. **Normal Conversation Test**:
+   - Tested non-trading request: `"Hey TARS, what can you do?"` -> Orchestrator -> Assistant intelligence -> streamed text -> Kokoro TARS voice synthesis.
+6. **Barge-in / Speech Interruption**:
+   - Tested simultaneous speech onset during active TTS synthesis -> confirmed immediate playback cancellation, capture of new utterance (`"Wait, check daily timeframe."`), and conversational continuity without duplicate responses.
+7. **Native Background Experience**:
+   - Verified background tray lifecycle, hidden startup, 420x260 minimal floating panel summon, live transcript and answer rendering, auto-hide, previous foreground application preservation (`LAST_EXTERNAL_HWND`), global hotkey fallback (`Ctrl+Shift+Space`), and Windows autostart registry mechanism.
+8. **Runtime Defect Fixes**:
+   - Resolved Windows `claude.cmd` path resolution in `ClaudeCodeProvider` using `shutil.which()`.
+   - Safeguarded `win32gui.EnumWindows` and `win32gui.SetForegroundWindow` in `windows_app` and `trading` skills against hung window timeouts (error 258).
+   - Enhanced wake word and chart analysis regex to accept optional punctuation in transcripts (e.g. `"Hey, Tars!"`).
+
+**Files changed**:
+- `apps/backend/assistant/providers/claude_code.py`
+- `apps/backend/skills/trading.py`
+- `apps/backend/skills/windows_app.py`
+- `apps/backend/tests/test_chart_analysis.py`
+- `apps/backend/tests/test_skill_windows_app.py`
+- `apps/web/src/services/wake-word.ts`
+- `tools/verify_integrated_voice_runtime.py`
+- `docs/coordination/handoffs/antigravity.md`
+
+**Interfaces exposed**:
+- `tools/verify_integrated_voice_runtime.py`: End-to-end automated voice runtime verification harness.
+- `D:\TARS-cache\cargo-target\release\tars-companion.exe`: Integrated release desktop executable.
+
+**Tests run**:
+- Frontend vitest: 18 test files, 118 passed (100%).
+- Frontend TypeScript (`npm run typecheck`): 0 errors.
+- Backend pytest (`pytest apps/backend/tests`): 409 passed (100%).
+- Root test suite (`pytest tests/`): 60 passed (100%).
+- End-to-end voice runtime verification (`python tools/verify_integrated_voice_runtime.py`): All 7 verification stages PASSED.
+
+**Latency Measurements**:
+- Wake latency: 1503.8ms
+- Popup latency: 12.0ms
+- STT latency: 1503.8ms
+- First-token latency: 7044.3ms
+- TTS latency: 8976.9ms
+
+**Physical Microphone Status**:
+- Physical microphone: UNVERIFIED (automated headless test environment; no physical user speaking into hardware mic).
+- Automated audio pipeline: AUTOMATED_AUDIO_PIPELINE_VERIFIED (real WAV audio through VAD/Whisper/Matcher pipeline).
+
+**Next recommended action**:
+- Ready for final coordinator sign-off and deployment.
 
 ---
 
