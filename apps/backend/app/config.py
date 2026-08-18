@@ -24,6 +24,15 @@ class Settings(BaseSettings):
 
     # ---- General ----
     tars_env: str = "development"
+    # Explicit, separate from tars_env: uvicorn's --reload (WatchFiles-based
+    # file watcher) spawns requests in a distinct child worker process, and
+    # on Windows that child cannot successfully run
+    # asyncio.create_subprocess_exec -- every ClaudeCodeProvider call
+    # (chat and chart analysis alike) fails there. tars_env=="development"
+    # driving reload implicitly meant the normal launcher (which always
+    # runs with the default .env, i.e. development) silently hit this.
+    # Reload is now opt-in only, for manual backend-only development.
+    tars_backend_reload: bool = False
     # Explicit override for the bind address. Leave unset (None) to get the
     # secure-by-default behavior driven by `bind_lan` below — never publicly
     # exposed by default, per AGENTS.md.

@@ -17,5 +17,5 @@ if __name__ == "__main__":
         "app.main:app",
         host=settings.effective_host,
         port=settings.backend_port,
-        reload=settings.tars_env == "development",
+        reload=settings.tars_backend_reload,
     )
