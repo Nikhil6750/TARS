@@ -15,6 +15,16 @@ from pathlib import Path
 from assistant.errors import AssistantProviderError
 from assistant.provider import AssistantProvider, AssistantReply, AssistantRequest
 
+# asyncio.create_subprocess_exec's stdout defaults to a 64KB StreamReader
+# line-buffer limit. Chart analysis's stream-json output includes a
+# `tool_result` event that echoes the captured image back to Claude as a
+# single base64-encoded JSON line -- routinely several hundred KB, well
+# over that default -- which makes process.stdout.readline() in
+# respond_stream() hang indefinitely rather than raise (observed: a
+# ~680KB line against the 64KB default). Plain chat requests never emit a
+# line anywhere near this size; only image-carrying events do.
+CLAUDE_STREAM_READER_LIMIT_BYTES = 32 * 1024 * 1024
+
 
 class ClaudeCodeProvider(AssistantProvider):
     name = "claude_code"
@@ -157,6 +167,7 @@ class ClaudeCodeProvider(AssistantProvider):
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=CLAUDE_STREAM_READER_LIMIT_BYTES,
             )
         except FileNotFoundError as exc:
             raise AssistantProviderError(
@@ -170,7 +181,23 @@ class ClaudeCodeProvider(AssistantProvider):
 
         try:
             while True:
-                line = await process.stdout.readline()
+                # Per-line timeout, not one overall deadline: a slow model
+                # producing steady output shouldn't be killed just because
+                # the whole reply took a while, but the CLI going fully
+                # silent for this long (a stuck tool-approval prompt with no
+                # TTY to answer it, a hung network call, etc.) means it will
+                # never finish on its own -- respond()'s single-call
+                # asyncio.wait_for can't help here since this loop reads
+                # incrementally instead of blocking on one process.communicate().
+                try:
+                    line = await asyncio.wait_for(process.stdout.readline(), timeout=self._timeout)
+                except TimeoutError as exc:
+                    # Cleanup (kill + wait) happens once, in the `except
+                    # Exception` block below -- doing it here too would
+                    # double-kill an already-reaped process.
+                    raise AssistantProviderError(
+                        f"Claude Code CLI produced no output for {self._timeout}s and was killed"
+                    ) from exc
                 if not line:
                     break
                 decoded = line.decode(errors="replace").strip()
