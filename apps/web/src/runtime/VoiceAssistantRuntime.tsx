@@ -43,6 +43,20 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
   const ttsDrainingRef = useRef(false);
   const pendingSentenceRef = useRef('');
   const autoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const turnAbortRef = useRef<AbortController | null>(null);
+
+  /** Cancels whatever assistant/chart-analysis stream is currently in
+   * flight and returns a fresh controller for the next one -- without this,
+   * a barge-in only stops audio playback while the interrupted turn's
+   * stream keeps running in the background and re-queues its own TTS
+   * behind the new turn's, so the two answers end up talking over each
+   * other. */
+  const beginNewTurn = useCallback((): AbortController => {
+    turnAbortRef.current?.abort();
+    const controller = new AbortController();
+    turnAbortRef.current = controller;
+    return controller;
+  }, []);
 
   const cancelAutoHide = useCallback(() => {
     if (autoHideTimerRef.current !== null) {
@@ -121,59 +135,73 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
   const runAssistantQuery = useCallback(
     async (text: string) => {
       cancelAutoHide();
+      const controller = beginNewTurn();
       setTranscript(text);
       setStreamedAnswer('');
       setStatus('THINKING');
       pendingSentenceRef.current = '';
 
-      await assistantClient.streamQuery(text, conversationIdRef.current, apiEndpoint, {
-        onDelta: (chunk) => {
-          setStreamedAnswer((prev) => prev + chunk);
-          feedStreamingText(chunk);
+      await assistantClient.streamQuery(
+        text,
+        conversationIdRef.current,
+        apiEndpoint,
+        {
+          onDelta: (chunk) => {
+            setStreamedAnswer((prev) => prev + chunk);
+            feedStreamingText(chunk);
+          },
+          onComplete: () => {
+            flushPendingSentence();
+            void drainTtsQueue().then(finishTurn);
+          },
+          onError: (detail) => {
+            setStreamedAnswer(`I couldn't reach the assistant: ${detail}`);
+            setStatus('IDLE');
+            scheduleAutoHide();
+          },
         },
-        onComplete: () => {
-          flushPendingSentence();
-          void drainTtsQueue().then(finishTurn);
-        },
-        onError: (detail) => {
-          setStreamedAnswer(`I couldn't reach the assistant: ${detail}`);
-          setStatus('IDLE');
-          scheduleAutoHide();
-        },
-      });
+        controller.signal
+      );
     },
-    [apiEndpoint, cancelAutoHide, drainTtsQueue, feedStreamingText, finishTurn, flushPendingSentence, scheduleAutoHide]
+    [apiEndpoint, beginNewTurn, cancelAutoHide, drainTtsQueue, feedStreamingText, finishTurn, flushPendingSentence, scheduleAutoHide]
   );
 
   const runChartAnalysis = useCallback(
     async (triggerPhrase: string) => {
       cancelAutoHide();
+      const controller = beginNewTurn();
       setTranscript(triggerPhrase);
       setStreamedAnswer('Looking at the chart...');
       setStatus('THINKING');
       pendingSentenceRef.current = '';
 
-      await chartAnalysisClient.analyze(apiEndpoint, conversationIdRef.current, {
-        onStatus: (text) => setStreamedAnswer(text),
-        onDelta: (chunk) => setStreamedAnswer((prev) => (prev === 'Looking at the chart...' ? chunk : prev + chunk)),
-        onComplete: (result, timing) => {
-          console.info('[VoiceAssistantRuntime] chart analysis timing (ms):', timing);
-          setStreamedAnswer(result.formatted_tars_text || result.market_context);
-          if (result.speech_text) enqueueSentence(result.speech_text);
-          void drainTtsQueue().then(finishTurn);
+      await chartAnalysisClient.analyze(
+        apiEndpoint,
+        conversationIdRef.current,
+        {
+          onStatus: (text) => setStreamedAnswer(text),
+          onDelta: (chunk) => setStreamedAnswer((prev) => (prev === 'Looking at the chart...' ? chunk : prev + chunk)),
+          onComplete: (result, timing) => {
+            console.info('[VoiceAssistantRuntime] chart analysis timing (ms):', timing);
+            setStreamedAnswer(result.formatted_tars_text || result.market_context);
+            if (result.speech_text) enqueueSentence(result.speech_text);
+            void drainTtsQueue().then(finishTurn);
+          },
+          onError: (detail) => {
+            setStreamedAnswer(`Chart analysis failed: ${detail}`);
+            setStatus('IDLE');
+            scheduleAutoHide();
+          },
         },
-        onError: (detail) => {
-          setStreamedAnswer(`Chart analysis failed: ${detail}`);
-          setStatus('IDLE');
-          scheduleAutoHide();
-        },
-      });
+        controller.signal
+      );
     },
-    [apiEndpoint, cancelAutoHide, drainTtsQueue, enqueueSentence, finishTurn, scheduleAutoHide]
+    [apiEndpoint, beginNewTurn, cancelAutoHide, drainTtsQueue, enqueueSentence, finishTurn, scheduleAutoHide]
   );
 
   const handleBargeIn = useCallback(() => {
     if (statusRef.current !== 'SPEAKING') return;
+    turnAbortRef.current?.abort();
     ttsQueueRef.current = [];
     pendingSentenceRef.current = '';
     audioService.stopSpeaking();
@@ -224,6 +252,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
       windowLifecycle.stop();
       wakeClient.stop();
       cancelAutoHide();
+      turnAbortRef.current?.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

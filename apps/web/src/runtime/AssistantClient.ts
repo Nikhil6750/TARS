@@ -17,7 +17,8 @@ export class AssistantClient {
     text: string,
     conversationId: string | undefined,
     apiEndpoint: string,
-    callbacks: AssistantStreamCallbacks
+    callbacks: AssistantStreamCallbacks,
+    signal?: AbortSignal
   ): Promise<void> {
     let res: Response;
     try {
@@ -25,8 +26,10 @@ export class AssistantClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, conversation_id: conversationId }),
+        signal,
       });
     } catch (err) {
+      if (signal?.aborted) return;
       callbacks.onError?.(err instanceof Error ? err.message : String(err));
       return;
     }
@@ -36,15 +39,20 @@ export class AssistantClient {
       return;
     }
 
-    await consumeSSE(res.body, (event: StreamEvent) => {
-      if (event.type === 'delta' && event.text) {
-        callbacks.onDelta?.(event.text);
-      } else if (event.type === 'complete') {
-        callbacks.onComplete?.(event.message as Record<string, unknown> | undefined);
-      } else if (event.type === 'error') {
-        callbacks.onError?.(event.detail || 'Assistant stream reported an error');
-      }
-    });
+    try {
+      await consumeSSE(res.body, (event: StreamEvent) => {
+        if (event.type === 'delta' && event.text) {
+          callbacks.onDelta?.(event.text);
+        } else if (event.type === 'complete') {
+          callbacks.onComplete?.(event.message as Record<string, unknown> | undefined);
+        } else if (event.type === 'error') {
+          callbacks.onError?.(event.detail || 'Assistant stream reported an error');
+        }
+      });
+    } catch (err) {
+      if (signal?.aborted) return;
+      callbacks.onError?.(err instanceof Error ? err.message : String(err));
+    }
   }
 }
 

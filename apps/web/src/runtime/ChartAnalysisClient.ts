@@ -33,7 +33,8 @@ export class ChartAnalysisClient {
   public async analyze(
     apiEndpoint: string,
     conversationId: string,
-    callbacks: ChartAnalysisCallbacks
+    callbacks: ChartAnalysisCallbacks,
+    signal?: AbortSignal
   ): Promise<void> {
     callbacks.onStatus?.('Looking at the chart...');
     const captureStarted = performance.now();
@@ -43,6 +44,7 @@ export class ChartAnalysisClient {
       nativeBridge.captureActiveWindow(true),
     ]);
     const captureMs = Math.round(performance.now() - captureStarted);
+    if (signal?.aborted) return;
 
     if (capture.error || capture.is_secure_desktop) {
       callbacks.onError?.(capture.error || 'Capture was refused (secure desktop) -- nothing to analyze.');
@@ -59,8 +61,10 @@ export class ChartAnalysisClient {
           capture,
           active_context: activeContext,
         }),
+        signal,
       });
     } catch (err) {
+      if (signal?.aborted) return;
       callbacks.onError?.(err instanceof Error ? err.message : String(err));
       return;
     }
@@ -77,18 +81,23 @@ export class ChartAnalysisClient {
       complete_ms: null,
     };
 
-    await consumeSSE(res.body, (event: ChartStreamEvent) => {
-      if (event.type === 'status' && event.text) {
-        callbacks.onStatus?.(event.text);
-      } else if (event.type === 'delta' && event.text) {
-        callbacks.onDelta?.(event.text);
-      } else if (event.type === 'complete' && event.result) {
-        timing = { ...timing, ...(event.timing || {}) };
-        callbacks.onComplete?.(event.result, timing);
-      } else if (event.type === 'error') {
-        callbacks.onError?.(event.detail || 'Chart analysis failed');
-      }
-    });
+    try {
+      await consumeSSE(res.body, (event: ChartStreamEvent) => {
+        if (event.type === 'status' && event.text) {
+          callbacks.onStatus?.(event.text);
+        } else if (event.type === 'delta' && event.text) {
+          callbacks.onDelta?.(event.text);
+        } else if (event.type === 'complete' && event.result) {
+          timing = { ...timing, ...(event.timing || {}) };
+          callbacks.onComplete?.(event.result, timing);
+        } else if (event.type === 'error') {
+          callbacks.onError?.(event.detail || 'Chart analysis failed');
+        }
+      });
+    } catch (err) {
+      if (signal?.aborted) return;
+      callbacks.onError?.(err instanceof Error ? err.message : String(err));
+    }
   }
 }
 
