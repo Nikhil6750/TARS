@@ -138,34 +138,31 @@ fn run(app: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("no usable input config: {e}"))?;
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
-    let sample_rate = config.sample_rate.0;
+    let sample_rate = config.sample_rate;
     let channels = config.channels as usize;
 
     let (tx, rx) = channel::<Vec<f32>>();
-    let err_fn = move |err| {
-        eprintln!("[wake_engine] audio stream error: {err}");
-    };
 
     let stream = match sample_format {
         cpal::SampleFormat::F32 => {
             let tx = tx.clone();
             device.build_input_stream(
-                &config,
+                config.clone(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     let _ = tx.send(downmix_f32(data, channels));
                 },
-                err_fn,
+                |err| eprintln!("[wake_engine] audio stream error: {err}"),
                 None,
             )
         }
         cpal::SampleFormat::I16 => {
             let tx = tx.clone();
             device.build_input_stream(
-                &config,
+                config.clone(),
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     let _ = tx.send(downmix_i16(data, channels));
                 },
-                err_fn,
+                |err| eprintln!("[wake_engine] audio stream error: {err}"),
                 None,
             )
         }
