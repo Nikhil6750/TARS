@@ -31,6 +31,14 @@ $BackendPort = 8000
 $HealthUrl = "http://127.0.0.1:$BackendPort/api/v1/health"
 $ReadinessUrl = "http://127.0.0.1:$BackendPort/api/v1/runtime/readiness"
 
+# Keep Rust/npm build caches off C: -- set explicitly here rather than
+# trusting the persistent user-level setting alone, since a shell started
+# before that was configured won't pick it up automatically.
+$env:CARGO_TARGET_DIR = 'D:\TARS-cache\cargo-target'
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+    npm config set cache 'D:\TARS-cache\npm' --global 2>&1 | Out-Null
+}
+
 function Write-Step($msg) { Write-Host $msg -ForegroundColor Cyan }
 function Write-Ok($msg) { Write-Host $msg -ForegroundColor Green }
 function Write-Warn($msg) { Write-Warning $msg }
@@ -148,16 +156,24 @@ try {
 
 # ---- 6. Launch native TARS --------------------------------------------------
 Write-Step "[6/7] Launching native TARS..."
-$exeRelease = Join-Path $WebDir 'src-tauri\target\release\tars-companion.exe'
-$exeDebug = Join-Path $WebDir 'src-tauri\target\debug\tars-companion.exe'
-if (Test-Path $exeRelease) {
-    Start-Process -FilePath $exeRelease
-    Write-Ok "  Launched $exeRelease"
-} elseif (Test-Path $exeDebug) {
-    Start-Process -FilePath $exeDebug
-    Write-Ok "  Launched $exeDebug (debug build)"
+# CARGO_TARGET_DIR (see top of this script) redirects cargo/tauri build
+# output off C: -- check there first, then fall back to the default
+# in-repo target dir for any build made before that redirect was set.
+$cargoTargetDir = $env:CARGO_TARGET_DIR
+if (-not $cargoTargetDir) { $cargoTargetDir = Join-Path $WebDir 'src-tauri\target' }
+$candidates = @(
+    (Join-Path $cargoTargetDir 'release\tars-companion.exe'),
+    (Join-Path $cargoTargetDir 'debug\tars-companion.exe'),
+    (Join-Path $WebDir 'src-tauri\target\release\tars-companion.exe'),
+    (Join-Path $WebDir 'src-tauri\target\debug\tars-companion.exe')
+)
+$exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($exe) {
+    Start-Process -FilePath $exe
+    Write-Ok "  Launched $exe"
 } else {
-    Write-Warn "  No built TARS executable found at $exeRelease or $exeDebug."
+    Write-Warn "  No built TARS executable found. Checked:"
+    foreach ($c in $candidates) { Write-Warn "    $c" }
     Write-Warn "  Build it first: cd apps\web; npm run tauri build   (or 'npm run tauri dev' for a dev run)."
 }
 
