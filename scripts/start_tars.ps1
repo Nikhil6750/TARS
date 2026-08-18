@@ -123,7 +123,16 @@ if (-not $pythonCmd) {
     Write-Error "python not found on PATH. Install Python 3.12+ and backend dependencies (apps/backend/requirements*.txt) first."
     exit 1
 }
-$backendProc = Start-Process -FilePath $pythonCmd.Source -ArgumentList 'run.py' -WorkingDirectory $BackendDir -PassThru -WindowStyle Hidden
+# Passes run.py's full path as the argument rather than relying on
+# -WorkingDirectory: run.py resolves everything (REPO_ROOT, sys.path) from
+# its own __file__, so it doesn't need a working directory -- and this way
+# the process's actual CommandLine contains $BackendDir, which is what step
+# 1's stale-backend ownership check (above) matches against. With just
+# 'run.py' + -WorkingDirectory, CommandLine never contains the working
+# directory at all, so step 1 could never recognize a backend this script
+# itself had previously started.
+$runPyPath = Join-Path $BackendDir 'run.py'
+$backendProc = Start-Process -FilePath $pythonCmd.Source -ArgumentList $runPyPath -PassThru -WindowStyle Hidden
 Write-Host "  Backend process started (PID $($backendProc.Id))."
 
 # ---- 5. Wait for /health ----------------------------------------------------
