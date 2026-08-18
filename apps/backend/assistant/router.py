@@ -94,6 +94,105 @@ class AssistantRouter:
             assistant_message=assistant_message,
         )
 
+    async def handle_text_stream(self, text: str, conversation_id: str | None):
+        """Streaming twin of handle_text: yields `{"type": "delta", ...}`
+        events as the provider produces them and a final `{"type":
+        "complete", "message": ...}` once the full reply is known, instead
+        of blocking on the whole response first. Deterministic replies
+        (already instant) are still delivered as a single delta + complete
+        pair so callers only need to handle one event shape."""
+        conversation_id = conversation_id or str(uuid4())
+
+        user_message = AssistantMessage(
+            conversation_id=UUID(conversation_id),
+            role=MessageRole.user,
+            content=text,
+            input_mode=InputMode.text,
+        )
+        await self._save(user_message)
+
+        intent, deterministic_text = await self._try_deterministic(text)
+        if deterministic_text is not None:
+            assistant_message = AssistantMessage(
+                conversation_id=UUID(conversation_id),
+                role=MessageRole.assistant,
+                content=deterministic_text,
+                input_mode=InputMode.text,
+                intent=intent,
+                providers=MessageProviders(assistant="deterministic"),
+            )
+            await self._save(assistant_message)
+            yield {"type": "delta", "text": deterministic_text}
+            yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+            return
+
+        active = await self._events.get_active_setups()
+        history_rows = await self._conversations.get_recent(conversation_id, limit=10)
+        history = [
+            {"role": row["role"], "content": row["content"]}
+            for row in history_rows
+            if row["role"] in ("user", "assistant")
+        ]
+        memory_notes: list[dict[str, Any]] = []
+        if self._memory is not None:
+            try:
+                memory_notes = await self._memory.search(text, limit=3)
+            except Exception:
+                pass
+
+        request = AssistantRequest(
+            text=text,
+            conversation_id=conversation_id,
+            system_context=build_system_context(active, memory_notes=memory_notes),
+            history=history,
+        )
+
+        if hasattr(self._provider, "respond_stream"):
+            accumulated = ""
+            final_provider = self._provider.name
+            try:
+                async for event in self._provider.respond_stream(request):
+                    if event.get("type") == "delta":
+                        chunk = event.get("text", "")
+                        accumulated += chunk
+                        if chunk:
+                            yield {"type": "delta", "text": chunk}
+                    elif event.get("type") == "complete":
+                        accumulated = event.get("text", accumulated)
+                        final_provider = event.get("provider", final_provider)
+            except AssistantProviderError as exc:
+                assistant_message = AssistantMessage(
+                    conversation_id=UUID(conversation_id),
+                    role=MessageRole.assistant,
+                    content=(
+                        "I couldn't reach the configured assistant provider "
+                        f"({self._provider.name}) to answer that."
+                    ),
+                    input_mode=InputMode.text,
+                    providers=MessageProviders(assistant=self._provider.name),
+                    error=str(exc),
+                )
+                await self._save(assistant_message)
+                yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+                return
+
+            assistant_message = AssistantMessage(
+                conversation_id=UUID(conversation_id),
+                role=MessageRole.assistant,
+                content=accumulated,
+                input_mode=InputMode.text,
+                providers=MessageProviders(assistant=final_provider),
+            )
+        else:
+            # Provider has no streaming mode -- fall back to one blocking
+            # call, delivered as a single delta so callers still only ever
+            # handle the delta/complete shape.
+            assistant_message = await self._call_provider(text, conversation_id)
+            yield {"type": "delta", "text": assistant_message.content}
+
+        await self._save(assistant_message)
+        yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+
     async def _try_deterministic(self, text: str) -> tuple[str | None, str | None]:
         if _ACTIVE_SETUPS_PATTERN.search(text):
             active = await self._events.get_active_setups()

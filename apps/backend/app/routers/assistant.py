@@ -65,6 +65,40 @@ async def assistant_query(
     return reply.assistant_message.to_contract_dict()
 
 
+@router.post("/api/v1/assistant/query/stream")
+async def assistant_query_stream(
+    request: Request,
+    orchestrator: TarsOrchestrator = Depends(get_orchestrator),
+) -> StreamingResponse:
+    """Streaming twin of /api/v1/assistant/query: the UI gets the first
+    token as soon as the provider produces it instead of waiting for the
+    full reply, matching the chart-analysis stream's SSE shape (`delta` /
+    `complete` events)."""
+    try:
+        raw: Any = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON payload: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="Request payload must be a JSON object")
+
+    text = raw.get("text", "")
+    conversation_id = raw.get("conversation_id")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=422, detail="Query text must be a non-empty string")
+
+    async def event_generator():
+        try:
+            async for item in orchestrator.handle_text_stream(
+                text=text,
+                conversation_id=str(conversation_id) if conversation_id else str(uuid4()),
+            ):
+                yield f"data: {json.dumps(item)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @router.post("/api/v1/assistant/analyze-chart")
 async def analyze_chart(
     request: Request,

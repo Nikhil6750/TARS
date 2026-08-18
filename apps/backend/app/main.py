@@ -36,6 +36,7 @@ from app.routers import (
     events,
     health,
     memory,
+    runtime,
     voice,
     ws,
 )
@@ -68,6 +69,33 @@ MAX_BODY_BYTES = 16 * 1_048_576
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_tracing("tars-backend", settings.otel_exporter_otlp_endpoint)
+
+    from app.readiness import (
+        NOT_CONFIGURED_MESSAGE,
+        REQUIRED_ASSISTANT_PROVIDER,
+        REQUIRED_STT_PROVIDER,
+        REQUIRED_TTS_PROVIDER,
+    )
+
+    misconfigured = [
+        name
+        for name, configured, expected in (
+            ("assistant_provider", settings.assistant_provider, REQUIRED_ASSISTANT_PROVIDER),
+            ("stt_provider", settings.stt_provider, REQUIRED_STT_PROVIDER),
+            ("tts_provider", settings.tts_provider, REQUIRED_TTS_PROVIDER),
+        )
+        if configured != expected
+    ]
+    if misconfigured:
+        # Never crash over this -- mock providers remain a legitimate dev
+        # mode -- but never silently pretend real voice interaction is
+        # ready either. GET /api/v1/runtime/readiness is the authoritative,
+        # machine-checkable version of this same warning.
+        logger.warning(
+            "%s Not real-provider-configured: %s. Check GET /api/v1/runtime/readiness.",
+            NOT_CONFIGURED_MESSAGE,
+            ", ".join(misconfigured),
+        )
 
     if settings.effective_host == "0.0.0.0":
         logger.warning(
@@ -247,6 +275,7 @@ def create_app() -> FastAPI:
     app.add_middleware(MaxBodySizeMiddleware, max_bytes=MAX_BODY_BYTES)
 
     app.include_router(health.router)
+    app.include_router(runtime.router)
     app.include_router(events.router)
     app.include_router(assistant.router)
     app.include_router(memory.router)

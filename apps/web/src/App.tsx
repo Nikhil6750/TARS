@@ -24,8 +24,6 @@ import { actionRuntimeClient } from './services/actions';
 
 import { DesktopHeader } from './components/navigation/DesktopHeader';
 import { MobileTabBar } from './components/navigation/MobileTabBar';
-import { HUDOverlay } from './components/hud/HUDOverlay';
-import { FloatingVoicePanel } from './components/voice/FloatingVoicePanel';
 import { CompanionHero } from './components/companion/CompanionHero';
 import { ActiveSetupsView } from './components/setups/ActiveSetupsView';
 import { AlertHistoryView } from './components/alerts/AlertHistoryView';
@@ -35,8 +33,8 @@ import { MemoryView } from './components/memory/MemoryView';
 import { SystemStatusView } from './components/system/SystemStatusView';
 import { SettingsView } from './components/settings/SettingsView';
 import { nativeBridge } from './services/native-bridge';
-import { wakeWordService, WakeWordStatusInfo } from './services/wake-word';
 import { ChartAnalysisData } from './components/hud/ChartAnalysisCard';
+import { VoiceAssistantRuntime } from './runtime/VoiceAssistantRuntime';
 
 const ANALYZE_CHART_PATTERN = /\b(analy[sz]e)\s+(this|the|my)?\s*chart\b/i;
 
@@ -47,8 +45,11 @@ export const App: React.FC = () => {
   // View & UI Navigation
   const [activeTab, setActiveTab] = useState<ActiveTab>('companion');
   const [companionState, setCompanionState] = useState<CompanionVisualState>('IDLE');
-  const [compactLayoutMode, setCompactLayoutMode] = useState<'voice' | 'hud'>('voice');
-  const [activeContextTitle, setActiveContextTitle] = useState<string>('');
+  // Which surface the single native window is currently showing -- the
+  // minimal voice-first panel (default) or the optional full dashboard.
+  // Driven by native tars://summon-hud events (see WindowLifecycle), which
+  // fire both from wake detection and from tray "Open Main Dashboard".
+  const [appMode, setAppMode] = useState<'voice' | 'workstation'>('voice');
 
   // Real-time Data Stores
   const [activeSetups, setActiveSetups] = useState<TARSTradingEvent[]>([]);
@@ -57,14 +58,6 @@ export const App: React.FC = () => {
   const [chatMessages, setChatMessages] = useState<TARSAssistantMessage[]>(loadStoredChat);
   const [criticalWarnings, setCriticalWarnings] = useState<string[]>([]);
   const [protocolErrors, setProtocolErrors] = useState<Array<{ title: string; errors: string[] }>>([]);
-
-  // Chart Analysis & Demo State
-  const [latestChartAnalysis, setLatestChartAnalysis] = useState<ChartAnalysisData | null>(null);
-  const [isAnalyzingChart, setIsAnalyzingChart] = useState(false);
-  const [streamedAnalysisText, setStreamedAnalysisText] = useState<string>('');
-  const [liveTranscript, setLiveTranscript] = useState<string>('');
-  const [voiceErrorMessage, setVoiceErrorMessage] = useState<string | null>(null);
-  const [wakeStatus, setWakeStatus] = useState<WakeWordStatusInfo>(() => wakeWordService.getStatus());
 
   // Audio / Mic State
   const [isListening, setIsListening] = useState(false);
@@ -83,8 +76,6 @@ export const App: React.FC = () => {
   companionStateRef.current = companionState;
 
   const autoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const compactLayoutModeRef = useRef<'voice' | 'hud'>('voice');
-  compactLayoutModeRef.current = compactLayoutMode;
 
   const cancelAutoHide = useCallback(() => {
     if (autoHideTimerRef.current !== null) {
@@ -93,14 +84,17 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  // Auto-hide only applies to the dashboard's own legacy PTT/chat surfaces
+  // (CompanionHero/AskTARSView/VoiceControlView) -- the voice-first panel
+  // manages its own hide timing inside VoiceAssistantRuntime.
   const scheduleAutoHide = useCallback((delayMs = 2800) => {
     cancelAutoHide();
-    if (settings.compactMode && compactLayoutModeRef.current === 'voice') {
+    if (appMode === 'voice') {
       autoHideTimerRef.current = setTimeout(() => {
         nativeBridge.hideHUD();
       }, delayMs);
     }
-  }, [settings.compactMode, cancelAutoHide]);
+  }, [appMode, cancelAutoHide]);
 
   // Save settings when changed
   const updateSettings = useCallback((newPartial: Partial<AppSettings>) => {
@@ -121,68 +115,40 @@ export const App: React.FC = () => {
     toggleCompactWindow(settings.compactMode);
   }, [settings.compactMode]);
 
-  // Refresh active window context title periodically or on summon
-  const refreshContextTitle = useCallback(async () => {
-    try {
-      const ctx = await nativeBridge.getActiveWindowContext();
-      if (ctx) {
-        setActiveContextTitle(ctx.window_title || ctx.executable || 'Desktop');
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  // Register Global & In-App Shortcuts (Ctrl+Shift+Space / Ctrl+Shift+T / Ctrl+Shift+V)
+  // Register Global Shortcuts (Ctrl+Shift+Space / Ctrl+Shift+T summon the
+  // voice panel; Ctrl+Shift+V triggers the dashboard's own legacy PTT).
+  // Escape/hide and the native tars://summon-hud -> appMode wiring live in
+  // VoiceAssistantRuntime/WindowLifecycle, which are always mounted, so
+  // they are not duplicated here.
   useEffect(() => {
-    const handleSummonHUD = (mode: 'voice' | 'hud' = 'voice') => {
-      cancelAutoHide();
-      setSettings((prev) => {
-        const next = { ...prev, compactMode: true };
-        saveSettings(next);
-        return next;
-      });
-      setCompactLayoutMode(mode);
-      nativeBridge.summonHUD(mode);
-      refreshContextTitle();
-    };
-
-    // 1. In-App Keydown Listener (for web, PWA, and direct in-window input)
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === ' ' || e.code === 'Space')) {
         e.preventDefault();
-        handleSummonHUD('voice');
+        nativeBridge.summonHUD('voice');
       } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
         e.preventDefault();
-        handleSummonHUD('voice');
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        cancelAutoHide();
-        nativeBridge.hideHUD();
+        nativeBridge.summonHUD('voice');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
 
-    // 2. Native OS Global Shortcuts
-    registerGlobalShortcut('CommandOrControl+Shift+Space', () => handleSummonHUD('voice'));
-    registerGlobalShortcut('CommandOrControl+Shift+T', () => handleSummonHUD('voice'));
+    registerGlobalShortcut('CommandOrControl+Shift+Space', () => nativeBridge.summonHUD('voice'));
+    registerGlobalShortcut('CommandOrControl+Shift+T', () => nativeBridge.summonHUD('voice'));
 
-    // 3. Native event bridge listeners (tars://summon-hud and tars://ptt-toggle)
-    let cleanupNativeListeners: (() => void) | undefined;
-    nativeBridge.listenToNativeEvents(
-      () => handleSummonHUD('voice'),
-      () => handleTogglePushToTalk()
-    ).then((cleanup) => {
-      cleanupNativeListeners = cleanup;
-    });
+    let cleanupPtt: (() => void) | undefined;
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      cleanupPtt = await listen('tars://ptt-toggle', () => handleTogglePushToTalk());
+    })();
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       unregisterGlobalShortcut('CommandOrControl+Shift+Space');
       unregisterGlobalShortcut('CommandOrControl+Shift+T');
-      if (cleanupNativeListeners) cleanupNativeListeners();
+      if (cleanupPtt) cleanupPtt();
     };
-  }, [cancelAutoHide, refreshContextTitle]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Handle incoming Trading Events with lifecycle state management
   const handleIncomingTradingEvent = useCallback((event: TARSTradingEvent) => {
@@ -257,7 +223,6 @@ export const App: React.FC = () => {
 
     if (msg.role === 'assistant') {
       setCompanionState('SPEAKING');
-      setStreamedAnalysisText(msg.content);
 
       if (settings.audioEnabled && msg.content) {
         audioService.synthesizeAndPlay(msg.content, settings.apiEndpoint, (vol) => {
@@ -284,16 +249,6 @@ export const App: React.FC = () => {
     }
   }, [settings.audioEnabled, settings.apiEndpoint, settings.speechRate, settings.speechVolume, cancelAutoHide, scheduleAutoHide]);
 
-  // Barge-in: immediately stops TTS speaking and transitions back to listening
-  const handleInterruptSpeech = useCallback(() => {
-    cancelAutoHide();
-    audioService.stopSpeaking();
-    setCompanionState('LISTENING');
-    setIsListening(true);
-    setAudioVolume(0);
-    wakeWordService.beginCommandCaptureManual();
-  }, [cancelAutoHide]);
-
   // "Analyze this chart": captures the active window through the real,
   // backend-authorized capture flow and the active-window context
   const isAnalyzingChartRef = useRef(false);
@@ -316,10 +271,7 @@ export const App: React.FC = () => {
       providers: providerName ? { assistant: providerName } : undefined,
     });
 
-    setIsAnalyzingChart(true);
     setCompanionState('THINKING');
-    setStreamedAnalysisText('Capturing active screen and analyzing chart...');
-    setLatestChartAnalysis(null);
 
     try {
       const [activeContext, capture] = await Promise.all([
@@ -328,7 +280,6 @@ export const App: React.FC = () => {
       ]);
 
       if (capture.is_secure_desktop) {
-        setStreamedAnalysisText('');
         handleIncomingAssistantMessage(
           newMessage(
             "I can't capture the screen right now — a secure desktop or credential prompt is active.",
@@ -338,14 +289,11 @@ export const App: React.FC = () => {
         return;
       }
       if (capture.error) {
-        setStreamedAnalysisText('');
         handleIncomingAssistantMessage(
           newMessage(`I couldn't capture the screen to analyze it: ${capture.error}`, capture.error)
         );
         return;
       }
-
-      setStreamedAnalysisText('Chart captured. TARS analyzing price structure...\n\n');
 
       let streamCompleted = false;
       try {
@@ -359,7 +307,6 @@ export const App: React.FC = () => {
           const reader = streamRes.body.getReader();
           const decoder = new TextDecoder('utf-8');
           let buffer = '';
-          let accumulatedText = '';
           let finalData: ChartAnalysisData | null = null;
 
           while (true) {
@@ -374,10 +321,7 @@ export const App: React.FC = () => {
               if (trimmed.startsWith('data: ')) {
                 try {
                   const event = JSON.parse(trimmed.slice(6));
-                  if (event.type === 'delta' && typeof event.text === 'string') {
-                    accumulatedText += event.text;
-                    setStreamedAnalysisText(accumulatedText);
-                  } else if (event.type === 'complete' && event.result) {
+                  if (event.type === 'complete' && event.result) {
                     finalData = event.result as ChartAnalysisData;
                     streamCompleted = true;
                   }
@@ -389,8 +333,6 @@ export const App: React.FC = () => {
           }
 
           if (finalData) {
-            setLatestChartAnalysis(finalData);
-            setStreamedAnalysisText('');
             const spoken: string =
               typeof finalData.speech_text === 'string' && finalData.speech_text
                 ? finalData.speech_text
@@ -414,14 +356,11 @@ export const App: React.FC = () => {
         if (!response.ok) {
           const errBody = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
           const detail = typeof errBody.detail === 'string' ? errBody.detail : `HTTP ${response.status}`;
-          setStreamedAnalysisText('');
           handleIncomingAssistantMessage(newMessage(`Chart analysis failed: ${detail}`, detail));
           return;
         }
 
         const result = await response.json();
-        setLatestChartAnalysis(result);
-        setStreamedAnalysisText('');
         const spoken: string =
           typeof result.speech_text === 'string' && result.speech_text
             ? result.speech_text
@@ -430,18 +369,15 @@ export const App: React.FC = () => {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setStreamedAnalysisText('');
       handleIncomingAssistantMessage(newMessage(`Chart analysis error: ${msg}`, msg));
     } finally {
       isAnalyzingChartRef.current = false;
-      setIsAnalyzingChart(false);
     }
   }, [settings.apiEndpoint, handleIncomingAssistantMessage, cancelAutoHide]);
 
   // Shared routing for any already-transcribed voice utterance
   const processVoiceTranscript = useCallback(async (transcript: string) => {
     cancelAutoHide();
-    setVoiceErrorMessage(null);
     const convId = 'conv_voice_session';
     setCompanionState('THINKING');
 
@@ -460,9 +396,6 @@ export const App: React.FC = () => {
     try {
       actionRuntimeClient.setEndpoint(settings.apiEndpoint);
       const activeContext = await nativeBridge.getActiveWindowContext();
-      if (activeContext) {
-        setActiveContextTitle(activeContext.window_title || activeContext.executable || '');
-      }
 
       const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
         transcript,
@@ -494,7 +427,6 @@ export const App: React.FC = () => {
       }
     } catch (err) {
       console.warn('[TARS Voice] Voice processing error:', err);
-      setVoiceErrorMessage(err instanceof Error ? err.message : String(err));
     }
 
     if (settings.mockGeneratorActive) {
@@ -507,79 +439,6 @@ export const App: React.FC = () => {
       scheduleAutoHide(2500);
     }
   }, [settings.apiEndpoint, settings.mockGeneratorActive, activeSetups, handleIncomingAssistantMessage, handleAnalyzeChart, cancelAutoHide, scheduleAutoHide]);
-
-  // Local, always-on background wake listener ("Hey TARS" / "Analyze this chart")
-  useEffect(() => {
-    const summonVoicePanel = () => {
-      cancelAutoHide();
-      setSettings((prev) => {
-        if (!prev.compactMode) {
-          const next = { ...prev, compactMode: true };
-          saveSettings(next);
-          return next;
-        }
-        return prev;
-      });
-      setCompactLayoutMode('voice');
-      nativeBridge.summonHUD('voice');
-      refreshContextTitle();
-    };
-
-    wakeWordService.startListening(
-      {
-        onWakeDetected: (phrase) => {
-          console.info('[TARS Wake] Phrase detected:', phrase);
-          summonVoicePanel();
-          setCompanionState('WAKE');
-          setTimeout(() => {
-            setCompanionState('LISTENING');
-            setIsListening(true);
-          }, 350);
-        },
-        onAnalyzeChartDetected: async (phrase) => {
-          console.info('[TARS Wake] Direct chart analysis command detected:', phrase);
-          summonVoicePanel();
-          await handleAnalyzeChart();
-        },
-        onSpeechStart: () => {
-          // Real-time barge-in detection: if speaking when user speaks, interrupt immediately!
-          if (companionStateRef.current === 'SPEAKING') {
-            console.info('[TARS Voice] Barge-in speech onset detected: interrupting TTS');
-            audioService.stopSpeaking();
-            setCompanionState('LISTENING');
-            setIsListening(true);
-          }
-        },
-        onCommandCaptured: async (transcript) => {
-          console.info('[TARS Wake] Command captured:', transcript);
-          setIsListening(false);
-          setAudioVolume(0);
-          await processVoiceTranscript(transcript);
-        },
-        onCommandTimeout: () => {
-          console.info('[TARS Wake] No command heard after wake, returning to background listening.');
-          setIsListening(false);
-          setAudioVolume(0);
-          setCompanionState('IDLE');
-          scheduleAutoHide(2000);
-        },
-        onTranscriptInterim: (text) => {
-          setLiveTranscript(text);
-        },
-        onStateChange: (status) => {
-          setWakeStatus(status);
-        },
-        onAudioLevel: (level) => {
-          setAudioVolume(level);
-        },
-      },
-      settings.apiEndpoint
-    );
-
-    return () => {
-      wakeWordService.stopListening();
-    };
-  }, [handleAnalyzeChart, processVoiceTranscript, settings.apiEndpoint, cancelAutoHide, scheduleAutoHide, refreshContextTitle]);
 
   // Fetch initial state from HTTP backend on mount
   useEffect(() => {
@@ -779,267 +638,129 @@ export const App: React.FC = () => {
     handleIncomingTradingEvent(evt);
   };
 
-  // Compact Mode (Minimal Voice Panel or Full HUD)
-  if (settings.compactMode) {
-    if (compactLayoutMode === 'voice') {
-      return (
-        <div className="w-screen h-screen bg-transparent p-1 overflow-hidden flex items-center justify-center">
-          <FloatingVoicePanel
-            companionState={companionState}
-            isListening={isListening}
-            onTogglePushToTalk={handleTogglePushToTalk}
-            audioVolume={audioVolume}
-            liveTranscript={liveTranscript}
-            streamedText={streamedAnalysisText}
-            responseSpeakerText={chatMessages.length > 0 && chatMessages[chatMessages.length - 1].role === 'assistant' ? chatMessages[chatMessages.length - 1].content : undefined}
-            errorMessage={voiceErrorMessage}
-            wakeStatus={wakeStatus}
-            onToggleWakeListening={() => {
-              if (wakeStatus.isActive) {
-                wakeWordService.stopListening();
-                setWakeStatus(wakeWordService.getStatus());
-              } else {
-                wakeWordService.startListening(
-                  {
-                    onWakeDetected: () => {
-                      setSettings((prev) => ({ ...prev, compactMode: true }));
-                      setCompanionState('WAKE');
-                      setTimeout(() => {
-                        setCompanionState('LISTENING');
-                        setIsListening(true);
-                      }, 350);
-                    },
-                    onAnalyzeChartDetected: () => handleAnalyzeChart(),
-                    onSpeechStart: () => {
-                      if (companionStateRef.current === 'SPEAKING') {
-                        audioService.stopSpeaking();
-                        setCompanionState('LISTENING');
-                        setIsListening(true);
-                      }
-                    },
-                    onCommandCaptured: async (transcript) => {
-                      setIsListening(false);
-                      setAudioVolume(0);
-                      await processVoiceTranscript(transcript);
-                    },
-                    onCommandTimeout: () => {
-                      setIsListening(false);
-                      setAudioVolume(0);
-                      setCompanionState('IDLE');
-                      scheduleAutoHide(2000);
-                    },
-                    onTranscriptInterim: (text) => setLiveTranscript(text),
-                    onStateChange: (status) => setWakeStatus(status),
-                    onAudioLevel: (level) => setAudioVolume(level),
-                  },
-                  settings.apiEndpoint
-                );
-                setWakeStatus(wakeWordService.getStatus());
-              }
-            }}
-            onInterruptSpeech={handleInterruptSpeech}
-            onExpandToHUD={() => {
-              setCompactLayoutMode('hud');
-              nativeBridge.setWindowSize(440, 740, true);
-            }}
-            onExpandToWorkstation={() => {
-              updateSettings({ compactMode: false });
-              nativeBridge.setWindowSize(1280, 840, false);
-            }}
-            onDismiss={() => {
-              cancelAutoHide();
-              nativeBridge.hideHUD();
-            }}
-            activeContextTitle={activeContextTitle}
-          />
-        </div>
-      );
-    }
-
-    // HUD Mode (Wave 2A/2B Action & Trading HUD)
-    return (
-      <div className="w-screen h-screen bg-[#03060a] p-1 overflow-hidden">
-        <HUDOverlay
-          companionState={companionState}
-          onExpand={() => updateSettings({ compactMode: false })}
-          onHideHUD={() => {
-            cancelAutoHide();
-            nativeBridge.hideHUD();
-          }}
-          activeSetups={activeSetups}
-          criticalWarnings={criticalWarnings}
-          isListening={isListening}
-          onTogglePushToTalk={handleTogglePushToTalk}
-          audioVolume={audioVolume}
-          apiEndpoint={settings.apiEndpoint}
-          onSendMessage={handleSendMessage}
-          onAnalyzeChart={handleAnalyzeChart}
-          latestChartAnalysis={latestChartAnalysis}
-          onClearChartAnalysis={() => setLatestChartAnalysis(null)}
-          wakeStatus={wakeStatus}
-          onToggleWakeListening={() => {
-            if (wakeStatus.isActive) {
-              wakeWordService.stopListening();
-              setWakeStatus(wakeWordService.getStatus());
-            } else {
-              wakeWordService.startListening(
-                {
-                  onWakeDetected: () => {
-                    setSettings((prev) => ({ ...prev, compactMode: true }));
-                    setCompanionState('WAKE');
-                    setTimeout(() => {
-                      setCompanionState('LISTENING');
-                      setIsListening(true);
-                    }, 350);
-                  },
-                  onAnalyzeChartDetected: () => handleAnalyzeChart(),
-                  onSpeechStart: () => {
-                    if (companionStateRef.current === 'SPEAKING') {
-                      audioService.stopSpeaking();
-                      setCompanionState('LISTENING');
-                      setIsListening(true);
-                    }
-                  },
-                  onCommandCaptured: async (transcript) => {
-                    setIsListening(false);
-                    setAudioVolume(0);
-                    await processVoiceTranscript(transcript);
-                  },
-                  onCommandTimeout: () => {
-                    setIsListening(false);
-                    setAudioVolume(0);
-                    setCompanionState('IDLE');
-                  },
-                  onTranscriptInterim: (text) => setLiveTranscript(text),
-                  onStateChange: (status) => setWakeStatus(status),
-                  onAudioLevel: (level) => setAudioVolume(level),
-                },
-                settings.apiEndpoint
-              );
-              setWakeStatus(wakeWordService.getStatus());
-            }
-          }}
-          liveTranscript={liveTranscript}
-          isAnalyzingChart={isAnalyzingChart}
-          streamedAnalysisText={streamedAnalysisText}
-        />
-      </div>
-    );
-  }
-
-  // Full Workstation Layout (Desktop & Responsive Mobile PWA)
+  // The voice-first panel is always mounted so wake detection keeps
+  // working no matter which surface is on screen; it only renders its UI
+  // when appMode === 'voice'. The full dashboard is the secondary, optional
+  // screen -- reached via tray "Open Main Dashboard" -- and is only
+  // mounted while appMode === 'workstation'.
   return (
-    <div className="w-screen h-screen flex flex-col bg-[#03060a] text-slate-100 overflow-hidden font-sans select-none">
-      {/* Desktop Header Navigation */}
-      <DesktopHeader
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        connectionStatus={connectionState.status}
-        latencyMs={connectionState.latencyMs || 0}
-        compactMode={settings.compactMode}
-        setCompactMode={(compact) => {
-          updateSettings({ compactMode: compact });
-          if (compact) {
-            setCompactLayoutMode('voice');
-            nativeBridge.summonHUD('voice');
-          }
-        }}
-        activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
-        unreadAlertsCount={alertsHistory.length}
+    <>
+      <VoiceAssistantRuntime
+        apiEndpoint={settings.apiEndpoint}
+        visible={appMode === 'voice'}
+        onModeChange={setAppMode}
       />
 
-      {/* Main Content View Container with Safe Areas */}
-      <main className="flex-1 overflow-hidden relative pb-16 lg:pb-0 safe-top">
-        {activeTab === 'companion' && (
-          <CompanionHero
-            companionState={companionState}
+      {appMode === 'workstation' && (
+        <div className="w-screen h-screen flex flex-col bg-[#03060a] text-slate-100 overflow-hidden font-sans select-none">
+          {/* Desktop Header Navigation */}
+          <DesktopHeader
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
             connectionStatus={connectionState.status}
             latencyMs={connectionState.latencyMs || 0}
-            activeSetups={activeSetups}
-            criticalWarnings={criticalWarnings}
-            isListening={isListening}
-            onTogglePushToTalk={handleTogglePushToTalk}
-            audioVolume={audioVolume}
-            onSendMessage={handleSendMessage}
-            onInspectSetup={handleInspectSetup}
-          />
-        )}
-
-        {activeTab === 'setups' && (
-          <ActiveSetupsView
-            setups={activeSetups}
-            onSelectSetup={handleInspectSetup}
-          />
-        )}
-
-        {activeTab === 'alerts' && (
-          <AlertHistoryView
-            alerts={alertsHistory}
-            selectedAlert={selectedAlert}
-            onSelectAlert={setSelectedAlert}
-          />
-        )}
-
-        {activeTab === 'chat' && (
-          <AskTARSView
-            messages={chatMessages}
-            activeSetups={activeSetups}
-            onSendMessage={handleSendMessage}
-            isListening={isListening}
-            onTogglePushToTalk={handleTogglePushToTalk}
-            onInspectSetup={handleInspectSetup}
-            apiEndpoint={settings.apiEndpoint}
-          />
-        )}
-
-        {activeTab === 'voice' && (
-          <VoiceControlView
-            isListening={isListening}
-            onTogglePushToTalk={handleTogglePushToTalk}
-            audioVolume={audioVolume}
-            onVoiceTranscribed={(text) => handleSendMessage(text, 'voice')}
-            apiEndpoint={settings.apiEndpoint}
-          />
-        )}
-
-        {activeTab === 'memory' && (
-          <MemoryView
-            apiEndpoint={settings.apiEndpoint}
-            mockModeActive={settings.mockGeneratorActive}
-          />
-        )}
-
-        {activeTab === 'system' && (
-          <SystemStatusView
-            connectionState={connectionState}
-            onUpdateEndpoint={(url) => updateSettings({ serverEndpoint: url })}
-            onReconnect={() => {
-              if (wsClientRef.current) {
-                wsClientRef.current.disconnect();
-                wsClientRef.current.connect();
-              }
+            compactMode={false}
+            setCompactMode={(compact) => {
+              if (compact) nativeBridge.summonHUD('voice');
             }}
-            protocolErrors={protocolErrors}
-            onClearErrors={() => setProtocolErrors([])}
+            activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
+            unreadAlertsCount={alertsHistory.length}
           />
-        )}
 
-        {activeTab === 'settings' && (
-          <SettingsView
-            settings={settings}
-            onUpdateSettings={updateSettings}
-            onTriggerMockEvent={handleManualTriggerMock}
+          {/* Main Content View Container with Safe Areas */}
+          <main className="flex-1 overflow-hidden relative pb-16 lg:pb-0 safe-top">
+            {activeTab === 'companion' && (
+              <CompanionHero
+                companionState={companionState}
+                connectionStatus={connectionState.status}
+                latencyMs={connectionState.latencyMs || 0}
+                activeSetups={activeSetups}
+                criticalWarnings={criticalWarnings}
+                isListening={isListening}
+                onTogglePushToTalk={handleTogglePushToTalk}
+                audioVolume={audioVolume}
+                onSendMessage={handleSendMessage}
+                onInspectSetup={handleInspectSetup}
+              />
+            )}
+
+            {activeTab === 'setups' && (
+              <ActiveSetupsView
+                setups={activeSetups}
+                onSelectSetup={handleInspectSetup}
+              />
+            )}
+
+            {activeTab === 'alerts' && (
+              <AlertHistoryView
+                alerts={alertsHistory}
+                selectedAlert={selectedAlert}
+                onSelectAlert={setSelectedAlert}
+              />
+            )}
+
+            {activeTab === 'chat' && (
+              <AskTARSView
+                messages={chatMessages}
+                activeSetups={activeSetups}
+                onSendMessage={handleSendMessage}
+                isListening={isListening}
+                onTogglePushToTalk={handleTogglePushToTalk}
+                onInspectSetup={handleInspectSetup}
+                apiEndpoint={settings.apiEndpoint}
+              />
+            )}
+
+            {activeTab === 'voice' && (
+              <VoiceControlView
+                isListening={isListening}
+                onTogglePushToTalk={handleTogglePushToTalk}
+                audioVolume={audioVolume}
+                onVoiceTranscribed={(text) => handleSendMessage(text, 'voice')}
+                apiEndpoint={settings.apiEndpoint}
+              />
+            )}
+
+            {activeTab === 'memory' && (
+              <MemoryView
+                apiEndpoint={settings.apiEndpoint}
+                mockModeActive={settings.mockGeneratorActive}
+              />
+            )}
+
+            {activeTab === 'system' && (
+              <SystemStatusView
+                connectionState={connectionState}
+                onUpdateEndpoint={(url) => updateSettings({ serverEndpoint: url })}
+                onReconnect={() => {
+                  if (wsClientRef.current) {
+                    wsClientRef.current.disconnect();
+                    wsClientRef.current.connect();
+                  }
+                }}
+                protocolErrors={protocolErrors}
+                onClearErrors={() => setProtocolErrors([])}
+              />
+            )}
+
+            {activeTab === 'settings' && (
+              <SettingsView
+                settings={settings}
+                onUpdateSettings={updateSettings}
+                onTriggerMockEvent={handleManualTriggerMock}
+              />
+            )}
+          </main>
+
+          {/* Mobile Tab Bar Navigation */}
+          <MobileTabBar
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
+            unreadAlertsCount={alertsHistory.length}
           />
-        )}
-      </main>
-
-      {/* Mobile Tab Bar Navigation */}
-      <MobileTabBar
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
-        unreadAlertsCount={alertsHistory.length}
-      />
-    </div>
+        </div>
+      )}
+    </>
   );
 };

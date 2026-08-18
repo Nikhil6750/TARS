@@ -114,6 +114,48 @@ class TarsOrchestrator:
             assistant_message=assistant_message,
         )
 
+    async def handle_text_stream(self, text: str, conversation_id: str | None):
+        """Streaming twin of handle_text -- see AssistantRouter.handle_text_stream
+        for the event shape (`delta` / `complete`). Deterministic
+        orchestrator routes (skill dispatch, memory commands) are already
+        fast/non-LLM, so they're delivered as a single delta + complete
+        pair rather than a real token stream; only the LLM fallthrough to
+        AssistantRouter actually streams incrementally."""
+        conversation_id = conversation_id or str(uuid4())
+        tracker = LatencyTracker()
+        tracker.mark("reasoning_start")
+        route = self._classify(text)
+        if route is None:
+            async for event in self._assistant_router.handle_text_stream(text, conversation_id):
+                yield event
+            tracker.mark("reasoning_end")
+            tracker.emit_span("latency.orchestrator_turn")
+            return
+
+        user_message = AssistantMessage(
+            conversation_id=UUID(conversation_id),
+            role=MessageRole.user,
+            content=text,
+            input_mode=InputMode.text,
+        )
+        await self._save(user_message)
+
+        handler = getattr(self, f"_handle_{route.kind}")
+        reply_text, intent = await handler(route.payload, conversation_id)
+        tracker.mark("reasoning_end")
+        tracker.emit_span("latency.orchestrator_turn")
+        assistant_message = AssistantMessage(
+            conversation_id=UUID(conversation_id),
+            role=MessageRole.assistant,
+            content=reply_text,
+            input_mode=InputMode.text,
+            intent=intent,
+            providers=MessageProviders(assistant="deterministic"),
+        )
+        await self._save(assistant_message)
+        yield {"type": "delta", "text": reply_text}
+        yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+
     # ---- routing ----------------------------------------------------------
 
     def _classify(self, text: str) -> _Route | None:

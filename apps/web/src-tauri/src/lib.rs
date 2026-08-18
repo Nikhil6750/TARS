@@ -7,6 +7,8 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+mod wake_engine;
+
 static CAPTURE_COUNTER: AtomicUsize = AtomicUsize::new(1);
 static LAST_EXTERNAL_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
@@ -257,7 +259,7 @@ fn toggle_compact_mode(app: tauri::AppHandle, is_compact: Option<bool>) -> Resul
     if let Some(window) = app.get_webview_window("main") {
         let next_compact = is_compact.unwrap_or_else(|| !window.is_always_on_top().unwrap_or(false));
         if next_compact {
-            window.set_size(tauri::LogicalSize::new(420.0, 260.0)).map_err(|e| e.to_string())?;
+            window.set_size(tauri::LogicalSize::new(380.0, 180.0)).map_err(|e| e.to_string())?;
             window.set_always_on_top(true).map_err(|e| e.to_string())?;
         } else {
             window.set_size(tauri::LogicalSize::new(1280.0, 840.0)).map_err(|e| e.to_string())?;
@@ -301,6 +303,26 @@ fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WakeEngineStatus {
+    pub running: bool,
+    pub last_error: Option<String>,
+}
+
+#[tauri::command]
+fn wake_engine_status() -> WakeEngineStatus {
+    WakeEngineStatus {
+        running: wake_engine::is_running(),
+        last_error: wake_engine::last_error(),
+    }
+}
+
+#[tauri::command]
+fn force_wake_command_capture() -> Result<(), String> {
+    wake_engine::force_command_capture();
+    Ok(())
+}
+
 fn summon_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     unsafe {
@@ -328,7 +350,7 @@ fn summon_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<(), Str
             window.set_always_on_top(true).map_err(|e| e.to_string())?;
         } else {
             // "voice" (default minimal floating voice panel)
-            window.set_size(tauri::LogicalSize::new(420.0, 260.0)).map_err(|e| e.to_string())?;
+            window.set_size(tauri::LogicalSize::new(380.0, 180.0)).map_err(|e| e.to_string())?;
             window.set_always_on_top(true).map_err(|e| e.to_string())?;
         }
         window.set_focus().map_err(|e| e.to_string())?;
@@ -345,6 +367,11 @@ fn show_main_impl(app: &tauri::AppHandle) -> Result<(), String> {
         window.set_size(tauri::LogicalSize::new(1280.0, 840.0)).map_err(|e| e.to_string())?;
         window.set_always_on_top(false).map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
+        // Same event summon_hud_impl emits -- lets the React side know it
+        // must render the full workstation layout rather than the minimal
+        // voice panel, regardless of which native path (tray "Open Main
+        // Dashboard", a future shortcut, etc.) triggered this resize.
+        let _ = app.emit("tars://summon-hud", "workstation");
         return Ok(());
     }
     Err("Main window not found".into())
@@ -1154,6 +1181,8 @@ pub fn run() {
             clear_captures_cache,
             get_autostart_status,
             set_autostart,
+            wake_engine_status,
+            force_wake_command_capture,
         ])
         .on_window_event(|window, event| {
             // M2A/M2B Background persistence (Close-to-tray)
@@ -1235,6 +1264,14 @@ pub fn run() {
                 let _ = app.global_shortcut().register(summon_t_setup);
                 let _ = app.global_shortcut().register(ptt_setup);
             }
+
+            // Start listening for "Hey TARS" immediately, on its own
+            // background thread -- independent of whether any window is
+            // ever shown. The main window itself starts hidden (see
+            // tauri.conf.json `visible: false`); this is what lets TARS
+            // run as a true background/tray app rather than a dashboard
+            // that happens to also listen.
+            wake_engine::start(app.handle().clone());
 
             Ok(())
         })

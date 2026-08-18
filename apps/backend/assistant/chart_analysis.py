@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -203,6 +204,14 @@ class ChartAnalysisService:
         active_context_text: str = "",
         goal_text: str = "Analyze this chart.",
     ):
+        # Server-side stage timings, in ms from this call's own start --
+        # capture_ms (screenshot -> bytes reaching this backend) is measured
+        # client-side, since capture happens entirely outside this process;
+        # everything from here on is measured server-side so the frontend
+        # can show real, non-fabricated numbers rather than guessing.
+        t0 = time.monotonic()
+        yield {"type": "status", "text": "Looking at the chart..."}
+
         try:
             image = Image.open(io.BytesIO(image_bytes))
             image.load()
@@ -230,19 +239,39 @@ class ChartAnalysisService:
                 system_context=system_context,
                 image_path=str(image_path),
             )
+            claude_start_ms = round((time.monotonic() - t0) * 1000)
+            first_token_ms: int | None = None
             if hasattr(self._provider, "respond_stream"):
                 async for event in self._provider.respond_stream(request):
                     if event.get("type") == "delta":
+                        if first_token_ms is None:
+                            first_token_ms = round((time.monotonic() - t0) * 1000)
                         yield {"type": "delta", "text": event.get("text", "")}
                     elif event.get("type") == "complete":
                         final_text = event.get("text", "")
                         provider_name = event.get("provider", self._provider.name)
                         result = _parse_reply(final_text, provider_name)
-                        yield {"type": "complete", "result": result.to_dict()}
+                        yield {
+                            "type": "complete",
+                            "result": result.to_dict(),
+                            "timing": {
+                                "claude_start_ms": claude_start_ms,
+                                "first_token_ms": first_token_ms,
+                                "complete_ms": round((time.monotonic() - t0) * 1000),
+                            },
+                        }
             else:
                 reply = await self._provider.respond(request)
                 result = _parse_reply(reply.text, reply.provider)
-                yield {"type": "complete", "result": result.to_dict()}
+                yield {
+                    "type": "complete",
+                    "result": result.to_dict(),
+                    "timing": {
+                        "claude_start_ms": claude_start_ms,
+                        "first_token_ms": None,
+                        "complete_ms": round((time.monotonic() - t0) * 1000),
+                    },
+                }
         finally:
             image_path.unlink(missing_ok=True)
 
