@@ -432,18 +432,24 @@ def _find_tradingview_window() -> dict[str, Any] | None:
     windows: list[dict[str, Any]] = []
 
     def _callback(hwnd: int, _extra: None) -> None:
-        if not win32gui.IsWindowVisible(hwnd):
-            return
-        title = win32gui.GetWindowText(hwnd)
-        if "tradingview" not in title.lower():
-            return
         try:
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = win32gui.GetWindowText(hwnd)
+            if "tradingview" not in title.lower():
+                return
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                pid = None
+            windows.append({"hwnd": hwnd, "window_title": title, "process_id": pid})
         except Exception:
-            pid = None
-        windows.append({"hwnd": hwnd, "window_title": title, "process_id": pid})
+            return
 
-    win32gui.EnumWindows(_callback, None)
+    try:
+        win32gui.EnumWindows(_callback, None)
+    except Exception:
+        pass
     return windows[0] if windows else None
 
 
@@ -451,6 +457,13 @@ def _focus_window(hwnd: int) -> None:
     import win32con
     import win32gui
 
-    if win32gui.IsIconic(hwnd):
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-    win32gui.SetForegroundWindow(hwnd)
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            win32gui.BringWindowToTop(hwnd)
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    except Exception:
+        pass

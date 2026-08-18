@@ -49,8 +49,8 @@ export interface WakeWordCallbacks {
 
 // Regex patterns for wake phrase and chart analysis commands — matched
 // against real local transcripts, never exact string equality.
-const WAKE_PHRASE_REGEX = /\b(hey\s+tars|tars|hey\s+tar|ok\s+tars|hey\s+torres|hi\s+tars)\b/i;
-const ANALYZE_CHART_REGEX = /\b(analy[sz]e|check|look\s+at|evaluate|read|scan|inspect|review|what\s+do\s+you\s+see\s+on)\s+(?:this|the|my|active|current)?\s*charts?\b/i;
+const WAKE_PHRASE_REGEX = /\b(hey[\s,]+tars|tars|hey[\s,]+tar|ok[\s,]+tars|hey[\s,]+torres|hi[\s,]+tars)\b/i;
+const ANALYZE_CHART_REGEX = /\b(analy[sz]e|check|look\s+at|evaluate|read|scan|inspect|review|what\s+do\s+you\s+see\s+on)[\s,]+(?:this|the|my|active|current)?\s*charts?\b/i;
 
 const DEFAULT_API_ENDPOINT = 'http://127.0.0.1:8000';
 const COMMAND_TIMEOUT_MS = 7000;

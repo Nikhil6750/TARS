@@ -91,7 +91,7 @@ async def test_analyze_never_fabricates_confidence_or_certainty_language():
     speech = result.speech_text()
     assert "guaranteed" not in speech.lower()
     assert "%" not in speech
-    assert "isn't a validated signal" in speech.lower()
+    assert "not a quant_brain-validated" in result.disclaimer.lower()
 
 
 async def test_analyze_converts_bmp_to_png_before_handing_to_provider():

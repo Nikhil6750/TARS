@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 from assistant.errors import AssistantProviderError
@@ -19,7 +20,8 @@ class ClaudeCodeProvider(AssistantProvider):
     name = "claude_code"
 
     def __init__(self, command: str = "claude", timeout_seconds: float = 60.0):
-        self._command = command
+        self._raw_command = command
+        self._command = shutil.which(command) or command
         self._timeout = timeout_seconds
         # conversation_id -> claude CLI session_id, process-local only (see
         # TARS core § Performance: "reusable Claude session/context"). Lets

@@ -78,26 +78,32 @@ def _enum_visible_windows() -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
 
     def _callback(hwnd: int, _extra: None) -> None:
-        if not win32gui.IsWindowVisible(hwnd):
-            return
-        title = win32gui.GetWindowText(hwnd)
-        if not title.strip():
-            return
         try:
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = win32gui.GetWindowText(hwnd)
+            if not title.strip():
+                return
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                pid = None
+            exe_name = _process_executable_name(pid) if pid else ""
+            windows.append(
+                {
+                    "hwnd": hwnd,
+                    "executable": exe_name,
+                    "window_title": title,
+                    "process_id": pid,
+                }
+            )
         except Exception:
-            pid = None
-        exe_name = _process_executable_name(pid) if pid else ""
-        windows.append(
-            {
-                "hwnd": hwnd,
-                "executable": exe_name,
-                "window_title": title,
-                "process_id": pid,
-            }
-        )
+            return
 
-    win32gui.EnumWindows(_callback, None)
+    try:
+        win32gui.EnumWindows(_callback, None)
+    except Exception:
+        pass
     return windows
 
 
@@ -299,7 +305,11 @@ class WindowsAppSkill(BaseSkill):
         try:
             if win32gui.IsIconic(hwnd):
                 win32gui.ShowWindow(hwnd, _SW_RESTORE)
-            win32gui.SetForegroundWindow(hwnd)
+            try:
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception:
+                win32gui.BringWindowToTop(hwnd)
+                win32gui.ShowWindow(hwnd, _SW_RESTORE)
         except Exception as exc:
             raise SkillExecutionError(f"failed to focus window for '{target}': {exc}") from exc
 
