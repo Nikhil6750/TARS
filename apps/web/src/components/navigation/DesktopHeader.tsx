@@ -1,13 +1,8 @@
 import React from 'react';
 import {
-  Activity,
-  Layers,
-  Bell,
-  MessageSquare,
-  Mic,
-  Cpu,
+  Bot,
+  LayoutGrid,
   Settings,
-  Database,
   Minimize2,
   Maximize2,
   X,
@@ -23,8 +18,6 @@ interface DesktopHeaderProps {
   latencyMs: number;
   compactMode: boolean;
   setCompactMode: (compact: boolean) => void;
-  activeSetupsCount: number;
-  unreadAlertsCount: number;
 }
 
 export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
@@ -34,8 +27,6 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
   latencyMs,
   compactMode,
   setCompactMode,
-  activeSetupsCount,
-  unreadAlertsCount,
 }) => {
   const isNative = isTauri();
 
@@ -49,14 +40,9 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
 
   const statusInfo = statusColorMap[connectionStatus] || statusColorMap.offline;
 
-  const navItems: Array<{ tab: ActiveTab; label: string; icon: React.ComponentType<{ className?: string }>; badge?: number }> = [
-    { tab: 'companion', label: 'Companion', icon: Activity },
-    { tab: 'setups', label: 'Setups', icon: Layers, badge: activeSetupsCount },
-    { tab: 'alerts', label: 'Alerts', icon: Bell, badge: unreadAlertsCount },
-    { tab: 'chat', label: 'Ask TARS', icon: MessageSquare },
-    { tab: 'voice', label: 'Voice', icon: Mic },
-    { tab: 'memory', label: 'Memory & Research', icon: Database },
-    { tab: 'system', label: 'System', icon: Cpu },
+  const navItems: Array<{ tab: ActiveTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+    { tab: 'tars', label: 'TARS', icon: Bot },
+    { tab: 'workspace', label: 'Workspace', icon: LayoutGrid },
     { tab: 'settings', label: 'Settings', icon: Settings },
   ];
 
@@ -114,11 +100,6 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
               >
                 <Icon className="w-3.5 h-3.5" />
                 <span>{item.label}</span>
-                {item.badge !== undefined && item.badge > 0 && (
-                  <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-cyan-500/30 text-cyan-200">
-                    {item.badge}
-                  </span>
-                )}
               </button>
             );
           })}

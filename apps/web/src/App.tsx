@@ -3,6 +3,7 @@ import { TARSTradingEvent } from './types/trading-event';
 import { TARSAssistantMessage } from './types/assistant-message';
 import {
   ActiveTab,
+  WorkspaceSection,
   CompanionVisualState,
   ConnectionState,
   AppSettings
@@ -21,16 +22,12 @@ import { sendNotification } from './services/notifications';
 import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut } from './services/tauri';
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
 import { actionRuntimeClient } from './services/actions';
+import { tryDeterministicAnswer } from './services/deterministic-fast-path';
 
 import { DesktopHeader } from './components/navigation/DesktopHeader';
 import { MobileTabBar } from './components/navigation/MobileTabBar';
-import { CompanionHero } from './components/companion/CompanionHero';
-import { ActiveSetupsView } from './components/setups/ActiveSetupsView';
-import { AlertHistoryView } from './components/alerts/AlertHistoryView';
-import { AskTARSView } from './components/assistant/AskTARSView';
-import { VoiceControlView } from './components/voice/VoiceControlView';
-import { MemoryView } from './components/memory/MemoryView';
-import { SystemStatusView } from './components/system/SystemStatusView';
+import { TarsChatScreen } from './components/assistant/TarsChatScreen';
+import { WorkspaceView } from './components/workspace/WorkspaceView';
 import { SettingsView } from './components/settings/SettingsView';
 import { nativeBridge } from './services/native-bridge';
 import { ChartAnalysisData } from './components/hud/ChartAnalysisCard';
@@ -44,7 +41,8 @@ export const App: React.FC = () => {
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
 
   // View & UI Navigation
-  const [activeTab, setActiveTab] = useState<ActiveTab>('companion');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('tars');
+  const [workspaceSection, setWorkspaceSection] = useState<WorkspaceSection>('companion');
   const [companionState, setCompanionState] = useState<CompanionVisualState>('IDLE');
   // Which surface the single native window is currently showing -- the
   // minimal voice-first panel (default) or the optional full dashboard.
@@ -603,6 +601,25 @@ export const App: React.FC = () => {
     console.info('[CHAT] submitted');
     handleIncomingAssistantMessage(userMsg);
 
+    // Trivial deterministic requests (arithmetic) never touch the LLM --
+    // both wasteful and, per tonight's measurements, seconds slower than
+    // just computing it (see services/deterministic-fast-path.ts).
+    const deterministicAnswer = tryDeterministicAnswer(text);
+    if (deterministicAnswer !== null) {
+      console.info('[CHAT] route selected: deterministic local');
+      handleIncomingAssistantMessage({
+        schema_version: '1.0.0',
+        message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
+        conversation_id: convId,
+        timestamp: new Date().toISOString(),
+        role: 'assistant',
+        content: deterministicAnswer,
+        input_mode: 'text',
+        providers: { assistant: 'deterministic' },
+      });
+      return;
+    }
+
     if (ANALYZE_CHART_PATTERN.test(text)) {
       console.info('[CHAT] route selected: chart analysis');
       await handleAnalyzeChart();
@@ -650,10 +667,11 @@ export const App: React.FC = () => {
     });
   };
 
-  // Switch to Setups view and inspect
+  // Switch to Workspace's Alerts section and inspect
   const handleInspectSetup = (setup: TARSTradingEvent) => {
     setSelectedAlert(setup);
-    setActiveTab('alerts');
+    setActiveTab('workspace');
+    setWorkspaceSection('alerts');
   };
 
   // Manual Trigger Mock Event (dev only)
@@ -677,7 +695,7 @@ export const App: React.FC = () => {
 
       {appMode === 'workstation' && (
         <div className="w-screen h-screen flex flex-col bg-[#03060a] text-slate-100 overflow-hidden font-sans select-none">
-          {/* Desktop Header Navigation */}
+          {/* Desktop Header Navigation -- TARS / Workspace / Settings only */}
           <DesktopHeader
             activeTab={activeTab}
             setActiveTab={setActiveTab}
@@ -687,18 +705,32 @@ export const App: React.FC = () => {
             setCompactMode={(compact) => {
               if (compact) nativeBridge.summonHUD('voice');
             }}
-            activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
-            unreadAlertsCount={alertsHistory.length}
           />
 
           {/* Main Content View Container with Safe Areas */}
           <main className="flex-1 overflow-hidden relative pb-16 lg:pb-0 safe-top">
-            {activeTab === 'companion' && (
-              <CompanionHero
+            {activeTab === 'tars' && (
+              <TarsChatScreen
+                messages={chatMessages}
+                streamingAnswer={streamingAnswer}
                 companionState={companionState}
                 connectionStatus={connectionState.status}
-                latencyMs={connectionState.latencyMs || 0}
+                isListening={isListening}
+                onTogglePushToTalk={handleTogglePushToTalk}
+                onSendMessage={handleSendMessage}
+              />
+            )}
+
+            {activeTab === 'workspace' && (
+              <WorkspaceView
+                section={workspaceSection}
+                setSection={setWorkspaceSection}
+                companionState={companionState}
+                connectionState={connectionState}
                 activeSetups={activeSetups}
+                alertsHistory={alertsHistory}
+                selectedAlert={selectedAlert}
+                setSelectedAlert={setSelectedAlert}
                 criticalWarnings={criticalWarnings}
                 isListening={isListening}
                 onTogglePushToTalk={handleTogglePushToTalk}
@@ -706,56 +738,8 @@ export const App: React.FC = () => {
                 onSendMessage={handleSendMessage}
                 onInspectSetup={handleInspectSetup}
                 streamingAnswer={streamingAnswer}
-              />
-            )}
-
-            {activeTab === 'setups' && (
-              <ActiveSetupsView
-                setups={activeSetups}
-                onSelectSetup={handleInspectSetup}
-              />
-            )}
-
-            {activeTab === 'alerts' && (
-              <AlertHistoryView
-                alerts={alertsHistory}
-                selectedAlert={selectedAlert}
-                onSelectAlert={setSelectedAlert}
-              />
-            )}
-
-            {activeTab === 'chat' && (
-              <AskTARSView
-                messages={chatMessages}
-                activeSetups={activeSetups}
-                onSendMessage={handleSendMessage}
-                isListening={isListening}
-                onTogglePushToTalk={handleTogglePushToTalk}
-                onInspectSetup={handleInspectSetup}
-                apiEndpoint={settings.apiEndpoint}
-              />
-            )}
-
-            {activeTab === 'voice' && (
-              <VoiceControlView
-                isListening={isListening}
-                onTogglePushToTalk={handleTogglePushToTalk}
-                audioVolume={audioVolume}
-                onVoiceTranscribed={(text) => handleSendMessage(text, 'voice')}
-                apiEndpoint={settings.apiEndpoint}
-              />
-            )}
-
-            {activeTab === 'memory' && (
-              <MemoryView
                 apiEndpoint={settings.apiEndpoint}
                 mockModeActive={settings.mockGeneratorActive}
-              />
-            )}
-
-            {activeTab === 'system' && (
-              <SystemStatusView
-                connectionState={connectionState}
                 onUpdateEndpoint={(url) => updateSettings({ serverEndpoint: url })}
                 onReconnect={() => {
                   if (wsClientRef.current) {
@@ -778,12 +762,7 @@ export const App: React.FC = () => {
           </main>
 
           {/* Mobile Tab Bar Navigation */}
-          <MobileTabBar
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
-            unreadAlertsCount={alertsHistory.length}
-          />
+          <MobileTabBar activeTab={activeTab} setActiveTab={setActiveTab} />
         </div>
       )}
     </>
