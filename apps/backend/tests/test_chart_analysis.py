@@ -11,6 +11,11 @@ from assistant.provider import AssistantProvider, AssistantReply, AssistantReque
 _STRUCTURED_JSON = """{
   "instrument": "EURUSD",
   "timeframe": "4H",
+  "current_price_context": "1.0920, mid-range",
+  "supply_zone": "1.0950",
+  "demand_zone": "1.0870",
+  "recent_price_sequence": "Pulled back from 1.0950, now consolidating.",
+  "at_meaningful_location": true,
   "market_context": "Price is consolidating below a prior swing high.",
   "key_levels": ["1.0950 resistance", "1.0870 support"],
   "possible_setup": "A break and retest of 1.0950 could favor continuation long.",
@@ -64,6 +69,13 @@ async def test_analyze_parses_structured_json_reply():
     assert result.invalidation is not None
     assert result.risk_notes
     assert "not a quant_brain-validated" in result.disclaimer
+    assert result.current_price_context == "1.0920, mid-range"
+    assert result.supply_zone == "1.0950"
+    assert result.demand_zone == "1.0870"
+    assert result.recent_price_sequence
+    assert result.at_meaningful_location is True
+    assert "PRICE: 1.0920, mid-range" in result.formatted_tars_text()
+    assert result.formatted_tars_text().index("PRICE:") < result.formatted_tars_text().index("BIAS:")
 
 
 async def test_analyze_falls_back_to_raw_text_when_reply_is_not_structured():
@@ -80,6 +92,27 @@ async def test_analyze_falls_back_to_raw_text_when_reply_is_not_structured():
     assert "candlestick" in result.market_context
     assert result.key_levels == []
     assert "not returned in the requested structured format" in result.risk_notes
+    # Unstructured fallback must not fabricate a "Bias is Neutral" claim
+    # that was never actually parsed from the model.
+    assert "Bias is" not in result.speech_text()
+    assert "candlestick" in result.speech_text()
+
+
+async def test_unstructured_fallback_speech_text_strips_markdown():
+    provider = _FakeProvider(
+        "**XAUUSD — 15m**\n\n### What I see\n- Price at 4,351\n- *tight range* near resistance"
+    )
+    service = ChartAnalysisService(provider)
+
+    result = await service.analyze(
+        image_bytes=_bmp_bytes(), image_format="image/bmp", conversation_id="conv-md"
+    )
+
+    speech = result.speech_text()
+    assert "*" not in speech
+    assert "#" not in speech
+    assert "XAUUSD" in speech
+    assert "tight range" in speech
 
 
 async def test_analyze_never_fabricates_confidence_or_certainty_language():

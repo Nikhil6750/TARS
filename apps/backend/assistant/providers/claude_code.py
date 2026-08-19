@@ -178,6 +178,7 @@ class ClaudeCodeProvider(AssistantProvider):
         accumulated_text = ""
         last_emitted_len = 0
         final_result_text = ""
+        image_confirmed_read = False
 
         try:
             while True:
@@ -212,6 +213,17 @@ class ClaudeCodeProvider(AssistantProvider):
                     session_id = event["session_id"]
 
                 event_type = event.get("type")
+                if event_type == "user" and not image_confirmed_read:
+                    # The Read-tool's tool_result event carrying the image
+                    # back to the model -- a real, observed milestone (the
+                    # model has now actually seen the chart), not a fake
+                    # progress tick. Chart analysis's system prompt is the
+                    # only caller that sets image_path, so this only ever
+                    # fires on that path.
+                    content_list = event.get("message", {}).get("content", [])
+                    if any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content_list):
+                        image_confirmed_read = True
+                        yield {"type": "status", "text": "Reading the chart..."}
                 if event_type == "content_block_delta":
                     delta = event.get("delta", {})
                     text_chunk = delta.get("text", "")

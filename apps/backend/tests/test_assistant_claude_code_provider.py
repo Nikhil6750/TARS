@@ -161,6 +161,39 @@ async def test_respond_stream_yields_deltas_and_completes(provider, monkeypatch)
     assert provider._sessions["conv-1"] == "sess-xyz"
 
 
+async def test_respond_stream_emits_status_when_image_tool_result_arrives(provider, monkeypatch):
+    # A real, observed milestone (the model has actually received the
+    # image via the Read tool's tool_result event) -- not a fabricated
+    # progress tick. Must surface exactly once, before the final text.
+    lines = [
+        json.dumps({"type": "assistant", "message": {"content": [{"text": "Let me look."}]}}).encode() + b"\n",
+        json.dumps({
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": "base64imagedata..."}]},
+        }).encode() + b"\n",
+        json.dumps({"type": "assistant", "message": {"content": [{"text": "Let me look.Analysis text."}]}}).encode() + b"\n",
+        json.dumps({"type": "result", "result": "Let me look.Analysis text.", "session_id": "sess-xyz"}).encode() + b"\n",
+    ]
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeStreamProcess(lines)
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    events = [
+        event
+        async for event in provider.respond_stream(
+            AssistantRequest(text="analyze", conversation_id="conv-1", image_path="C:/fake/chart.png")
+        )
+    ]
+
+    status_events = [e for e in events if e["type"] == "status"]
+    assert len(status_events) == 1
+    assert status_events[0]["text"] == "Reading the chart..."
+    # Status must come before the final complete event.
+    assert events.index(status_events[0]) < len(events) - 1
+
+
 async def test_respond_stream_kills_and_raises_when_cli_goes_silent(monkeypatch):
     # A CLI that emits nothing at all (e.g. stuck on a tool-approval prompt
     # with no TTY to answer it -- see claude_code.py's respond_stream

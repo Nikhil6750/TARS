@@ -33,13 +33,29 @@ _SYSTEM_PROMPT = (
     "You are TARS, an AI trading companion, analyzing a screenshot of the "
     "user's active chart application on their explicit voice request. "
     "You are a companion, not quant_brain -- never state a confidence percentage, "
-    "never claim a prediction is guaranteed, and never invent a price level "
-    "you cannot clearly read from the image. If the image is not a chart, "
-    "state that plainly. Keep observations short, crisp, and high-signal.\n\n"
+    "never claim a prediction is guaranteed, never claim a strategy has been "
+    "validated, and never invent a price level, zone, or number you cannot "
+    "clearly read from the image. If the image is not a chart, state that "
+    "plainly. Prioritize the chart itself: ignore watchlist rows, news "
+    "headlines, and other UI chrome unless directly relevant to the visible "
+    "price action or explicitly asked about. Don't narrate UI you weren't "
+    "asked about. Clearly distinguish zones you merely observe from any "
+    "validated signal (there is none -- you are qualitative-only). Keep "
+    "every value short and high-signal -- this is read aloud to the user, "
+    "so concise phrases beat full sentences.\n\n"
     "Respond with ONLY a single JSON object (no markdown fences, no prose outside it) "
     "with exactly these keys:\n"
     '- "instrument": string or null (ticker/symbol if legible, e.g. "EURUSD")\n'
     '- "timeframe": string or null (e.g. "4H", "1D", "15m")\n'
+    '- "current_price_context": string or null (current price plus immediate '
+    'context in one short phrase, e.g. "4351.71, just below session high")\n'
+    '- "supply_zone": string or null (nearest visible supply/resistance zone; '
+    "null if none is clearly legible -- never invent one)\n"
+    '- "demand_zone": string or null (nearest visible demand/support zone; '
+    "null if none is clearly legible -- never invent one)\n"
+    '- "recent_price_sequence": string (one short phrase on recent price movement/structure)\n'
+    '- "at_meaningful_location": boolean (true only if price is visibly at or '
+    "near a marked zone/level in the image right now)\n"
     '- "bias": string ("Bullish" | "Bearish" | "Neutral")\n'
     '- "what_i_see": string (2-3 concise observations of price action/structure)\n'
     '- "setup": string ("Valid" | "Invalid" | "Unclear")\n'
@@ -83,6 +99,14 @@ class ChartAnalysisResult:
     what_i_see: str | None = None
     setup: str | None = None
     action: str | None = None
+    # Observed-only grounding fields (part of the sharpened prompt to match
+    # direct-Claude's structure) -- distinct from `setup`/`bias`, which are
+    # this companion's qualitative read, not a validated signal.
+    current_price_context: str | None = None
+    supply_zone: str | None = None
+    demand_zone: str | None = None
+    recent_price_sequence: str | None = None
+    at_meaningful_location: bool | None = None
     disclaimer: str = (
         "Qualitative read from TARS's assistant, not a quant_brain-validated "
         "signal. No confidence score; nothing here is a guaranteed outcome."
@@ -97,8 +121,22 @@ class ChartAnalysisResult:
         }
 
     def formatted_tars_text(self) -> str:
-        """Returns clean, formatted TARS response for HUD streaming."""
-        lines = [
+        """Returns clean, formatted TARS response for HUD streaming. Leads
+        with observed grounding (current price, supply/demand zones, recent
+        sequence, meaningful-location check) before the qualitative
+        BIAS/WHAT I SEE/... read, matching direct-Claude's structure."""
+        lines = []
+        if self.current_price_context:
+            lines.append(f"PRICE: {self.current_price_context}")
+        if self.supply_zone:
+            lines.append(f"SUPPLY ZONE: {self.supply_zone}")
+        if self.demand_zone:
+            lines.append(f"DEMAND ZONE: {self.demand_zone}")
+        if self.recent_price_sequence:
+            lines.append(f"RECENT MOVEMENT: {self.recent_price_sequence}")
+        if self.at_meaningful_location is not None:
+            lines.append(f"AT KEY LEVEL: {'Yes' if self.at_meaningful_location else 'No'}")
+        lines += [
             f"BIAS: {self.bias or 'Neutral'}",
             f"WHAT I SEE: {self.what_i_see or self.market_context or 'Observing active price structure.'}",
             f"SETUP: {self.setup or 'Unclear'}",
@@ -111,6 +149,14 @@ class ChartAnalysisResult:
 
     def speech_text(self) -> str:
         """A short, spoken-friendly summary for TTS."""
+        if not self.structured:
+            # The model didn't return the requested JSON shape -- there is
+            # no parsed bias/setup to report, and claiming "Bias is
+            # Neutral" here would be fabricating a read that was never
+            # actually produced. Speak a markdown-stripped, capped version
+            # of its real raw text instead.
+            return _strip_markdown_for_speech(self.market_context)
+
         parts: list[str] = []
         bias_label = self.bias or "Neutral"
         label = " ".join(p for p in (self.instrument, self.timeframe) if p)
@@ -118,6 +164,8 @@ class ChartAnalysisResult:
             parts.append(f"Bias is {bias_label} on {label}.")
         else:
             parts.append(f"Bias is {bias_label}.")
+        if self.current_price_context:
+            parts.append(self.current_price_context + ".")
         if self.what_i_see:
             parts.append(self.what_i_see)
         elif self.market_context:
@@ -243,7 +291,12 @@ class ChartAnalysisService:
             first_token_ms: int | None = None
             if hasattr(self._provider, "respond_stream"):
                 async for event in self._provider.respond_stream(request):
-                    if event.get("type") == "delta":
+                    if event.get("type") == "status":
+                        # Real provider-observed milestone (e.g. the model
+                        # has actually received the image), not a fabricated
+                        # progress tick -- forward it as-is.
+                        yield {"type": "status", "text": event.get("text", "")}
+                    elif event.get("type") == "delta":
                         if first_token_ms is None:
                             first_token_ms = round((time.monotonic() - t0) * 1000)
                         yield {"type": "delta", "text": event.get("text", "")}
@@ -301,6 +354,15 @@ def _parse_reply(text: str, provider: str) -> ChartAnalysisResult:
             what_i_see=_opt_str(payload.get("what_i_see")),
             setup=_opt_str(payload.get("setup")),
             action=_opt_str(payload.get("action")),
+            current_price_context=_opt_str(payload.get("current_price_context")),
+            supply_zone=_opt_str(payload.get("supply_zone")),
+            demand_zone=_opt_str(payload.get("demand_zone")),
+            recent_price_sequence=_opt_str(payload.get("recent_price_sequence")),
+            at_meaningful_location=(
+                payload.get("at_meaningful_location")
+                if isinstance(payload.get("at_meaningful_location"), bool)
+                else None
+            ),
             provider=provider,
             raw_text=text,
             structured=True,
@@ -327,3 +389,24 @@ def _opt_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+_MARKDOWN_EMPHASIS = re.compile(r"\*\*([^*]+)\*\*|\*([^*]+)\*|__([^_]+)__|_([^_]+)_")
+_MARKDOWN_HEADER_OR_BULLET = re.compile(r"^\s{0,3}(#{1,6}|[-*]|\d+\.)\s+", re.MULTILINE)
+_WHITESPACE_RUN = re.compile(r"\s+")
+_SPEECH_CHAR_LIMIT = 600
+
+
+def _strip_markdown_for_speech(text: str) -> str:
+    """Voice output can't speak `**bold**`/`### headers`/`- bullets`
+    literally -- used only for the unstructured fallback path, where the
+    model's raw reply is markdown-formatted prose rather than the
+    requested JSON."""
+    if not text:
+        return "I looked at the chart but couldn't produce a structured read this time."
+    cleaned = _MARKDOWN_HEADER_OR_BULLET.sub("", text)
+    cleaned = _MARKDOWN_EMPHASIS.sub(lambda m: next(g for g in m.groups() if g is not None), cleaned)
+    cleaned = _WHITESPACE_RUN.sub(" ", cleaned).strip()
+    if len(cleaned) > _SPEECH_CHAR_LIMIT:
+        cleaned = cleaned[:_SPEECH_CHAR_LIMIT].rsplit(" ", 1)[0] + "..."
+    return cleaned
