@@ -41,7 +41,7 @@ export class ChartAnalysisClient {
 
     const [activeContext, capture] = await Promise.all([
       nativeBridge.getActiveWindowContext(),
-      nativeBridge.captureActiveWindow(true),
+      nativeBridge.captureChartWindow(true),
     ]);
     const captureMs = Math.round(performance.now() - captureStarted);
     if (signal?.aborted) return;

@@ -38,6 +38,14 @@ describe('Wave 2A NativeBridgeService', () => {
     await expect(bridge.exitApp()).resolves.not.toThrow();
   });
 
+  it('falls back captureChartWindow to the same browser-mode capture as captureActiveWindow outside Tauri', async () => {
+    const chart = await bridge.captureChartWindow(true);
+    const active = await bridge.captureActiveWindow(true);
+    expect(chart.error).toBeNull();
+    expect(chart.executable).toBe(active.executable);
+    expect(chart.image_data_base64).toBeTruthy();
+  });
+
   it('registers and tears down native event listeners', async () => {
     const onSummon = vi.fn();
     const onPtt = vi.fn();

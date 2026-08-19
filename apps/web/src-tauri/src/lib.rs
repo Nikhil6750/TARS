@@ -584,6 +584,54 @@ fn get_monitors_geometry() -> Result<Vec<MonitorInfo>, String> {
     }
 }
 
+/// Chart-analysis capture: TARS's own window (shown with "Looking at the
+/// chart..." right before this runs) sits directly over the target chart
+/// window's screen region, and `capture_active_window` grabs raw on-screen
+/// pixels (BitBlt from the screen DC) rather than the target window's own
+/// contents -- so without this, the capture contains TARS itself, not the
+/// chart underneath it. Hides TARS, gives DWM a moment to repaint whatever
+/// was underneath, captures, then restores TARS exactly as it was.
+#[tauri::command]
+fn capture_chart_window(
+    app: tauri::AppHandle,
+    include_image_data: Option<bool>,
+) -> Result<ScreenCaptureResult, String> {
+    let window = app.get_webview_window("main");
+    let was_visible = window
+        .as_ref()
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+
+    if was_visible {
+        if let Some(w) = &window {
+            let _ = w.hide();
+        }
+    }
+
+    // Let DWM finish repainting the window(s) now exposed underneath
+    // before grabbing screen pixels.
+    std::thread::sleep(std::time::Duration::from_millis(220));
+
+    let result = capture_active_window(include_image_data);
+
+    if was_visible {
+        if let Some(w) = &window {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
+
+    match &result {
+        Ok(capture) if capture.executable.eq_ignore_ascii_case("tars-companion.exe") => Err(
+            "Captured window is TARS itself -- hiding before capture did not \
+             clear it from the target region, refusing to send a self-capture \
+             to the model."
+                .to_string(),
+        ),
+        _ => result,
+    }
+}
+
 #[tauri::command]
 fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptureResult, String> {
     #[cfg(target_os = "windows")]
@@ -1176,6 +1224,7 @@ pub fn run() {
             get_active_window_context,
             get_monitors_geometry,
             capture_active_window,
+            capture_chart_window,
             capture_screen_region,
             get_active_window_elements,
             clear_captures_cache,

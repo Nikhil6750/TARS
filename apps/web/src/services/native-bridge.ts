@@ -138,6 +138,44 @@ export class NativeBridgeService {
   }
 
   /**
+   * Chart-analysis capture ("Analyze this chart"): hides TARS's own window
+   * first, since plain captureActiveWindow() grabs raw on-screen pixels and
+   * would otherwise capture TARS itself sitting over the chart it's meant
+   * to read. Restores TARS afterward. Use this instead of
+   * captureActiveWindow() for any "analyze what's on screen" flow.
+   */
+  public async captureChartWindow(includeImageData: boolean = true): Promise<ScreenCaptureResult> {
+    if (!isTauri()) {
+      return this.captureActiveWindow(includeImageData);
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<ScreenCaptureResult>('capture_chart_window', { includeImageData });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn('[NativeBridge] Failed to capture chart window:', errMsg);
+      return {
+        capture_id: `cap_err_${Date.now()}`,
+        captured_at: new Date().toISOString(),
+        source: 'active_window',
+        executable: 'unknown.exe',
+        window_title: 'Capture Failed',
+        bounds: { x: 0, y: 0, width: 0, height: 0 },
+        scale_factor: 1.0,
+        dpi: 96,
+        width: 0,
+        height: 0,
+        is_secure_desktop: false,
+        image_format: 'image/bmp',
+        image_data_base64: null,
+        temp_file_path: null,
+        error: errMsg,
+      };
+    }
+  }
+
+  /**
    * Captures a bounded screen region (DPI-aware rectangle).
    */
   public async captureScreenRegion(
