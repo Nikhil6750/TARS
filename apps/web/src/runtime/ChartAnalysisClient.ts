@@ -36,7 +36,17 @@ export class ChartAnalysisClient {
     callbacks: ChartAnalysisCallbacks,
     signal?: AbortSignal
   ): Promise<void> {
+    // Perf instrumentation (TARS MASTER MILESTONE Phase 2). All timestamps
+    // relative to t0 = command received. Combine with the backend's own
+    // timing (returned in the complete event) and the native
+    // [PERF][capture_chart_window] stderr line to see every stage of a
+    // real "Analyze this chart" request.
+    const t0 = performance.now();
+    const mark = (label: string) => console.info(`[PERF][chart] ${label} at ${Math.round(performance.now() - t0)}ms`);
+    mark('command_received');
+
     callbacks.onStatus?.('Looking at the chart...');
+    mark('intent_detected');
     const captureStarted = performance.now();
 
     const [activeContext, capture] = await Promise.all([
@@ -44,6 +54,7 @@ export class ChartAnalysisClient {
       nativeBridge.captureChartWindow(true),
     ]);
     const captureMs = Math.round(performance.now() - captureStarted);
+    mark('hide_capture_restore_complete');
     if (signal?.aborted) return;
 
     if (capture.error || capture.is_secure_desktop) {
@@ -51,6 +62,7 @@ export class ChartAnalysisClient {
       return;
     }
 
+    mark('http_request_start');
     let res: Response;
     try {
       res = await fetch(`${apiEndpoint}/api/v1/assistant/analyze-chart/stream`, {
@@ -68,6 +80,7 @@ export class ChartAnalysisClient {
       callbacks.onError?.(err instanceof Error ? err.message : String(err));
       return;
     }
+    mark('http_response_headers_received');
 
     if (!res.ok || !res.body) {
       callbacks.onError?.(`Chart analysis request failed with status ${res.status}`);
@@ -81,14 +94,20 @@ export class ChartAnalysisClient {
       complete_ms: null,
     };
 
+    let gotFirstDelta = false;
     try {
       await consumeSSE(res.body, (event: ChartStreamEvent) => {
         if (event.type === 'status' && event.text) {
           callbacks.onStatus?.(event.text);
         } else if (event.type === 'delta' && event.text) {
+          if (!gotFirstDelta) {
+            gotFirstDelta = true;
+            mark('frontend_first_delta_received');
+          }
           callbacks.onDelta?.(event.text);
         } else if (event.type === 'complete' && event.result) {
           timing = { ...timing, ...(event.timing || {}) };
+          mark(`frontend_complete (backend timing=${JSON.stringify(event.timing)})`);
           callbacks.onComplete?.(event.result, timing);
         } else if (event.type === 'error') {
           callbacks.onError?.(event.detail || 'Chart analysis failed');

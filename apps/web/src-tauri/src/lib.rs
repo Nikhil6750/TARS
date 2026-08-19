@@ -596,6 +596,10 @@ fn capture_chart_window(
     app: tauri::AppHandle,
     include_image_data: Option<bool>,
 ) -> Result<ScreenCaptureResult, String> {
+    // Perf instrumentation (TARS MASTER MILESTONE Phase 2): stderr so it
+    // shows up in a redirected launch log without touching the JSON
+    // response shape the frontend depends on.
+    let t_start = std::time::Instant::now();
     let window = app.get_webview_window("main");
     let was_visible = window
         .as_ref()
@@ -607,12 +611,15 @@ fn capture_chart_window(
             let _ = w.hide();
         }
     }
+    let t_hidden = t_start.elapsed().as_millis();
 
     // Let DWM finish repainting the window(s) now exposed underneath
     // before grabbing screen pixels.
     std::thread::sleep(std::time::Duration::from_millis(220));
+    let t_dwm_wait_done = t_start.elapsed().as_millis();
 
     let result = capture_active_window(include_image_data);
+    let t_capture_done = t_start.elapsed().as_millis();
 
     if was_visible {
         if let Some(w) = &window {
@@ -620,6 +627,16 @@ fn capture_chart_window(
             let _ = w.set_focus();
         }
     }
+    let t_restored = t_start.elapsed().as_millis();
+
+    eprintln!(
+        "[PERF][capture_chart_window] hide={}ms dwm_wait_done={}ms capture_done={}ms (capture_only={}ms) restored={}ms",
+        t_hidden,
+        t_dwm_wait_done,
+        t_capture_done,
+        t_capture_done - t_dwm_wait_done,
+        t_restored
+    );
 
     match &result {
         Ok(capture) if capture.executable.eq_ignore_ascii_case("tars-companion.exe") => Err(
