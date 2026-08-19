@@ -35,6 +35,7 @@ import { SettingsView } from './components/settings/SettingsView';
 import { nativeBridge } from './services/native-bridge';
 import { ChartAnalysisData } from './components/hud/ChartAnalysisCard';
 import { VoiceAssistantRuntime } from './runtime/VoiceAssistantRuntime';
+import { assistantClient } from './runtime/AssistantClient';
 
 const ANALYZE_CHART_PATTERN = /\b(analy[sz]e)\s+(this|the|my)?\s*chart\b/i;
 
@@ -62,6 +63,16 @@ export const App: React.FC = () => {
   // Audio / Mic State
   const [isListening, setIsListening] = useState(false);
   const [audioVolume, setAudioVolume] = useState(0);
+
+  // Text streaming in as the dashboard's own chat reply arrives, shown in
+  // place of the generic THINKING placeholder until the full message lands
+  // in chatMessages (see handleSendMessage).
+  const [streamingAnswer, setStreamingAnswer] = useState('');
+  // Stable per-session id for the dashboard's main chat conversation --
+  // must be a real UUID: the backend does UUID(conversation_id) when saving
+  // messages (see assistant/router.py), so a non-UUID string like the old
+  // hardcoded 'conv_main_session' made every /assistant/query call fail.
+  const mainChatConvIdRef = useRef<string>(crypto.randomUUID());
 
   // WebSocket Connection State
   const [connectionState, setConnectionState] = useState<ConnectionState>({
@@ -276,7 +287,7 @@ export const App: React.FC = () => {
     try {
       const [activeContext, capture] = await Promise.all([
         nativeBridge.getActiveWindowContext(),
-        nativeBridge.captureActiveWindow(true),
+        nativeBridge.captureChartWindow(true),
       ]);
 
       if (capture.is_secure_desktop) {
@@ -567,10 +578,18 @@ export const App: React.FC = () => {
     }
   };
 
-  // Send Chat Message via real backend endpoint
+  // Send Chat Message via real backend endpoint. Streams the reply
+  // (assistant/query/stream) instead of blocking on the whole response, and
+  // uses a real UUID conversation id -- the backend does
+  // UUID(conversation_id) when saving messages (see assistant/router.py),
+  // so the old hardcoded 'conv_main_session' string made every call fail
+  // with a 500 instantly, which then silently fell through to a WebSocket
+  // send the backend never actually handles (app/routers/ws.py only
+  // understands {"type": "ping"}) -- nothing was ever going to reply, so
+  // the UI just sat on THINKING forever.
   const handleSendMessage = async (text: string, inputMode: 'text' | 'voice' = 'text') => {
     cancelAutoHide();
-    const convId = 'conv_main_session';
+    const convId = mainChatConvIdRef.current;
     const userMsg: TARSAssistantMessage = {
       schema_version: '1.0.0',
       message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
@@ -581,49 +600,54 @@ export const App: React.FC = () => {
       input_mode: inputMode,
     };
 
+    console.info('[CHAT] submitted');
     handleIncomingAssistantMessage(userMsg);
 
     if (ANALYZE_CHART_PATTERN.test(text)) {
+      console.info('[CHAT] route selected: chart analysis');
       await handleAnalyzeChart();
       return;
     }
 
+    console.info('[CHAT] route selected: assistant query stream');
     setCompanionState('THINKING');
+    setStreamingAnswer('');
 
-    try {
-      const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text,
-          conversation_id: convId,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        handleIncomingAssistantMessage(data);
-        return;
-      }
-    } catch (err) {
-      console.warn('[TARS Chat API] HTTP Assistant query error, trying WebSocket:', err);
-    }
-
-    // Try WebSocket if HTTP was unreachable
-    if (wsClientRef.current && wsClientRef.current.getStatus() === 'connected') {
-      wsClientRef.current.send({
-        type: 'assistant_message',
-        payload: userMsg
-      });
-    } else if (settings.mockGeneratorActive) {
-      setTimeout(() => {
-        const reply = createMockAssistantReply(text, convId, activeSetups);
-        handleIncomingAssistantMessage(reply);
-      }, 500);
-    } else {
-      setCompanionState('IDLE');
-      scheduleAutoHide(2500);
-    }
+    let gotFirstDelta = false;
+    console.info('[CHAT] endpoint called: /api/v1/assistant/query/stream');
+    await assistantClient.streamQuery(text, convId, settings.apiEndpoint, {
+      onDelta: (chunk) => {
+        if (!gotFirstDelta) {
+          gotFirstDelta = true;
+          console.info('[CHAT] first delta');
+        }
+        setStreamingAnswer((prev) => prev + chunk);
+      },
+      onComplete: (message) => {
+        console.info('[CHAT] complete');
+        setStreamingAnswer('');
+        if (message) {
+          handleIncomingAssistantMessage(message as unknown as TARSAssistantMessage);
+        } else {
+          setCompanionState('IDLE');
+          scheduleAutoHide(2500);
+        }
+        console.info('[CHAT] render complete');
+      },
+      onError: (detail) => {
+        console.warn('[TARS Chat API] streaming query error:', detail);
+        setStreamingAnswer('');
+        if (settings.mockGeneratorActive) {
+          setTimeout(() => {
+            const reply = createMockAssistantReply(text, convId, activeSetups);
+            handleIncomingAssistantMessage(reply);
+          }, 500);
+        } else {
+          setCompanionState('IDLE');
+          scheduleAutoHide(2500);
+        }
+      },
+    });
   };
 
   // Switch to Setups view and inspect
@@ -681,6 +705,7 @@ export const App: React.FC = () => {
                 audioVolume={audioVolume}
                 onSendMessage={handleSendMessage}
                 onInspectSetup={handleInspectSetup}
+                streamingAnswer={streamingAnswer}
               />
             )}
 

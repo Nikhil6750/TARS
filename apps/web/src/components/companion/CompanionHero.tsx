@@ -23,6 +23,9 @@ interface CompanionHeroProps {
   audioVolume: number;
   onSendMessage: (text: string) => void;
   onInspectSetup: (setup: TARSTradingEvent) => void;
+  /** Real streamed reply text, shown in place of the generic THINKING
+   * placeholder as soon as the first delta arrives -- empty otherwise. */
+  streamingAnswer?: string;
 }
 
 export const CompanionHero: React.FC<CompanionHeroProps> = ({
@@ -35,6 +38,7 @@ export const CompanionHero: React.FC<CompanionHeroProps> = ({
   audioVolume,
   onSendMessage,
   onInspectSetup,
+  streamingAnswer,
 }) => {
   const [inputText, setInputText] = useState('');
 
@@ -88,16 +92,23 @@ export const CompanionHero: React.FC<CompanionHeroProps> = ({
               size="hero"
               onClick={onTogglePushToTalk}
             />
-            <div className="mt-3 text-center">
-              <p className="text-xs font-mono text-slate-400">
-                {companionState === 'IDLE' && 'Standing by. Monitoring quantitative market streams.'}
-                {companionState === 'WAKE' && 'Waking up... Listening for command.'}
-                {companionState === 'LISTENING' && 'Capturing voice input... (Release button when done)'}
-                {companionState === 'THINKING' && 'Synthesizing market context & checking risk boundaries...'}
-                {companionState === 'SPEAKING' && 'Transmitting response via localized voice synthesis.'}
-                {companionState === 'ALERT' && 'Setup trigger confirmed. Check active parameters.'}
-                {companionState === 'WARNING' && 'Account risk or data quality warning active.'}
-              </p>
+            <div className="mt-3 text-center max-w-md">
+              {companionState === 'THINKING' && streamingAnswer ? (
+                <p className="text-xs font-mono text-cyan-200 whitespace-pre-wrap text-left">
+                  {streamingAnswer}
+                  <span className="inline-block w-1.5 h-3 bg-cyan-400 animate-pulse ml-0.5 align-middle" />
+                </p>
+              ) : (
+                <p className="text-xs font-mono text-slate-400">
+                  {companionState === 'IDLE' && 'Standing by. Monitoring quantitative market streams.'}
+                  {companionState === 'WAKE' && 'Waking up... Listening for command.'}
+                  {companionState === 'LISTENING' && 'Capturing voice input... (Release button when done)'}
+                  {companionState === 'THINKING' && 'Waiting for the assistant...'}
+                  {companionState === 'SPEAKING' && 'Transmitting response via localized voice synthesis.'}
+                  {companionState === 'ALERT' && 'Setup trigger confirmed. Check active parameters.'}
+                  {companionState === 'WARNING' && 'Account risk or data quality warning active.'}
+                </p>
+              )}
             </div>
           </div>
 
