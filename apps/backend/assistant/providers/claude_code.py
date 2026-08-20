@@ -176,26 +176,15 @@ class ClaudeCodeProvider(AssistantProvider):
             ) from exc
 
         accumulated_text = ""
-        last_emitted_len = 0
+        emitted_length = 0
         final_result_text = ""
         image_confirmed_read = False
 
         try:
             while True:
-                # Per-line timeout, not one overall deadline: a slow model
-                # producing steady output shouldn't be killed just because
-                # the whole reply took a while, but the CLI going fully
-                # silent for this long (a stuck tool-approval prompt with no
-                # TTY to answer it, a hung network call, etc.) means it will
-                # never finish on its own -- respond()'s single-call
-                # asyncio.wait_for can't help here since this loop reads
-                # incrementally instead of blocking on one process.communicate().
                 try:
                     line = await asyncio.wait_for(process.stdout.readline(), timeout=self._timeout)
                 except TimeoutError as exc:
-                    # Cleanup (kill + wait) happens once, in the `except
-                    # Exception` block below -- doing it here too would
-                    # double-kill an already-reaped process.
                     raise AssistantProviderError(
                         f"Claude Code CLI produced no output for {self._timeout}s and was killed"
                     ) from exc
@@ -214,12 +203,6 @@ class ClaudeCodeProvider(AssistantProvider):
 
                 event_type = event.get("type")
                 if event_type == "user" and not image_confirmed_read:
-                    # The Read-tool's tool_result event carrying the image
-                    # back to the model -- a real, observed milestone (the
-                    # model has now actually seen the chart), not a fake
-                    # progress tick. Chart analysis's system prompt is the
-                    # only caller that sets image_path, so this only ever
-                    # fires on that path.
                     content_list = event.get("message", {}).get("content", [])
                     if any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content_list):
                         image_confirmed_read = True
@@ -229,20 +212,22 @@ class ClaudeCodeProvider(AssistantProvider):
                     text_chunk = delta.get("text", "")
                     if text_chunk:
                         accumulated_text += text_chunk
+                        emitted_length += len(text_chunk)
                         yield {"type": "delta", "text": text_chunk}
                 elif event_type == "assistant":
                     msg = event.get("message", {})
                     content_list = msg.get("content", [])
                     curr_full = "".join(c.get("text", "") for c in content_list if isinstance(c, dict))
-                    if len(curr_full) > last_emitted_len:
-                        new_piece = curr_full[last_emitted_len:]
-                        last_emitted_len = len(curr_full)
+                    if len(curr_full) > emitted_length:
+                        new_piece = curr_full[emitted_length:]
+                        emitted_length = len(curr_full)
                         accumulated_text = curr_full
                         yield {"type": "delta", "text": new_piece}
                 elif event_type == "result":
                     final_result_text = event.get("result", "")
-                    if final_result_text and len(final_result_text) > len(accumulated_text):
-                        new_piece = final_result_text[len(accumulated_text):]
+                    if final_result_text and len(final_result_text) > emitted_length:
+                        new_piece = final_result_text[emitted_length:]
+                        emitted_length = len(final_result_text)
                         accumulated_text = final_result_text
                         yield {"type": "delta", "text": new_piece}
 

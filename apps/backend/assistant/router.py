@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass
@@ -19,6 +19,8 @@ from assistant.errors import AssistantProviderError
 from assistant.grounding import build_system_context
 from assistant.provider import AssistantProvider, AssistantRequest
 from events.service import EventService
+from intelligence.router import IntelligenceRouter, IntentKind
+from intelligence.trade_calculation import TradeCalculationEngine
 
 if TYPE_CHECKING:
     from memory.service import MemoryService
@@ -57,6 +59,11 @@ class AssistantRouter:
         self._conversations = conversation_store
         self._provider = provider
         self._memory = memory_service
+        self._intelligence_router = IntelligenceRouter(
+            provider=self._provider,
+            memory_service=self._memory,
+            event_service=self._events,
+        )
 
     async def _save(self, message: AssistantMessage) -> None:
         await self._conversations.save(message)
@@ -85,7 +92,21 @@ class AssistantRouter:
                 providers=MessageProviders(assistant="deterministic"),
             )
         else:
-            assistant_message = await self._call_provider(text, conversation_id)
+            classified_intent = self._intelligence_router.classify_intent(text)
+            if classified_intent == IntentKind.MARKET_RESEARCH:
+                _, research_content, provider_name = await self._intelligence_router.handle(
+                    text, conversation_id
+                )
+                assistant_message = AssistantMessage(
+                    conversation_id=UUID(conversation_id),
+                    role=MessageRole.assistant,
+                    content=research_content,
+                    input_mode=InputMode.text,
+                    intent=classified_intent.value,
+                    providers=MessageProviders(assistant=provider_name),
+                )
+            else:
+                assistant_message = await self._call_provider(text, conversation_id)
 
         await self._save(assistant_message)
         return RouterReply(
@@ -97,10 +118,7 @@ class AssistantRouter:
     async def handle_text_stream(self, text: str, conversation_id: str | None):
         """Streaming twin of handle_text: yields `{"type": "delta", ...}`
         events as the provider produces them and a final `{"type":
-        "complete", "message": ...}` once the full reply is known, instead
-        of blocking on the whole response first. Deterministic replies
-        (already instant) are still delivered as a single delta + complete
-        pair so callers only need to handle one event shape."""
+        "complete", "message": ...}` once the full reply is known."""
         conversation_id = conversation_id or str(uuid4())
 
         user_message = AssistantMessage(
@@ -123,6 +141,32 @@ class AssistantRouter:
             )
             await self._save(assistant_message)
             yield {"type": "delta", "text": deterministic_text}
+            yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+            return
+
+        classified_intent = self._intelligence_router.classify_intent(text)
+        if classified_intent == IntentKind.MARKET_RESEARCH:
+            accumulated = ""
+            provider_used = self._provider.name
+            async for event in self._intelligence_router.handle_stream(text, conversation_id):
+                if event.get("type") == "delta":
+                    chunk = event.get("text", "")
+                    accumulated += chunk
+                    yield event
+                elif event.get("type") == "complete":
+                    provider_used = event.get("provider", provider_used)
+                    if event.get("text"):
+                        accumulated = event["text"]
+
+            assistant_message = AssistantMessage(
+                conversation_id=UUID(conversation_id),
+                role=MessageRole.assistant,
+                content=accumulated,
+                input_mode=InputMode.text,
+                intent=classified_intent.value,
+                providers=MessageProviders(assistant=provider_used),
+            )
+            await self._save(assistant_message)
             yield {"type": "complete", "message": assistant_message.to_contract_dict()}
             return
 
@@ -207,6 +251,9 @@ class AssistantRouter:
                 (e for e in history if e.get("state") == "SETUP_INVALIDATED"), None
             )
             return "last_invalidation_reason", _format_invalidation_summary(invalidated)
+        if TradeCalculationEngine.is_calculation_query(text):
+            res = TradeCalculationEngine.evaluate(text)
+            return "trade_calculation", res.formatted_text
         return None, None
 
     async def _call_provider(self, text: str, conversation_id: str) -> AssistantMessage:

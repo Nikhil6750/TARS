@@ -10,68 +10,54 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (OPENJARVIS-STYLE TARS UI REDESIGN)
+## Latest handoff (TARS PROFESSIONAL TRADING INTELLIGENCE ARCHITECTURE OVERHAUL)
 
-**Status**: COMPLETE — Rebuilt primary TARS interface around the OpenJarvis desktop AI companion model: Left sidebar with New Chat & recent conversations, conversation-first center layout with generous whitespace, clean assistant/user messages with rich Markdown & structured chart read formatting (`STRUCTURE`, `BIAS`, `WHAT I SEE`, `SETUP`, `KEY LEVELS`, `RISK`, `ACTION`), empty state with 4 lightweight prompt chips, persistent bottom-centered multiline composer with listening pulse & send button, demoted secondary quant workspace, calm modern dark visual language (removed cyberpunk neon/grid clutter), multi-session storage, and seamless chart analysis streaming.
-**Branch**: `feature/openjarvis-ui-redesign`
-**Commit SHA**: `2c51013`
+**Status**: COMPLETE — Architected and deployed the four core analytical intelligence engines (Market Research, Chart Analysis, Strategy Evaluation, Trade Calculation), implemented intent routing with non-robotic institutional-grade analysis, eliminated stream truncation/duplication bugs in ClaudeCodeProvider, integrated deterministic risk/capital calculations, and ensured complete structured output formatting across chat and chart streams.
+**Branch**: `feature/trading-intelligence-architecture`
+**Commit SHA**: `e69addd`
 **Work completed**:
-1. **OpenJarvis Desktop Assistant Architecture**:
-   - Built `AppShell` (`apps/web/src/components/shell/AppShell.tsx`) managing responsive layout, sidebar collapse/expand, and global keyboard shortcuts (`Ctrl+B` toggle sidebar, `Ctrl+N` new chat).
-   - Built `Sidebar` (`apps/web/src/components/shell/Sidebar.tsx`): ~240px clean dark surface with TARS brand, `+ New Chat` button, recent conversation session list with switch/delete actions, Workspace/Memory/Settings navigation, and understated connection status.
-   - Built `AppHeader` (`apps/web/src/components/shell/AppHeader.tsx`): Clean minimal header with active session title, tiny status dot (`Ready` / `Listening...` / `Thinking...` / `Speaking...`), and Tauri native window controls.
-2. **Conversation-First Center Experience**:
-   - Built `ConversationView` (`apps/web/src/components/assistant/ConversationView.tsx`): Centered 780px readable column with generous whitespace, auto-scroll, empty state, and in-flight status progress.
-   - Built `EmptyState` (`apps/web/src/components/assistant/EmptyState.tsx`): Centered understated TARS mark + "How can I help you today?" + 4 prompt chips ("Analyze current chart", "Research this market", "What needs my attention?", "Open Workspace").
-   - Built `UserMessage` (`apps/web/src/components/assistant/UserMessage.tsx`): Clean right-aligned dark bubble (`#1a202c`), voice indicator, and copy action.
-   - Built `AssistantMessage` (`apps/web/src/components/assistant/AssistantMessage.tsx`): Left-aligned with subtle TARS geometric mark, provider badge, timestamp, copy & speak actions.
-   - Built `MarkdownContent` (`apps/web/src/components/assistant/MarkdownContent.tsx`): Robust markdown parser supporting code blocks with syntax highlighting & copy button, tables, lists, blockquotes, headings, inline code, structured chart sections, and streaming cursor.
-   - Built `Composer` (`apps/web/src/components/assistant/Composer.tsx`): Modern rounded container (`#131722`), auto-expanding multiline textarea, Enter to submit, Shift+Enter for newline, animated mic button with listening wave, and send button.
-3. **Calm Modern Dark Visual Language (`apps/web/src/styles/index.css`)**:
-   - Replaced aggressive neon cyan borders and grid HUD overlays with refined near-black/charcoal dark theme tokens (`#0c0e14` background, `#10131b` sidebar, `#161a26` surface, refined cyan/teal `#0ea5e9` accent).
-4. **Quant Workspace Secondary Navigation (`apps/web/src/components/workspace/WorkspaceView.tsx`)**:
-   - Retained 100% of existing quant trading, setups, alerts, memory, voice, and system diagnostics functionality inside a clean secondary workspace with grouped navigation.
-5. **Chart Analysis & Streaming Flow**:
-   - Preserved real chart capture and streaming analysis flow: "Looking at the chart..." -> "Reading the chart..." -> streamed response smoothly renders inline.
-   - Preserved deterministic fast-path arithmetic (`7 * 6 -> 42`).
-6. **Multi-Session Storage (`apps/web/src/services/storage.ts`)**:
-   - Added `loadStoredSessions` and `saveStoredSessions` for managing multiple conversation threads with automatic migration of existing chat history.
-7. **Testing & Quality Assurance**:
-   - Added `apps/web/src/test/openjarvis-ui.test.tsx` (7 tests covering EmptyState, MarkdownContent, structured chart sections, Assistant/User messages, Sidebar, AppHeader, deterministic fast path).
-   - Vitest suite: 21 test files, 137 tests passing (100%).
-   - TypeScript check (`npm run typecheck`): 0 errors.
-   - Production Vite bundle (`npm run build`): Clean build.
+1. **Four Separated Analytical Engines (`apps/backend/intelligence/`)**:
+   - `TradeCalculationEngine` (`apps/backend/intelligence/trade_calculation.py`): Deterministic mathematical engine for capital, position sizing, risk:reward ratios, monetary risk, and target profit scenarios. Explains required parameters (`entry`, `stop loss`, `target`, `risk %`, `contract size`) without hallucinating profit when parameters are missing.
+   - `MarketResearchEngine` (`apps/backend/intelligence/market_research.py`): Macro drivers, market structure & regime, key catalysts & economic calendar, cross-asset correlations (DXY, Yields, Equities), and risk factors without robotic "CURRENT STATE" refusal or developer metadata leaks.
+   - `StrategyEvaluationEngine` (`apps/backend/intelligence/strategy_evaluation.py`): Evaluates active setups and quant validation rules against deterministic state (`StrategyProvider`), explicitly distinguishing between qualitative companion observation vs validated quant_brain strategy setups.
+   - `IntelligenceComposer` (`apps/backend/intelligence/composer.py`): Normalizes analytical output into clean, concise (~200–400 words) institutional-grade Markdown headings (`### INSTRUMENT`, `### STRUCTURE`, `BIAS:`, `### WHAT I SEE`, `### SETUP`, `### KEY LEVELS`, `### INVALIDATION`, `### RISK`, `ACTION:`).
+2. **Intent / Task Classification & Routing (`apps/backend/intelligence/router.py`)**:
+   - Built `IntelligenceRouter` with `IntentKind.TRADE_CALCULATION`, `IntentKind.MARKET_RESEARCH`, `IntentKind.STRATEGY_EVALUATION`, and `IntentKind.GENERAL_ASSISTANT`.
+   - Wired `IntelligenceRouter` into `AssistantRouter` (`apps/backend/assistant/router.py`) for both synchronous replies and live streaming deltas.
+3. **Claude Code Stream & Grounding Fixes**:
+   - `ClaudeCodeProvider.respond_stream` (`apps/backend/assistant/providers/claude_code.py`): Fixed stream chunk tracking (`emitted_length`) to eliminate token duplication and premature completion truncation.
+   - `grounding.py` (`apps/backend/assistant/grounding.py`): Sharpened preamble to allow comprehensive market research and conceptual analysis while preserving deterministic grounding for portfolio/setup state facts.
+4. **Enhanced Chart Analysis Service (`apps/backend/assistant/chart_analysis.py`)**:
+   - Integrated `TradeCalculationEngine` and `IntelligenceComposer`.
+   - Updated system prompt for institutional market structure analysis instead of elementary visual narration.
+5. **Quality Assurance & Verification**:
+   - Created `apps/backend/tests/test_trading_intelligence.py` with comprehensive unit tests for calculations, market research reports, strategy evaluations, composer formatting, and capital splitting.
+   - Verified 43 backend tests across all assistant, chart, and intelligence suites passing (100%).
+   - Verified frontend TypeScript check (`npm run typecheck`): 0 errors.
 
 **Files changed**:
-- `apps/web/src/App.tsx`
-- `apps/web/src/components/assistant/AssistantMessage.tsx` [NEW]
-- `apps/web/src/components/assistant/Composer.tsx` [NEW]
-- `apps/web/src/components/assistant/ConversationView.tsx` [NEW]
-- `apps/web/src/components/assistant/EmptyState.tsx` [NEW]
-- `apps/web/src/components/assistant/MarkdownContent.tsx` [NEW]
-- `apps/web/src/components/assistant/UserMessage.tsx` [NEW]
-- `apps/web/src/components/shell/AppHeader.tsx` [NEW]
-- `apps/web/src/components/shell/AppShell.tsx` [NEW]
-- `apps/web/src/components/shell/Sidebar.tsx` [NEW]
-- `apps/web/src/components/voice/VoicePanel.tsx`
-- `apps/web/src/components/workspace/WorkspaceView.tsx`
-- `apps/web/src/services/storage.ts`
-- `apps/web/src/styles/index.css`
-- `apps/web/src/test/openjarvis-ui.test.tsx` [NEW]
+- `apps/backend/assistant/chart_analysis.py`
+- `apps/backend/assistant/grounding.py`
+- `apps/backend/assistant/providers/claude_code.py`
+- `apps/backend/assistant/router.py`
+- `apps/backend/intelligence/__init__.py` [NEW]
+- `apps/backend/intelligence/composer.py` [NEW]
+- `apps/backend/intelligence/market_research.py` [NEW]
+- `apps/backend/intelligence/router.py` [NEW]
+- `apps/backend/intelligence/strategy_evaluation.py` [NEW]
+- `apps/backend/intelligence/trade_calculation.py` [NEW]
+- `apps/backend/tests/test_trading_intelligence.py` [NEW]
 - `docs/coordination/handoffs/antigravity.md`
 
 **Interfaces exposed**:
-- `AppShell`, `Sidebar`, `AppHeader`
-- `ConversationView`, `EmptyState`, `Composer`, `AssistantMessage`, `UserMessage`, `MarkdownContent`
-- `WorkspaceView`
+- `TradeCalculationEngine`, `MarketResearchEngine`, `StrategyEvaluationEngine`, `IntelligenceComposer`, `IntelligenceRouter`
 
 **Tests run**:
-- `npm run test` (Vitest): 21 test files, 137 passed (100%).
-- `npm run typecheck` (`tsc --noEmit`): 0 errors.
-- `npm run build`: Production bundle built successfully.
+- `python -m pytest apps/backend/tests/test_chart_analysis.py apps/backend/tests/test_assistant_api.py apps/backend/tests/test_assistant_formatting.py apps/backend/tests/test_assistant_grounding.py apps/backend/tests/test_trading_intelligence.py apps/backend/tests/test_assistant_claude_code_provider.py -q`: 43 passed (100%).
+- `npm run typecheck`: 0 errors.
 
 **Next recommended action**:
-- Physical user review of the release build and UI layout on Windows desktop.
+- Commit changes on `feature/trading-intelligence-architecture` and verify in the native desktop runtime.
 
 ---
 
