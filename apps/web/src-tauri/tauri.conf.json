@@ -15,18 +15,18 @@
       {
         "label": "main",
         "title": "TARS",
-        "width": 380,
-        "height": 180,
-        "minWidth": 320,
-        "minHeight": 140,
+        "width": 1100,
+        "height": 780,
+        "minWidth": 480,
+        "minHeight": 520,
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
         "transparent": false,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
         "shadow": true,
-        "visible": false,
-        "skipTaskbar": true
+        "visible": true,
+        "skipTaskbar": false
       }
     ],
     "security": {

@@ -10,11 +10,72 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (FINAL INTEGRATED TARS VOICE RUNTIME VERIFIED)
+## Latest handoff (OPENJARVIS-STYLE TARS UI REDESIGN)
 
-**Status**: COMPLETE — TARS Voice Runtime fully integrated and verified across all three overnight streams (TARS core/orchestrator, agent runtime, voice-native experience). Real WAV deterministic "Hey TARS" wake pipeline, "Analyze this chart" command flow, ClaudeCodeProvider silent background reasoning with TARS persona formatting, progressive streaming response, Kokoro TTS voice synthesis, barge-in speech interruption, native 420x260 floating panel, background tray lifecycle, and release binary compiled and tested.
-**Branch**: `feature/overnight-integration`
-**Commit SHA**: `69c466e0846d3f37493a836671f21d9f5b064cd7`
+**Status**: COMPLETE — Rebuilt primary TARS interface around the OpenJarvis desktop AI companion model: Left sidebar with New Chat & recent conversations, conversation-first center layout with generous whitespace, clean assistant/user messages with rich Markdown & structured chart read formatting (`STRUCTURE`, `BIAS`, `WHAT I SEE`, `SETUP`, `KEY LEVELS`, `RISK`, `ACTION`), empty state with 4 lightweight prompt chips, persistent bottom-centered multiline composer with listening pulse & send button, demoted secondary quant workspace, calm modern dark visual language (removed cyberpunk neon/grid clutter), multi-session storage, and seamless chart analysis streaming.
+**Branch**: `feature/openjarvis-ui-redesign`
+**Commit SHA**: `2c51013`
+**Work completed**:
+1. **OpenJarvis Desktop Assistant Architecture**:
+   - Built `AppShell` (`apps/web/src/components/shell/AppShell.tsx`) managing responsive layout, sidebar collapse/expand, and global keyboard shortcuts (`Ctrl+B` toggle sidebar, `Ctrl+N` new chat).
+   - Built `Sidebar` (`apps/web/src/components/shell/Sidebar.tsx`): ~240px clean dark surface with TARS brand, `+ New Chat` button, recent conversation session list with switch/delete actions, Workspace/Memory/Settings navigation, and understated connection status.
+   - Built `AppHeader` (`apps/web/src/components/shell/AppHeader.tsx`): Clean minimal header with active session title, tiny status dot (`Ready` / `Listening...` / `Thinking...` / `Speaking...`), and Tauri native window controls.
+2. **Conversation-First Center Experience**:
+   - Built `ConversationView` (`apps/web/src/components/assistant/ConversationView.tsx`): Centered 780px readable column with generous whitespace, auto-scroll, empty state, and in-flight status progress.
+   - Built `EmptyState` (`apps/web/src/components/assistant/EmptyState.tsx`): Centered understated TARS mark + "How can I help you today?" + 4 prompt chips ("Analyze current chart", "Research this market", "What needs my attention?", "Open Workspace").
+   - Built `UserMessage` (`apps/web/src/components/assistant/UserMessage.tsx`): Clean right-aligned dark bubble (`#1a202c`), voice indicator, and copy action.
+   - Built `AssistantMessage` (`apps/web/src/components/assistant/AssistantMessage.tsx`): Left-aligned with subtle TARS geometric mark, provider badge, timestamp, copy & speak actions.
+   - Built `MarkdownContent` (`apps/web/src/components/assistant/MarkdownContent.tsx`): Robust markdown parser supporting code blocks with syntax highlighting & copy button, tables, lists, blockquotes, headings, inline code, structured chart sections, and streaming cursor.
+   - Built `Composer` (`apps/web/src/components/assistant/Composer.tsx`): Modern rounded container (`#131722`), auto-expanding multiline textarea, Enter to submit, Shift+Enter for newline, animated mic button with listening wave, and send button.
+3. **Calm Modern Dark Visual Language (`apps/web/src/styles/index.css`)**:
+   - Replaced aggressive neon cyan borders and grid HUD overlays with refined near-black/charcoal dark theme tokens (`#0c0e14` background, `#10131b` sidebar, `#161a26` surface, refined cyan/teal `#0ea5e9` accent).
+4. **Quant Workspace Secondary Navigation (`apps/web/src/components/workspace/WorkspaceView.tsx`)**:
+   - Retained 100% of existing quant trading, setups, alerts, memory, voice, and system diagnostics functionality inside a clean secondary workspace with grouped navigation.
+5. **Chart Analysis & Streaming Flow**:
+   - Preserved real chart capture and streaming analysis flow: "Looking at the chart..." -> "Reading the chart..." -> streamed response smoothly renders inline.
+   - Preserved deterministic fast-path arithmetic (`7 * 6 -> 42`).
+6. **Multi-Session Storage (`apps/web/src/services/storage.ts`)**:
+   - Added `loadStoredSessions` and `saveStoredSessions` for managing multiple conversation threads with automatic migration of existing chat history.
+7. **Testing & Quality Assurance**:
+   - Added `apps/web/src/test/openjarvis-ui.test.tsx` (7 tests covering EmptyState, MarkdownContent, structured chart sections, Assistant/User messages, Sidebar, AppHeader, deterministic fast path).
+   - Vitest suite: 21 test files, 137 tests passing (100%).
+   - TypeScript check (`npm run typecheck`): 0 errors.
+   - Production Vite bundle (`npm run build`): Clean build.
+
+**Files changed**:
+- `apps/web/src/App.tsx`
+- `apps/web/src/components/assistant/AssistantMessage.tsx` [NEW]
+- `apps/web/src/components/assistant/Composer.tsx` [NEW]
+- `apps/web/src/components/assistant/ConversationView.tsx` [NEW]
+- `apps/web/src/components/assistant/EmptyState.tsx` [NEW]
+- `apps/web/src/components/assistant/MarkdownContent.tsx` [NEW]
+- `apps/web/src/components/assistant/UserMessage.tsx` [NEW]
+- `apps/web/src/components/shell/AppHeader.tsx` [NEW]
+- `apps/web/src/components/shell/AppShell.tsx` [NEW]
+- `apps/web/src/components/shell/Sidebar.tsx` [NEW]
+- `apps/web/src/components/voice/VoicePanel.tsx`
+- `apps/web/src/components/workspace/WorkspaceView.tsx`
+- `apps/web/src/services/storage.ts`
+- `apps/web/src/styles/index.css`
+- `apps/web/src/test/openjarvis-ui.test.tsx` [NEW]
+- `docs/coordination/handoffs/antigravity.md`
+
+**Interfaces exposed**:
+- `AppShell`, `Sidebar`, `AppHeader`
+- `ConversationView`, `EmptyState`, `Composer`, `AssistantMessage`, `UserMessage`, `MarkdownContent`
+- `WorkspaceView`
+
+**Tests run**:
+- `npm run test` (Vitest): 21 test files, 137 passed (100%).
+- `npm run typecheck` (`tsc --noEmit`): 0 errors.
+- `npm run build`: Production bundle built successfully.
+
+**Next recommended action**:
+- Physical user review of the release build and UI layout on Windows desktop.
+
+---
+
+
 **Work completed**:
 1. **Source & Stream Integration Verification**:
    - Verified HEAD commit and merge tree containing `feature/overnight-tars-core`, `feature/overnight-voice-native`, and `feature/overnight-agent-runtime`.

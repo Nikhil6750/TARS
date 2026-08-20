@@ -1,8 +1,7 @@
 import React from 'react';
-import { Activity, Layers, Bell, Mic, Database, Cpu } from 'lucide-react';
-import { WorkspaceSection, CompanionVisualState, ConnectionState } from '../../types/companion';
+import { Layers, Bell, Mic, Database, Cpu } from 'lucide-react';
+import { WorkspaceSection, ConnectionState } from '../../types/companion';
 import { TARSTradingEvent } from '../../types/trading-event';
-import { CompanionHero } from '../companion/CompanionHero';
 import { ActiveSetupsView } from '../setups/ActiveSetupsView';
 import { AlertHistoryView } from '../alerts/AlertHistoryView';
 import { VoiceControlView } from '../voice/VoiceControlView';
@@ -12,19 +11,16 @@ import { SystemStatusView } from '../system/SystemStatusView';
 interface WorkspaceViewProps {
   section: WorkspaceSection;
   setSection: (section: WorkspaceSection) => void;
-  companionState: CompanionVisualState;
   connectionState: ConnectionState;
   activeSetups: TARSTradingEvent[];
   alertsHistory: TARSTradingEvent[];
   selectedAlert: TARSTradingEvent | null;
   setSelectedAlert: (alert: TARSTradingEvent | null) => void;
-  criticalWarnings: string[];
   isListening: boolean;
   onTogglePushToTalk: () => void;
   audioVolume: number;
   onSendMessage: (text: string, inputMode?: 'text' | 'voice') => void;
   onInspectSetup: (setup: TARSTradingEvent) => void;
-  streamingAnswer: string;
   apiEndpoint: string;
   mockModeActive: boolean;
   onUpdateEndpoint: (url: string) => void;
@@ -33,28 +29,19 @@ interface WorkspaceViewProps {
   onClearErrors: () => void;
 }
 
-/**
- * The quant workspace, demoted from the default screen to a secondary one
- * (see TARS MASTER MILESTONE Phase 7) -- everything that used to be top-level
- * navigation lives here now behind its own compact sub-nav, unchanged and
- * fully functional, just no longer the first thing you see.
- */
 export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
-  section,
+  section = 'setups',
   setSection,
-  companionState,
   connectionState,
   activeSetups,
   alertsHistory,
   selectedAlert,
   setSelectedAlert,
-  criticalWarnings,
   isListening,
   onTogglePushToTalk,
   audioVolume,
   onSendMessage,
   onInspectSetup,
-  streamingAnswer,
   apiEndpoint,
   mockModeActive,
   onUpdateEndpoint,
@@ -62,34 +49,44 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   protocolErrors,
   onClearErrors,
 }) => {
-  const sections: Array<{ key: WorkspaceSection; label: string; icon: React.ComponentType<{ className?: string }>; badge?: number }> = [
-    { key: 'companion', label: 'Companion', icon: Activity },
-    { key: 'setups', label: 'Setups', icon: Layers, badge: activeSetups.length },
+  const sections: Array<{
+    key: WorkspaceSection;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    badge?: number;
+  }> = [
+    { key: 'setups', label: 'Active Setups', icon: Layers, badge: activeSetups.length },
     { key: 'alerts', label: 'Alerts', icon: Bell, badge: alertsHistory.length },
-    { key: 'voice', label: 'Voice', icon: Mic },
-    { key: 'memory', label: 'Memory', icon: Database },
-    { key: 'system', label: 'System', icon: Cpu },
+    { key: 'memory', label: 'Memory & Research', icon: Database },
+    { key: 'voice', label: 'Voice Control', icon: Mic },
+    { key: 'system', label: 'Diagnostics', icon: Cpu },
   ];
 
   return (
-    <div className="w-full h-full flex flex-col overflow-hidden">
-      <nav className="flex items-center gap-1 px-3 py-2 border-b border-cyan-500/10 overflow-x-auto shrink-0">
+    <div className="w-full h-full flex flex-col overflow-hidden bg-[#0c0e14]">
+      {/* Workspace Secondary Navigation Bar */}
+      <nav className="flex items-center gap-2 px-4 py-2.5 bg-[#10131b] border-b border-slate-800 shrink-0 select-none">
+        <span className="text-xs font-semibold text-slate-400 mr-2 font-mono uppercase tracking-wider">
+          Workspace
+        </span>
+
         {sections.map(({ key, label, icon: Icon, badge }) => {
-          const isActive = section === key;
+          const isActive = section === key || (section === 'companion' && key === 'setups');
           return (
             <button
               key={key}
+              type="button"
               onClick={() => setSection(key)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-all cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all cursor-pointer ${
                 isActive
-                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40 border border-transparent'
+                  ? 'bg-[#1b2232] text-cyan-300 border border-cyan-500/30 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 border border-transparent'
               }`}
             >
               <Icon className="w-3.5 h-3.5" />
               <span>{label}</span>
               {badge !== undefined && badge > 0 && (
-                <span className="ml-0.5 px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-cyan-500/30 text-cyan-200">
+                <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-cyan-950/80 text-cyan-300 border border-cyan-500/20">
                   {badge}
                 </span>
               )}
@@ -98,23 +95,11 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         })}
       </nav>
 
-      <div className="flex-1 overflow-hidden">
-        {section === 'companion' && (
-          <CompanionHero
-            companionState={companionState}
-            connectionStatus={connectionState.status}
-            latencyMs={connectionState.latencyMs || 0}
-            activeSetups={activeSetups}
-            criticalWarnings={criticalWarnings}
-            isListening={isListening}
-            onTogglePushToTalk={onTogglePushToTalk}
-            audioVolume={audioVolume}
-            onSendMessage={onSendMessage}
-            onInspectSetup={onInspectSetup}
-            streamingAnswer={streamingAnswer}
-          />
+      {/* Workspace Active Section Content */}
+      <div className="flex-1 min-h-0 overflow-hidden">
+        {(section === 'setups' || section === 'companion') && (
+          <ActiveSetupsView setups={activeSetups} onSelectSetup={onInspectSetup} />
         )}
-        {section === 'setups' && <ActiveSetupsView setups={activeSetups} onSelectSetup={onInspectSetup} />}
         {section === 'alerts' && (
           <AlertHistoryView alerts={alertsHistory} selectedAlert={selectedAlert} onSelectAlert={setSelectedAlert} />
         )}

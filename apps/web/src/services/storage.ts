@@ -9,6 +9,7 @@ import { TARSAssistantMessage } from '../types/assistant-message';
 const SETTINGS_KEY = 'tars_settings_v1';
 const ALERTS_KEY = 'tars_alerts_history_v1';
 const CHAT_KEY = 'tars_chat_history_v1';
+const SESSIONS_KEY = 'tars_chat_sessions_v1';
 
 const metaEnv = typeof import.meta !== 'undefined' ? (import.meta as unknown as { env?: Record<string, string> }).env : undefined;
 const envApiUrl = metaEnv?.VITE_TARS_API_URL ? String(metaEnv.VITE_TARS_API_URL) : 'http://127.0.0.1:8000';
@@ -87,5 +88,51 @@ export function saveStoredChat(messages: TARSAssistantMessage[]): void {
     localStorage.setItem(CHAT_KEY, JSON.stringify(slice));
   } catch (err) {
     console.error('Failed to save chat to localStorage:', err);
+  }
+}
+
+export interface StoredChatSession {
+  id: string;
+  title: string;
+  createdAt: string;
+  messages: TARSAssistantMessage[];
+}
+
+export function loadStoredSessions(): StoredChatSession[] {
+  try {
+    const raw = localStorage.getItem(SESSIONS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+    // Migrate existing single chat if available
+    const existingMessages = loadStoredChat();
+    if (existingMessages.length > 0) {
+      const firstUserMsg = existingMessages.find((m) => m.role === 'user');
+      const title = firstUserMsg ? firstUserMsg.content.slice(0, 30) : 'General Session';
+      const initialSession: StoredChatSession = {
+        id: existingMessages[0]?.conversation_id || crypto.randomUUID(),
+        title,
+        createdAt: existingMessages[0]?.timestamp || new Date().toISOString(),
+        messages: existingMessages,
+      };
+      saveStoredSessions([initialSession]);
+      return [initialSession];
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveStoredSessions(sessions: StoredChatSession[]): void {
+  try {
+    // Keep up to 50 sessions
+    const slice = sessions.slice(0, 50);
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(slice));
+  } catch (err) {
+    console.error('Failed to save sessions to localStorage:', err);
   }
 }

@@ -29,14 +29,12 @@ describe('Tauri 2 Configuration & Service Compatibility', () => {
     expect(tauriConfig.app.windows.length).toBeGreaterThan(0);
     const mainWindow = tauriConfig.app.windows[0];
     expect(mainWindow.label).toBe('main');
-    // Voice-first rebuild: the window now starts hidden (tray/background
-    // app) and defaults to the minimal ~380x180 voice panel size rather
-    // than the old always-visible 440x740 HUD shell.
-    expect(mainWindow.width).toBe(380);
-    expect(mainWindow.height).toBe(180);
-    expect(mainWindow.minWidth).toBe(320);
-    expect(mainWindow.minHeight).toBe(140);
-    expect(mainWindow.visible).toBe(false);
+    // Native desktop assistant window configuration
+    expect(mainWindow.width).toBe(1100);
+    expect(mainWindow.height).toBe(780);
+    expect(mainWindow.minWidth).toBe(480);
+    expect(mainWindow.minHeight).toBe(520);
+    expect(mainWindow.visible).toBe(true);
 
     // Capabilities
     expect(defaultCap.windows).toContain('main');

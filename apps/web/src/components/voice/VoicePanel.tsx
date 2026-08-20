@@ -20,10 +20,8 @@ const STATUS_LABEL: Record<VoicePanelStatus, string> = {
 };
 
 /**
- * The ONLY normal voice experience. Deliberately minimal per the
- * voice-first rebuild spec: TARS label, one status line, a waveform, the
- * live transcript / streamed answer, and a single close button. No orb, no
- * provider labels, no debug pills, no expand buttons.
+ * The minimal voice experience: TARS label, status indicator, clean waveform,
+ * live transcript / streamed answer, and dismiss button.
  */
 export const VoicePanel: React.FC<VoicePanelProps> = ({
   status,
@@ -73,8 +71,8 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
           gradient.addColorStop(0, 'rgba(168, 85, 247, 0.95)');
           gradient.addColorStop(1, 'rgba(59, 130, 246, 0.6)');
         } else if (status === 'THINKING') {
-          gradient.addColorStop(0, 'rgba(6, 182, 212, 0.95)');
-          gradient.addColorStop(1, 'rgba(14, 116, 144, 0.5)');
+          gradient.addColorStop(0, 'rgba(14, 165, 233, 0.95)');
+          gradient.addColorStop(1, 'rgba(2, 132, 199, 0.5)');
         } else if (status === 'LISTENING') {
           gradient.addColorStop(0, 'rgba(16, 185, 129, 0.95)');
           gradient.addColorStop(1, 'rgba(5, 150, 105, 0.5)');
@@ -102,20 +100,20 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
   const displayText = streamedAnswer || transcript;
 
   return (
-    <div className="w-screen h-screen flex flex-col bg-[#040711]/97 border border-cyan-500/20 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.85),0_0_30px_rgba(6,182,212,0.12)] backdrop-blur-xl p-3 select-none overflow-hidden font-sans text-slate-100">
-      {/* Header: title, single status line, close -- also the window drag handle since decorations are off */}
+    <div className="w-screen h-screen flex flex-col bg-[#0c0e14]/98 border border-slate-700/80 rounded-2xl shadow-2xl backdrop-blur-xl p-3 select-none overflow-hidden font-sans text-slate-100">
+      {/* Header: title, single status line, close -- window drag handle */}
       <div data-tauri-drag-region className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800/80 shrink-0 cursor-move">
         <div data-tauri-drag-region className="flex items-center gap-2 min-w-0">
-          <span className="font-mono text-xs font-black tracking-widest text-cyan-300 shrink-0">TARS</span>
+          <span className="font-semibold text-xs tracking-wider text-slate-200 shrink-0">TARS</span>
           <span
-            className={`text-[10px] font-mono truncate ${
+            className={`text-[11px] truncate ${
               status === 'SPEAKING'
-                ? 'text-purple-300'
+                ? 'text-purple-400'
                 : status === 'THINKING'
-                ? 'text-cyan-300'
+                ? 'text-cyan-400'
                 : status === 'LISTENING'
-                ? 'text-emerald-300'
-                : 'text-slate-400'
+                ? 'text-emerald-400'
+                : 'text-slate-500'
             }`}
           >
             {STATUS_LABEL[status]}
@@ -132,12 +130,12 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
       </div>
 
       {/* Waveform */}
-      <div className="mt-2 h-10 w-full bg-[#02050b]/80 border border-slate-800/60 rounded-lg overflow-hidden shrink-0">
+      <div className="mt-2 h-10 w-full bg-[#080a10] border border-slate-800/60 rounded-lg overflow-hidden shrink-0">
         <canvas ref={canvasRef} width={344} height={40} className="w-full h-full block" />
       </div>
 
       {/* Transcript / streamed answer */}
-      <div className="mt-2 flex-1 min-h-0 overflow-y-auto custom-scrollbar text-[11px] font-mono leading-relaxed text-slate-200">
+      <div className="mt-2 flex-1 min-h-0 overflow-y-auto custom-scrollbar text-xs leading-relaxed text-slate-200">
         {displayText ? (
           <div className="whitespace-pre-wrap">
             {displayText}
@@ -146,7 +144,7 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
             )}
           </div>
         ) : (
-          <div className="h-full flex items-center justify-center text-center text-slate-500">
+          <div className="h-full flex items-center justify-center text-center text-slate-500 text-xs">
             Say &quot;Hey TARS&quot; to start
           </div>
         )}
@@ -155,7 +153,6 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
   );
 };
 
-/** Maps the app-wide companion state machine to this panel's smaller status vocabulary. */
 export function toVoicePanelStatus(state: CompanionVisualState): VoicePanelStatus {
   if (state === 'SPEAKING') return 'SPEAKING';
   if (state === 'THINKING') return 'THINKING';

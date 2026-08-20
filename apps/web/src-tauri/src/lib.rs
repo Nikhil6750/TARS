@@ -342,19 +342,10 @@ fn summon_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<(), Str
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
         let m = mode.unwrap_or("voice");
-        if m == "full" || m == "workstation" {
-            window.set_size(tauri::LogicalSize::new(1280.0, 840.0)).map_err(|e| e.to_string())?;
-            window.set_always_on_top(false).map_err(|e| e.to_string())?;
-        } else if m == "hud" || m == "compact" {
-            window.set_size(tauri::LogicalSize::new(440.0, 740.0)).map_err(|e| e.to_string())?;
-            window.set_always_on_top(true).map_err(|e| e.to_string())?;
-        } else {
-            // "voice" (default minimal floating voice panel)
-            window.set_size(tauri::LogicalSize::new(380.0, 180.0)).map_err(|e| e.to_string())?;
-            window.set_always_on_top(true).map_err(|e| e.to_string())?;
-        }
+        window.set_size(tauri::LogicalSize::new(1100.0, 780.0)).map_err(|e| e.to_string())?;
+        window.set_always_on_top(false).map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
-        let _ = app.emit("tars://summon-hud", mode.unwrap_or("voice"));
+        let _ = app.emit("tars://summon-hud", "workstation");
         return Ok(());
     }
     Err("Main window not found".into())
@@ -364,13 +355,9 @@ fn show_main_impl(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
-        window.set_size(tauri::LogicalSize::new(1280.0, 840.0)).map_err(|e| e.to_string())?;
+        window.set_size(tauri::LogicalSize::new(1100.0, 780.0)).map_err(|e| e.to_string())?;
         window.set_always_on_top(false).map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
-        // Same event summon_hud_impl emits -- lets the React side know it
-        // must render the full workstation layout rather than the minimal
-        // voice panel, regardless of which native path (tray "Open Main
-        // Dashboard", a future shortcut, etc.) triggered this resize.
         let _ = app.emit("tars://summon-hud", "workstation");
         return Ok(());
     }
