@@ -179,7 +179,7 @@ def test_intelligence_composer_chart_formatting_complete_sections():
         setup="Breakout & Retest",
         key_levels=["Resistance: 2700.00", "Support: 2660.00", "Demand: 2645.00"],
         invalidation="Close below 2660.00 on 15M",
-        risk_notes="Upcoming US session open may increase volatility.",
+        risk_notes="Low sample of visible candles.",
         action="Watch for Confirmation",
     )
     
@@ -195,6 +195,36 @@ def test_intelligence_composer_chart_formatting_complete_sections():
     assert "NO VALIDATED TRADE" in formatted
     assert "ACTION: Watch for Confirmation" in formatted
     assert "### RISK" in formatted
+    assert "Macro/event risk has not been checked in this chart-only analysis." in formatted
+
+
+def test_chart_analysis_strictly_evidence_grounded_no_unsupported_claims():
+    formatted = IntelligenceComposer.format_chart_response(
+        instrument="EURUSD",
+        timeframe="15M",
+        current_price_context="Price is near the lower boundary of the visible range.",
+        supply_zone="1.0890 - 1.0910",
+        demand_zone="1.0830 - 1.0850",
+        recent_price_sequence="Multi-session downward drift into major liquidity pool",
+        bias="Neutral",
+        what_i_see="Order flow shows institutional accumulation and liquidity sweep.",
+        setup="Range Consolidation",
+        key_levels=["Resistance: 1.0910", "Support: 1.0830"],
+        invalidation="Close below 1.0830 on 15M",
+        risk_notes="Upcoming high-impact macro announcements and rate decisions.",
+        action="Watch",
+    )
+    
+    # Assert speculative phrases are stripped/sanitized
+    assert "major liquidity pool" not in formatted.lower()
+    assert "order flow shows" not in formatted.lower()
+    assert "upcoming high-impact macro announcements" not in formatted.lower()
+    assert "institutional accumulation" not in formatted.lower()
+    
+    # Assert evidence-grounded replacements and mandatory chart-only risk disclaimer
+    assert "Macro/event risk has not been checked in this chart-only analysis." in formatted
+    assert "### MARKET STATE" in formatted
+    assert "### TRADE STATUS\n**NO VALIDATED TRADE**" in formatted
 
 
 def test_chart_analysis_split_capital_question():
