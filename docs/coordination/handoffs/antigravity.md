@@ -14,9 +14,14 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 **Status**: COMPLETE — Completed comprehensive audit and verification of trading intelligence architecture, enforced strict fail-closed real retrieval for market research, separated 6 explicit conceptual routing domains, resolved test parameterization skews, eliminated raw markdown asterisks in web/desktop UI, and verified full 520-test backend suite.
 **Branch**: `feature/trading-intelligence-architecture`
-**Commit SHA**: `44faf8f210113e6f0cebaa72470969600bbc0fcf`
+**Commit SHA**: `babba97c1370195cff27b2d18a35b9c78b0920c8`
 **Work completed**:
-1. **Market Research Real Retrieval & Provenance Enforcement**:
+1. **Chart Analysis Visible Evidence & Grounding Correction**:
+   - Restrict `CHART_ANALYSIS` prompts and composition strictly to visible price structure, levels, and chart patterns.
+   - Removed and sanitized speculative terms (`order flow shows`, `major liquidity pool`, `institutional accumulation`, `upcoming high-impact macro announcements`).
+   - Replaced with evidence-grounded phrasing (e.g. `Price is near the lower boundary of the visible range.`).
+   - Enforced mandatory chart-only risk disclaimer: `Macro/event risk has not been checked in this chart-only analysis.`.
+2. **Market Research Real Retrieval & Provenance Enforcement**:
    - Audited `MarketResearchEngine` (`apps/backend/intelligence/market_research.py`).
    - Implemented `MarketEvidence` dataclass preserving `source`, `retrieval_timestamp`, `publication_timestamp`, `url` / `source_id`, and `evidence_text` / `value`.
    - Enforced fail-closed behavior: without real retrieval feeds configured, returns `CURRENT RESEARCH UNAVAILABLE` and explicitly names the missing integration (`Live Macro/News Retrieval Provider (e.g. FRED, Financial Modeling Prep, Finnhub, or Live Economic Calendar API)`). Never relies on Claude model memory for current Fed stance, macro releases, yields, or DXY.
