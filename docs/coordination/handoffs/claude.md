@@ -11,6 +11,163 @@ for that).
 
 ---
 
+## Latest handoff — Alexa-speed hot-state, Phase A: latency instrumentation (2026-08-20)
+
+**Branch**: `feature/realtime-hot-state`
+**Worktree**: `C:\TARS-worktrees\realtime-hot-state` (dedicated, per the
+task's own isolation requirement — do not confuse with the main
+`c:\TARS-Overnight-Integration` checkout, which stays on
+`feature/trading-intelligence-architecture`)
+**Base SHA**: `17713e4` (tip of `feature/trading-intelligence-architecture`
+at session start — includes the Claude/Codex provider work, trading-
+intelligence fixes, and skill system)
+**Final SHA**: `aa21d8a`
+
+**Ownership note**: this is a multi-phase, cross-stack feature ("TARS
+should begin a meaningful chart response in ~5s instead of 15-25s")
+explicitly directed at one agent building the full stack in an isolated
+worktree, specifically so it doesn't collide with other agents' concurrent
+sessions on the shared repo. `apps/web/` (including `src-tauri/`) is
+normally Antigravity's lane per `AGENTS.md` — later phases of this same
+effort (background chart watcher, native capture) will touch
+`apps/web/src-tauri/*.rs` and `apps/web/src/*`; each such change will be
+called out explicitly in this file for review before any merge. This
+Phase A session touched one frontend file
+(`apps/web/src/runtime/ChartAnalysisClient.ts`, one additive line — see
+below); everything else is `apps/backend/`. `contracts/*.schema.json` was
+not touched.
+
+**Work completed** — Phase A only (baseline latency instrumentation; the
+task requires measuring a real baseline before changing behavior, not
+optimizing on anecdote): the codebase already had two pieces of latency
+infrastructure that were built but never actually wired up —
+`ProviderDiagnostics` (`assistant/provider.py`, added by an earlier
+session) was computed on every provider call but discarded immediately
+(`assistant/router.py`'s `_call_provider` built it then only used
+`reply.text`/`reply.provider`), and `app/latency.py`'s `LatencyTracker` was
+exercised only by its own unit tests, never called from a live request
+path. Phase A closes that gap rather than inventing a third timing
+mechanism:
+
+1. **`storage/migrations/0005_request_traces.sql`** — new
+   `request_traces` table: one row per chart-analysis or text-chat
+   request, with `capture_ms`/`provider_start_ms`/`first_token_ms`/
+   `provider_latency_ms`/`total_ms`/`error`, indexed on `(kind,
+   started_at)`.
+2. **`app/latency_store.py`** (new) — `LatencyTraceStore`, the same
+   `*Service`-wrapping-the-shared-`aiosqlite`-connection pattern every
+   other service in this backend uses (`EventService`,
+   `ConversationStore`, etc.). `record()` writes a trace;
+   `percentiles(kind)` computes P50/P90/P95/max/error-count in Python
+   (linear-interpolation percentile, since SQLite has no
+   `PERCENTILE_CONT`).
+3. **`assistant/chart_analysis.py`** — `ChartAnalysisService` takes an
+   optional `trace_store` (default `None`, so every existing caller/test
+   keeps working unchanged). `analyze_stream()` now records a trace on
+   every exit path: success (provider name, `claude_start_ms` as
+   `provider_start_ms`, `first_token_ms`, total), image-decode failure,
+   and any provider exception — never only the happy path, since the
+   whole point is real baseline numbers including failures.
+4. **`assistant/router.py`** — `AssistantRouter` takes the same optional
+   `trace_store`; `_call_provider()` now persists `reply.diagnostics`
+   (finally using the field that was always being computed) on both
+   success and `AssistantProviderError` failure.
+5. **`app/routers/diagnostics.py`** (new) —
+   `GET /api/v1/diagnostics/latency?kind=chart_analysis&limit=200`,
+   same exposure level as the existing `/api/v1/runtime/readiness`
+   (developer-facing, not called by the HUD/voice UI, no secrets).
+6. **Capture-stage timing threaded end to end**: the frontend already
+   computed `captureMs` (hide/DWM-wait/BitBlt/restore) locally for its own
+   console `[PERF][chart]` marks but never sent it to the backend —
+   `ChartAnalysisClient.ts` now includes `capture_ms` in the POST body
+   (one additive line), `app/routers/assistant.py`'s
+   `analyze_chart_stream` reads it, and it flows into the trace row. This
+   is the one frontend file this session touched.
+7. Wiring: `app/main.py` constructs one `LatencyTraceStore` off the
+   shared DB connection at startup and passes it into both
+   `ChartAnalysisService` and (via `app/deps.py`'s
+   `get_assistant_router`) `AssistantRouter`.
+
+**Files changed**: `apps/backend/storage/migrations/0005_request_traces.sql`
+(new), `apps/backend/app/latency_store.py` (new),
+`apps/backend/app/routers/diagnostics.py` (new),
+`apps/backend/app/deps.py`, `apps/backend/app/main.py`,
+`apps/backend/app/routers/assistant.py`,
+`apps/backend/assistant/chart_analysis.py`,
+`apps/backend/assistant/router.py`,
+`apps/backend/tests/test_chart_analysis.py` (added streaming-trace cases),
+`apps/backend/tests/test_latency_store.py` (new),
+`apps/backend/tests/test_latency_trace_wiring.py` (new),
+`apps/backend/tests/test_diagnostics_router.py` (new),
+`apps/web/src/runtime/ChartAnalysisClient.ts` (one additive line).
+
+**Tests run**: full `apps/backend` suite — **553 passed**, 0 failed, 0
+regressions. `ruff check` on every touched/created file — clean (3
+findings auto-fixed: unnecessary quoted forward-refs now that
+`from __future__ import annotations` makes them unneeded, one unsorted
+import block). `mypy --config-file pyproject.toml app assistant` —
+clean, same 7 pre-existing errors as before this session (in
+`assistant/providers/{gemini,codex,claude_code}.py` and
+`skill_registry/db.py` — none in any file this session touched).
+Frontend change **not** type-checked with `tsc` — `apps/web/node_modules`
+is not installed in this worktree (consistent with prior sessions'
+handoffs noting the same gap); the change itself is a single additive
+object-literal field with no type surface change, low risk, but flagging
+per this repo's honesty convention rather than claiming a check that
+didn't run.
+
+**Known limitations / deliberately deferred**:
+
+- **No live P50/P90/P95 numbers from a real running app yet.** This
+  session proves the plumbing (trace rows are written correctly on every
+  exit path, percentiles compute correctly — see the new test files) but
+  has not run the actual `claude` CLI against a real captured chart N
+  times to produce real baseline numbers. That requires either the user's
+  own TradingView session or a live backend + Tauri app running
+  end-to-end, which this session didn't have. The commit-message numbers
+  already in this repo's history (`8ce9ea1`, `9159069`: 10-31s, model
+  inference dominates) remain the best evidence until a live run happens
+  — Phase H's benchmark harness is the right place to automate that,
+  though a spot real-world check earlier would sharpen Phase B-D's exact
+  threshold choices.
+- **`respond_stream()` (both `ClaudeCodeProvider` and any future
+  provider) still doesn't emit `ProviderDiagnostics`** — only the
+  non-streaming `respond()` does. The chart-analysis streaming path's
+  trace instead uses its own `claude_start_ms`/`first_token_ms`/
+  `complete_ms` marks (already existed, just now persisted), which cover
+  the same ground for that path specifically. If a future phase wants
+  richer diagnostics (exit code, request_id, model name) on the streaming
+  path too, `respond_stream`'s `complete` event would need an additive
+  `diagnostics` field — not done here to keep this phase additive-only
+  and scoped to persistence, not provider-adapter changes.
+- **General-chat streaming (`handle_text_stream`) is not traced** — only
+  `handle_text`'s non-streaming `_call_provider()` path is. The streaming
+  chat path's provider branch doesn't produce a `ProviderDiagnostics`
+  either (see above), so there was nothing to persist yet; adding a
+  timing-only trace there without diagnostics felt like it would produce
+  a real-but-thin row that invites over-reading. Left for whoever wires
+  streaming diagnostics.
+- **Dev-endpoint exposure, not access-controlled** — matches
+  `/api/v1/runtime/readiness`'s existing exposure level (this app binds
+  to `127.0.0.1` by default per `ARCHITECTURE.md`); no new gating pattern
+  invented.
+
+**Exact dependencies required from other agents**: none blocking. Later
+phases of this same effort (B: HotChartState model/persistence; C:
+BackgroundChartWatcher, which needs new Rust capture code in
+`apps/web/src-tauri/`) will cross into Antigravity's normal ownership —
+flagged in advance here per `AGENTS.md`'s "flag it in your handoff instead"
+guidance, not attempted without disclosure.
+
+**Next recommended action**: Phase B (HotChartState domain model +
+`0006_hot_chart_state.sql`, purely additive, no behavior change) on the
+same branch/worktree. Full plan (all 8 phases) is tracked outside this
+repo in the originating conversation; ping the coordinator if a written
+copy in `docs/coordination/` would help future sessions pick this up
+independently.
+
+---
+
 ## Latest handoff — Wave 2B: Windows context + desktop-control skills (2026-08-17)
 
 **Branch**: `feature/wave2b-context-windows`
