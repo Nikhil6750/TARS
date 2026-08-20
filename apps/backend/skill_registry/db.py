@@ -360,3 +360,23 @@ async def catalog_summary(conn: aiosqlite.Connection) -> dict[str, Any]:
         "installed_count": installed,
         "sources": sources,
     }
+
+
+async def record_invocation(
+    conn: aiosqlite.Connection, identifier: str, content_hash: str | None, user_task: str, result_status: str
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO skill_invocations (invocation_id, identifier, content_hash, invoked_at, user_task, result_status)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (str(uuid4()), identifier, content_hash, _now(), user_task, result_status),
+    )
+    await conn.commit()
+
+
+async def list_invocations(conn: aiosqlite.Connection, identifier: str) -> list[dict[str, Any]]:
+    cursor = await conn.execute(
+        "SELECT * FROM skill_invocations WHERE identifier = ? ORDER BY invoked_at DESC", (identifier,)
+    )
+    return [dict(r) for r in await cursor.fetchall()]

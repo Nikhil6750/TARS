@@ -128,4 +128,6 @@ def get_orchestrator(request: Request) -> TarsOrchestrator:
         conversation_store=ConversationStore(db.conn),
         agent_runtime=getattr(request.app.state, "agent_runtime", None),
         agents=getattr(request.app.state, "agents", None),
+        skill_manager=getattr(request.app.state, "skill_manager", None),
+        pending_skill_confirmations=getattr(request.app.state, "pending_skill_confirmations", None),
     )

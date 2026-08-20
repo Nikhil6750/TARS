@@ -136,6 +136,26 @@ class SkillManager:
     async def list_installed(self) -> list[dict[str, Any]]:
         return await registry_db.list_installed(self._conn)
 
+    # ---- progressive disclosure: load an installed skill's content ----
+    async def load_installed_content(self, identifier: str) -> str | None:
+        """Returns the installed SKILL.md's full text, or None if not
+        installed. Only ever called for a specific identifier the caller
+        already decided to use -- never bulk-loaded for every installed
+        skill at once."""
+        installed = await registry_db.get_installed(self._conn, identifier)
+        if installed is None:
+            return None
+        bundle_dir = Path(self._vault_path) / installed["local_path"]
+        skill_md = bundle_dir / "SKILL.md"
+        if not skill_md.is_file():
+            return None
+        return skill_md.read_text(encoding="utf-8", errors="replace")
+
+    async def record_invocation(self, identifier: str, *, task: str, result_status: str) -> None:
+        installed = await registry_db.get_installed(self._conn, identifier)
+        content_hash = installed["content_hash"] if installed else None
+        await registry_db.record_invocation(self._conn, identifier, content_hash, task, result_status)
+
     # ---- Phase 8: install / update / uninstall ------------------------
     async def install_skill(self, identifier: str) -> InstallResult:
         record = await registry_db.get_skill(self._conn, identifier)

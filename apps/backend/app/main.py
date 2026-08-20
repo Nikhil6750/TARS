@@ -161,11 +161,30 @@ async def lifespan(app: FastAPI):
     trading_context_builder = TradingContextBuilder(EventService(db.conn), strategy_provider)
     app.state.trading_context_builder = trading_context_builder
 
+    from pathlib import Path
+
+    from skill_registry.manager import SkillManager
+
+    skill_manager = SkillManager(
+        db.conn,
+        settings.obsidian_vault_path,
+        Path(__file__).resolve().parents[1] / "data" / "catalog" / "hermes-skills-index.json.gz",
+    )
+    app.state.skill_manager = skill_manager
+    # Ephemeral, in-process only (mirrors ClaudeCodeProvider._sessions):
+    # TarsOrchestrator is constructed fresh per request (see app/deps.py's
+    # get_orchestrator), so a pending "install this skill?" confirmation
+    # needs to live somewhere that survives across the confirm-turn's
+    # separate request -- app.state is the one thing that does. Lost on
+    # restart, same as any other in-flight confirmation token.
+    app.state.pending_skill_confirmations = {}
+
     action_registry = build_skill_registry(
         memory_service=memory_service,
         frontend_bridge=frontend_bridge,
         chart_analysis_service=chart_analysis_service,
         trading_context_builder=trading_context_builder,
+        skill_manager=skill_manager,
     )
     app.state.action_registry = action_registry
     action_runtime = ActionRuntime(
