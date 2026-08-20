@@ -1,0 +1,22 @@
+{
+  "source_url": "https://hermes-agent.nousresearch.com/docs/api/skills-index.json",
+  "resolved_url": "https://nousresearch.github.io/hermes-agent/docs/api/skills-index.json",
+  "acquisition_method": "hosted_primary",
+  "catalog_version": 1,
+  "generated_at": "2026-07-20T18:55:15.264264+00:00",
+  "downloaded_at": "2026-08-20T04:53:37Z",
+  "record_count": 90605,
+  "raw_sha256": "ea0ca1692fa6777081f18e4de2acd1fe6d9d8adecd0d2a5618e9b44c1d227de7",
+  "raw_size_bytes": 35572247,
+  "compressed_file": "hermes-skills-index.json.gz",
+  "compressed_size_bytes": 7894794,
+  "sources": {
+    "official": 104,
+    "skills.sh": 19967,
+    "github": 438,
+    "clawhub": 69150,
+    "browse-sh": 440,
+    "claude-marketplace": 1,
+    "lobehub": 505
+  }
+}
