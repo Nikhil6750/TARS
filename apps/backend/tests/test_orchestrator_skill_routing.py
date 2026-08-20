@@ -213,52 +213,62 @@ async def test_remove_that_skill_resolves_via_last_installed_not_literal_that(or
     assert "No skills are installed" in listed.assistant_message.content
 
 
-async def test_use_skill_caps_injected_content_length_for_cli_argv_limit(orchestrator, monkeypatch):
-    # Regression: a real ~15.6KB SKILL.md passed as a single claude CLI
-    # argv element failed with "The command line is too long" (verified
-    # directly against the live CLI). The orchestrator must cap what it
-    # injects regardless of how long an installed skill's instructions are.
-    conv = str(uuid4())
-    huge_content = "# Huge Skill\n" + ("Some instruction line. " * 1000)
-    assert len(huge_content) > 20000
+async def test_use_skill_surfaces_the_real_answer_on_success(orchestrator, monkeypatch):
+    # use_skill no longer routes through AssistantRouter at all -- it goes
+    # through skills.use_skill -> skill_registry.executor.execute_skill_prompt,
+    # which is stdin-based and tool-less. Mock that boundary directly.
+    from skill_registry.executor import SkillExecutionDiagnostics, SkillExecutionResult
 
-    async def _huge_download(record, quarantine_root, timeout_seconds=30.0):
-        from skill_registry.installer import DownloadResult
+    captured = {}
 
-        dest = quarantine_root / "huge"
-        dest.mkdir(parents=True, exist_ok=True)
-        (dest / "SKILL.md").write_text(f"---\nname: huge\n---\n\n{huge_content}\n", encoding="utf-8")
-        return DownloadResult(quarantine_path=dest, file_count=1)
+    async def _fake_execute(skill_content, user_task, **kwargs):
+        captured["skill_content"] = skill_content
+        captured["user_task"] = user_task
+        return SkillExecutionResult(
+            success=True,
+            content="Here is my real review of the pull request.",
+            diagnostics=SkillExecutionDiagnostics(attempts=1, returncode=0, event_count=2, final_content_length=42),
+        )
 
-    import skill_registry.manager as manager_module
+    import skills.skill_registry_skill as skill_module
 
-    monkeypatch.setattr(manager_module, "download_to_quarantine", _huge_download)
+    monkeypatch.setattr(skill_module, "execute_skill_prompt", _fake_execute)
 
-    await orchestrator.handle_text("install skill official/devops/kube-debug", conv)
-    await orchestrator.handle_text("confirm", conv)
-
-    fake_router = orchestrator._assistant_router
-    await orchestrator.handle_text("use it to review a pull request", conv)
-    assert fake_router.calls
-    augmented = fake_router.calls[-1]
-    from orchestrator.orchestrator import _SKILL_CONTENT_PROMPT_CAP
-
-    assert len(augmented) < len(huge_content)
-    assert "truncated for length" in augmented
-
-
-async def test_use_skill_loads_content_and_forwards_to_assistant_with_augmented_prompt(orchestrator):
     conv = str(uuid4())
     await orchestrator.handle_text("install skill official/devops/kube-debug", conv)
     await orchestrator.handle_text("confirm", conv)
 
-    fake_router = orchestrator._assistant_router
     reply = await orchestrator.handle_text("use it to review a pull request", conv)
-    assert fake_router.calls, "expected the augmented prompt to reach the assistant router"
-    augmented = fake_router.calls[-1]
-    assert "instructions here" in augmented  # the actual SKILL.md content was loaded
-    assert "review a pull request" in augmented
-    assert reply.assistant_message.content.startswith("[fake llm reply")
+    assert reply.assistant_message.content == "Here is my real review of the pull request."
+    assert "instructions here" in captured["skill_content"]
+    assert captured["user_task"] == "review a pull request"
+
+
+async def test_use_skill_reports_explicit_failure_not_fake_success(orchestrator, monkeypatch):
+    # Requirement: a genuine execution failure must surface as an honest
+    # error, never a fabricated assistant-looking answer.
+    from skill_registry.executor import SkillExecutionDiagnostics, SkillExecutionResult
+
+    async def _fake_execute(skill_content, user_task, **kwargs):
+        return SkillExecutionResult(
+            success=False,
+            error="Claude Code CLI exited 0 with empty output after 2 attempt(s)",
+            diagnostics=SkillExecutionDiagnostics(attempts=2, returncode=0, event_count=1, retried=True),
+        )
+
+    import skills.skill_registry_skill as skill_module
+
+    monkeypatch.setattr(skill_module, "execute_skill_prompt", _fake_execute)
+
+    conv = str(uuid4())
+    await orchestrator.handle_text("install skill official/devops/kube-debug", conv)
+    await orchestrator.handle_text("confirm", conv)
+
+    reply = await orchestrator.handle_text("use it to review a pull request", conv)
+    content = reply.assistant_message.content
+    assert "failed" in content.lower()
+    assert "empty output" in content
+    assert reply.assistant_message.content != "Here is my real review of the pull request."
 
 
 async def test_progressive_disclosure_search_never_includes_skill_content(orchestrator):

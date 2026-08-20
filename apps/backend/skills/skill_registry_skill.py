@@ -3,13 +3,17 @@
 action (install/uninstall/update) is CONFIRM_REQUIRED, both declared here
 and re-derived by PermissionEngine (actions/permissions.py) independently
 -- installing a skill never bypasses the same confirmation flow any other
-state-changing action goes through. `use_skill` only ever reads an
-already-installed SKILL.md's text; it never executes anything itself --
-real actions the skill's instructions describe still have to go through
-their own separate ActionRuntime calls (terminal/filesystem/browser/...),
-each re-classified and re-confirmed independently. A SKILL.md's own text
-has no path to change that -- this skill never interprets or acts on
-instructions found inside a bundle, it only returns them as data.
+state-changing action goes through.
+
+`use_skill` reads an already-installed SKILL.md's text and asks Claude to
+answer the user's request using it as reference material
+(skill_registry/executor.py) -- with no native tool access for that call
+(--tools ""), so it can never itself run Bash/Read/Edit/etc. Real actions
+the skill's instructions describe still have to go through their own
+separate ActionRuntime calls (terminal/filesystem/browser/...), each
+re-classified and re-confirmed independently. A SKILL.md's own text has no
+path to change that -- this skill never interprets or acts on instructions
+found inside a bundle beyond handing them to Claude as inert reference text.
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ from app.action_contracts import (
     SkillExecutionError,
     SkillValidationError,
 )
+from skill_registry.executor import execute_skill_prompt
 from skill_registry.manager import SkillManager
 
 _READ_ONLY_ACTIONS = {"search_skills", "inspect_skill", "list_installed", "use_skill"}
@@ -162,12 +167,27 @@ class SkillRegistrySkill(BaseSkill):
                     risk_level=RiskLevel.READ_ONLY,
                     error=f"not installed: {args['identifier']}", started_at=started,
                 )
+            task = args.get("task", "")
+            exec_result = await execute_skill_prompt(content, task)
+            if not exec_result.success:
+                await self._manager.record_invocation(
+                    args["identifier"], task=task, result_status="failed"
+                )
+                return self._result(
+                    request, ActionStatus.FAILED, "Skill execution did not produce a usable answer.",
+                    risk_level=RiskLevel.READ_ONLY,
+                    error=exec_result.error or "unknown skill execution failure",
+                    data={"diagnostics": exec_result.diagnostics.to_dict()},
+                    started_at=started,
+                )
             await self._manager.record_invocation(
-                args["identifier"], task=args.get("task", ""), result_status="loaded"
+                args["identifier"], task=task, result_status="success"
             )
             return self._result(
-                request, ActionStatus.SUCCEEDED, f"Loaded {args['identifier']}.",
-                risk_level=RiskLevel.READ_ONLY, data={"content": content}, started_at=started,
+                request, ActionStatus.SUCCEEDED, f"Executed {args['identifier']}.",
+                risk_level=RiskLevel.READ_ONLY,
+                data={"answer": exec_result.content, "diagnostics": exec_result.diagnostics.to_dict()},
+                started_at=started,
             )
 
         raise SkillExecutionError(f"unsupported skills action '{action}'")

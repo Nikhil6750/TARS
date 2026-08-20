@@ -54,17 +54,6 @@ class _Route:
     payload: dict[str, Any]
 
 
-# Conservative cap for injected SKILL.md content -- see _handle_skill_use's
-# comment. Verified: 8000 raw chars of real markdown already triggered
-# "The command line is too long" from the `claude` CLI on this machine.
-# Left well below that: AssistantRouter.handle_text() also appends its own
-# system_context (active setups + retrieved memory notes, grounding.py) as
-# a SEPARATE --append-system-prompt argv element, and Windows enforces a
-# limit on the WHOLE command line, not each argument individually -- so
-# this cap has to leave headroom for that too, not just for itself.
-_SKILL_CONTENT_PROMPT_CAP = 1500
-
-
 class TarsOrchestrator:
     def __init__(
         self,
@@ -499,56 +488,22 @@ class TarsOrchestrator:
         if identifier is None:
             return "I don't know which skill to use -- install one first or name it explicitly.", "skill_use"
 
+        # skills.use_skill (skill_registry/executor.py) owns the whole
+        # reliable-execution path now: stdin delivery (no argv length
+        # limit), no native tool access for the call, a bounded single
+        # retry on a narrowly-defined transient-empty condition, and full
+        # diagnostics. This handler just surfaces a real success or a real,
+        # explicit failure -- never a fabricated answer standing in for one.
         result = await self._dispatch_skill("use_skill", {"identifier": identifier, "task": task}, conversation_id)
-        if result.status != ActionStatus.SUCCEEDED:
-            return f"I couldn't load that skill: {result.error}", "skill_use"
-
         self._skill_state.setdefault(conversation_id, {})["last_identifier"] = identifier
-        skill_content = result.data["content"]
-        # ClaudeCodeProvider passes the whole prompt as a single argv
-        # element to the `claude` CLI subprocess -- observed directly: a
-        # ~15.6KB real SKILL.md pushed that past Windows's effective
-        # command-line length limit ("The command line is too long"),
-        # failing the whole turn. Capping here (not in ClaudeCodeProvider
-        # itself, which stays untouched per this task's constraints) keeps
-        # every skill usable regardless of its instructions' length.
-        if len(skill_content) > _SKILL_CONTENT_PROMPT_CAP:
-            skill_content = skill_content[:_SKILL_CONTENT_PROMPT_CAP] + "\n\n[...instructions truncated for length...]"
-        # The skill's instructions become grounding context for a real
-        # assistant turn -- the underlying provider's own tool access is
-        # unchanged by this; any real action it takes still goes through
-        # its existing, separate permission-gated path, not this skill.
-        #
-        # Deliberately NOT phrased as "Using the installed skill `X`. Its
-        # instructions: ..." -- observed directly: that phrasing collides
-        # with Claude Code's own native skill-recognition, which then
-        # treats it as an actual skill invocation, decides the named skill
-        # has "empty content", and ignores the real instructions entirely.
-        # Presenting it as plain reference material sidesteps that.
-        augmented = (
-            f"Follow these domain-specific instructions to help with the task below:\n\n"
-            f"{skill_content}\n\n"
-            f"---\nTask: {task or 'Apply the instructions above.'}"
-        )
-        # handle_text() (non-streaming) always calls the provider's strict
-        # `.respond()` (--output-format json) -- observed directly: with
-        # this kind of open-ended, instructions-heavy prompt, Claude
-        # sometimes answers in plain prose instead of the required JSON
-        # envelope, which .respond() then rejects as "did not return valid
-        # JSON output" and the whole turn fails. handle_text_stream() uses
-        # the more tolerant `.respond_stream()` (stream-json) when the
-        # provider supports it, which doesn't require the model's own
-        # answer to be JSON -- same provider, same model, just a less
-        # brittle transport for this call shape.
-        final_message: dict[str, Any] = {}
-        async for event in self._assistant_router.handle_text_stream(augmented, conversation_id):
-            if event.get("type") == "complete":
-                final_message = event.get("message", {})
-        # .get(..., default) only covers a missing key -- a genuinely
-        # empty string (observed directly: the CLI can exit 0 with no
-        # assistant text for some prompts) needs its own fallback so the
-        # user never sees a blank reply.
-        return final_message.get("content") or "I loaded the skill but didn't get a usable response back -- try rephrasing the task.", "skill_use"
+        if result.status != ActionStatus.SUCCEEDED:
+            diag = (result.data or {}).get("diagnostics", {})
+            return (
+                f"Skill execution failed for `{identifier}`: {result.error}. "
+                f"(attempts={diag.get('attempts')}, exit={diag.get('returncode')}, "
+                f"events={diag.get('event_count')})"
+            ), "skill_use"
+        return result.data["answer"], "skill_use"
 
     # ---- skill registry shared helpers ------------------------------------
 
