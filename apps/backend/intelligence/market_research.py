@@ -23,7 +23,18 @@ from assistant.provider import AssistantProvider, AssistantRequest
 _RESEARCH_PATTERNS = re.compile(
     r"\b(research|macro|macroeconomic|drivers|catalysts|market structure|"
     r"fundamental|fundamentals|sentiment|central bank|inflation|fed|fomc|"
-    r"ecb|yields|dollar index|dxy|gold drivers|rates|geopolitical)\b",
+    r"ecb|yields|dollar index|dxy|gold drivers|rates|geopolitical|"
+    r"news|breaking news|headline|headlines|economic event|economic events|"
+    r"calendar|economic calendar)\b"
+    r"|\b(affect(s|ing)?|move(s|ing)?|impact(s|ing)?)\s+(the\s+)?(gold|xauusd|eurusd|gbpusd|usdjpy|dollar|dxy|spx|nasdaq|crypto|btc|market|markets|asset|currency)\b"
+    r"|\b(what\s+is\s+affecting|what\s+news\s+is|what\s+economic\s+events|what\s+is\s+the\s+current\s+market\s+sentiment)\b"
+    r"|\b(before\s+i\s+trade|before\s+trading|important\s+news)\b",
+    re.IGNORECASE,
+)
+
+_EDUCATIONAL_PATTERNS = re.compile(
+    r"\b(generally|historically|in general|conceptually|theory|principles)\b|"
+    r"\bwhat\s+(generally\s+affects|affects\s+.*\s+generally)\b",
     re.IGNORECASE,
 )
 
@@ -53,9 +64,21 @@ _MARKET_RESEARCH_SYSTEM_PROMPT = (
 _UNAVAILABLE_MESSAGE = (
     "### MARKET RESEARCH\n\n"
     "CURRENT RESEARCH UNAVAILABLE\n\n"
-    "Missing Integration: Live Macro/News Retrieval Provider (e.g. FRED, Financial Modeling Prep, Finnhub, or Live Economic Calendar API).\n\n"
-    "TARS does not rely on model training memory for current Fed/ECB policy stance, real-time yields, DXY, breaking news, or today's economic releases. "
-    "Live market research requires a real-time retrieval pipeline producing timestamped evidence objects before synthesis."
+    "Live market/news retrieval is not currently connected."
+)
+
+_EDUCATIONAL_CONTEXT_MESSAGE = (
+    "### MARKET RESEARCH (GENERAL CONTEXT)\n\n"
+    "Current Research:\n"
+    "Unavailable — live feed is not connected.\n\n"
+    "General Educational Drivers:\n"
+    "Historically, markets and commodities (e.g. XAUUSD / Gold) can be sensitive to:\n"
+    "• Real yields and monetary policy expectations\n"
+    "• US Dollar (USD / DXY) relative strength\n"
+    "• Central bank policy stance (Fed, ECB) and rate guidance\n"
+    "• Inflation expectations and macroeconomic data releases\n"
+    "• Geopolitical risk and safe-haven capital flows\n\n"
+    "Note: This is general educational context, not today's live market drivers or current news."
 )
 
 
@@ -142,6 +165,11 @@ class MarketResearchEngine:
 
         return evidence
 
+    @classmethod
+    def is_educational_query(cls, text: str) -> bool:
+        """Checks if the query is an inquiry into general or historical market dynamics."""
+        return bool(_EDUCATIONAL_PATTERNS.search(text))
+
     async def generate_research(
         self,
         query: str,
@@ -153,9 +181,14 @@ class MarketResearchEngine:
 
         # Fails closed if no real retrieval capability/evidence exists
         if not evidence:
+            content = (
+                _EDUCATIONAL_CONTEXT_MESSAGE
+                if self.is_educational_query(query)
+                else _UNAVAILABLE_MESSAGE
+            )
             return MarketResearchReport(
                 query=query,
-                content=_UNAVAILABLE_MESSAGE,
+                content=content,
                 provider="deterministic",
                 sources_consulted=[],
                 evidence_objects=[],
@@ -205,10 +238,15 @@ class MarketResearchEngine:
         evidence = await self.collect_evidence(query)
 
         if not evidence:
-            yield {"type": "delta", "text": _UNAVAILABLE_MESSAGE}
+            content = (
+                _EDUCATIONAL_CONTEXT_MESSAGE
+                if self.is_educational_query(query)
+                else _UNAVAILABLE_MESSAGE
+            )
+            yield {"type": "delta", "text": content}
             yield {
                 "type": "complete",
-                "text": _UNAVAILABLE_MESSAGE,
+                "text": content,
                 "provider": "deterministic",
                 "is_available": False,
             }

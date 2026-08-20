@@ -31,9 +31,38 @@ class AssistantRequest:
 
 
 @dataclass
+class ProviderDiagnostics:
+    provider_id: str
+    provider_executable: str | None = None
+    model: str | None = None
+    request_id: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    latency_ms: float | None = None
+    exit_code: int | None = None
+    fallback_used: bool = False
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "provider_id": self.provider_id,
+            "provider_executable": self.provider_executable,
+            "model": self.model,
+            "request_id": self.request_id,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "latency_ms": self.latency_ms,
+            "exit_code": self.exit_code,
+            "fallback_used": self.fallback_used,
+            "error": self.error,
+        }
+
+
+@dataclass
 class AssistantReply:
     text: str
     provider: str
+    diagnostics: ProviderDiagnostics | None = None
 
 
 class AssistantProvider(ABC):

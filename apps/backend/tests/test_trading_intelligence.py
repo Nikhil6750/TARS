@@ -91,7 +91,7 @@ async def test_market_research_fails_closed_without_real_retrieval():
     )
     assert not report.is_available
     assert "CURRENT RESEARCH UNAVAILABLE" in report.content
-    assert "Missing Integration: Live Macro/News Retrieval Provider" in report.content
+    assert "Live market/news retrieval is not currently connected." in report.content
     assert "CURRENT STATE" not in report.content
     assert "c:\\tars" not in report.content.lower()
 

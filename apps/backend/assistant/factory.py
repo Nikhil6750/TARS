@@ -6,6 +6,8 @@ from __future__ import annotations
 from app.config import Settings
 from assistant.provider import AssistantProvider
 from assistant.providers.claude_code import ClaudeCodeProvider
+from assistant.providers.codex import CodexProvider
+from assistant.providers.gemini import GeminiProvider
 from assistant.providers.mock import MockAssistantProvider
 from assistant.providers.ollama import OllamaProvider
 
@@ -20,6 +22,16 @@ def build_assistant_provider(settings: Settings) -> AssistantProvider:
             command=settings.claude_code_command,
             timeout_seconds=settings.claude_code_timeout_seconds,
         )
+    if provider == "codex":
+        return CodexProvider(
+            command=settings.codex_command,
+            timeout_seconds=settings.codex_timeout_seconds,
+        )
+    if provider == "gemini":
+        return GeminiProvider(
+            command=settings.gemini_command,
+            timeout_seconds=settings.gemini_timeout_seconds,
+        )
     if provider == "ollama":
         return OllamaProvider(
             base_url=settings.ollama_base_url, model=settings.ollama_model or ""
@@ -33,7 +45,7 @@ def build_assistant_provider(settings: Settings) -> AssistantProvider:
 
     raise ValueError(
         f"Unknown ASSISTANT_PROVIDER '{settings.assistant_provider}' — expected "
-        "one of: mock, claude_code, ollama, anthropic_api"
+        "one of: mock, claude_code, codex, gemini, ollama, anthropic_api"
     )
 
 
