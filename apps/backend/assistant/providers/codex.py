@@ -1,6 +1,6 @@
 """Codex CLI Provider adapter.
 
-Invokes the `codex` CLI in non-interactive / headless mode.
+Invokes the `codex` CLI in non-interactive / headless mode (`codex exec --ephemeral --json`).
 Reports strict availability / missing provider errors with zero silent fallback.
 """
 from __future__ import annotations
@@ -53,9 +53,16 @@ class CodexProvider(AssistantProvider):
             )
 
         prompt = request.text
-        base_args = [self._command, "-p", prompt]  # type: ignore[list-item]
         if request.system_context:
-            base_args += ["--system-prompt", request.system_context]
+            prompt = f"System Context:\n{request.system_context}\n\nTask:\n{prompt}"
+
+        base_args = [
+            self._command,
+            "exec",
+            "--ephemeral",
+            "--json",
+            prompt,
+        ]
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -83,11 +90,35 @@ class CodexProvider(AssistantProvider):
             err_msg = stderr.decode(errors="replace")[:500]
             raise AssistantProviderError(f"Codex CLI exited {process.returncode}: {err_msg}")
 
-        text = stdout.decode(errors="replace").strip()
+        agent_messages: list[str] = []
+        thread_id: str | None = None
+        model_name: str = "gpt-5.6-sol"
+
+        for line in stdout.decode(errors="replace").splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+                if event.get("type") == "thread.started":
+                    thread_id = event.get("thread_id")
+                elif event.get("type") == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message" and item.get("text"):
+                        agent_messages.append(item["text"])
+            except Exception:
+                continue
+
+        result_text = "\n\n".join(agent_messages).strip()
+        if not result_text:
+            # Fallback to plain stdout if no JSONL agent_message event was decoded
+            result_text = stdout.decode(errors="replace").strip()
+
         diagnostics = ProviderDiagnostics(
             provider_id=self.name,
             provider_executable=self._command,
-            model="codex",
+            model=model_name,
+            request_id=thread_id,
             started_at=started_at,
             completed_at=completed_at,
             latency_ms=round(latency_ms, 2),
@@ -95,4 +126,4 @@ class CodexProvider(AssistantProvider):
             fallback_used=False,
             error=None,
         )
-        return AssistantReply(text=text, provider=self.name, diagnostics=diagnostics)
+        return AssistantReply(text=result_text, provider=self.name, diagnostics=diagnostics)
