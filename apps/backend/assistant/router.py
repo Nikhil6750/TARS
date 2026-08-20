@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -24,6 +26,7 @@ from intelligence.strategy_evaluation import StrategyEvaluationEngine
 from intelligence.trade_calculation import TradeCalculationEngine
 
 if TYPE_CHECKING:
+    from app.latency_store import LatencyTraceStore
     from memory.service import MemoryService
 
 tracer = get_tracer()
@@ -55,11 +58,13 @@ class AssistantRouter:
         conversation_store: ConversationStore,
         provider: AssistantProvider,
         memory_service: MemoryService | None = None,
+        trace_store: LatencyTraceStore | None = None,
     ):
         self._events = event_service
         self._conversations = conversation_store
         self._provider = provider
         self._memory = memory_service
+        self._trace_store = trace_store
         self._intelligence_router = IntelligenceRouter(
             provider=self._provider,
             memory_service=self._memory,
@@ -290,6 +295,9 @@ class AssistantRouter:
             system_context=build_system_context(active, memory_notes=memory_notes),
             history=history,
         )
+        request_id = uuid4().hex
+        started_at = datetime.now(UTC).isoformat()
+        t0 = time.monotonic()
         with tracer.start_as_current_span("assistant.request") as span:
             span.set_attribute("assistant.provider", self._provider.name)
             span.set_attribute("assistant.history_turns", len(history))
@@ -300,6 +308,14 @@ class AssistantRouter:
             except AssistantProviderError as exc:
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)
+                await self._record_trace(
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    started_at=started_at,
+                    t0=t0,
+                    provider_id=self._provider.name,
+                    error=str(exc),
+                )
                 return AssistantMessage(
                     conversation_id=UUID(conversation_id),
                     role=MessageRole.assistant,
@@ -312,12 +328,48 @@ class AssistantRouter:
                     error=str(exc),
                 )
 
+        await self._record_trace(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            started_at=started_at,
+            t0=t0,
+            provider_id=reply.provider,
+            provider_latency_ms=reply.diagnostics.latency_ms if reply.diagnostics else None,
+        )
         return AssistantMessage(
             conversation_id=UUID(conversation_id),
             role=MessageRole.assistant,
             content=reply.text,
             input_mode=InputMode.text,
             providers=MessageProviders(assistant=reply.provider),
+        )
+
+    async def _record_trace(
+        self,
+        *,
+        request_id: str,
+        conversation_id: str,
+        started_at: str,
+        t0: float,
+        provider_id: str | None,
+        provider_latency_ms: float | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self._trace_store is None:
+            return
+        from app.latency_store import RequestTrace
+
+        await self._trace_store.record(
+            RequestTrace(
+                request_id=request_id,
+                kind="assistant_text",
+                conversation_id=conversation_id,
+                provider_id=provider_id,
+                started_at=started_at,
+                provider_latency_ms=provider_latency_ms,
+                total_ms=round((time.monotonic() - t0) * 1000),
+                error=error,
+            )
         )
 
 

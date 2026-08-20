@@ -221,6 +221,8 @@ async def analyze_chart_stream(
     conversation_id = raw.get("conversation_id")
     raw_goal = raw.get("goal")
     goal_text = raw_goal.strip() if isinstance(raw_goal, str) and raw_goal.strip() else "Analyze this chart."
+    raw_capture_ms = raw.get("capture_ms")
+    capture_ms = float(raw_capture_ms) if isinstance(raw_capture_ms, (int, float)) else None
 
     async def event_generator():
         try:
@@ -230,6 +232,7 @@ async def analyze_chart_stream(
                 conversation_id=str(conversation_id) if conversation_id else str(uuid4()),
                 active_context_text=active_context_text,
                 goal_text=goal_text,
+                capture_ms=capture_ms,
             ):
                 yield f"data: {json.dumps(item)}\n\n"
         except Exception as exc:

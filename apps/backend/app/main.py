@@ -33,6 +33,7 @@ from app.routers import (
     action_plans,
     actions,
     assistant,
+    diagnostics,
     events,
     health,
     memory,
@@ -153,7 +154,14 @@ async def lifespan(app: FastAPI):
         )
         app.state.assistant_provider = MockAssistantProvider()
 
-    chart_analysis_service = ChartAnalysisService(build_chart_assistant_provider(settings))
+    from app.latency_store import LatencyTraceStore
+
+    latency_trace_store = LatencyTraceStore(db.conn)
+    app.state.latency_trace_store = latency_trace_store
+
+    chart_analysis_service = ChartAnalysisService(
+        build_chart_assistant_provider(settings), trace_store=latency_trace_store
+    )
     app.state.chart_analysis_service = chart_analysis_service
 
     strategy_provider = build_strategy_provider(settings.quant_brain_base_url)
@@ -295,6 +303,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(runtime.router)
+    app.include_router(diagnostics.router)
     app.include_router(events.router)
     app.include_router(assistant.router)
     app.include_router(memory.router)

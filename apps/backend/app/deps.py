@@ -9,6 +9,7 @@ from fastapi import Request
 from app.config import Settings, get_settings
 from app.db import Database
 from app.event_bus import EventBus
+from app.latency_store import LatencyTraceStore
 from app.ws_manager import ConnectionManager
 from events.service import EventService
 
@@ -62,6 +63,7 @@ def get_assistant_router(request: Request) -> AssistantRouter:
         conversation_store=ConversationStore(db.conn),
         provider=request.app.state.assistant_provider,
         memory_service=request.app.state.memory_service,
+        trace_store=getattr(request.app.state, "latency_trace_store", None),
     )
 
 
@@ -87,6 +89,10 @@ def get_frontend_bridge(request: Request) -> FrontendCommandBridge:
 
 def get_chart_analysis_service(request: Request) -> ChartAnalysisService:
     return request.app.state.chart_analysis_service
+
+
+def get_latency_trace_store(request: Request) -> LatencyTraceStore:
+    return request.app.state.latency_trace_store
 
 
 def get_strategy_provider(request: Request) -> StrategyProvider:

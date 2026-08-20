@@ -21,8 +21,9 @@ import json
 import re
 import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
@@ -30,6 +31,9 @@ from PIL import Image, UnidentifiedImageError
 from assistant.provider import AssistantProvider, AssistantRequest
 from intelligence.composer import IntelligenceComposer
 from intelligence.trade_calculation import TradeCalculationEngine
+
+if TYPE_CHECKING:
+    from app.latency_store import LatencyTraceStore
 
 _SYSTEM_PROMPT = (
     "You are TARS, an AI trading companion analyzing a screenshot of the user's active chart. "
@@ -222,8 +226,12 @@ _SCRATCH_DIR = Path(__file__).resolve().parent.parent / "storage" / "tmp"
 
 
 class ChartAnalysisService:
-    def __init__(self, provider: AssistantProvider):
+    def __init__(self, provider: AssistantProvider, trace_store: LatencyTraceStore | None = None):
         self._provider = provider
+        # Optional -- absent in tests/callers that don't care about
+        # telemetry; analyze_stream() degrades to not recording a trace
+        # rather than requiring every caller to wire one up.
+        self._trace_store = trace_store
 
     async def analyze(
         self,
@@ -283,6 +291,7 @@ class ChartAnalysisService:
         conversation_id: str,
         active_context_text: str = "",
         goal_text: str = "Analyze this chart.",
+        capture_ms: float | None = None,
     ):
         # Server-side stage timings, in ms from this call's own start --
         # capture_ms (screenshot -> bytes reaching this backend) is measured
@@ -290,12 +299,22 @@ class ChartAnalysisService:
         # everything from here on is measured server-side so the frontend
         # can show real, non-fabricated numbers rather than guessing.
         t0 = time.monotonic()
+        request_id = uuid4().hex
+        started_at = datetime.now(UTC).isoformat()
         yield {"type": "status", "text": "Looking at the chart..."}
 
         try:
             image = Image.open(io.BytesIO(image_bytes))
             image.load()
         except UnidentifiedImageError as exc:
+            await self._record_trace(
+                request_id=request_id,
+                conversation_id=conversation_id,
+                started_at=started_at,
+                t0=t0,
+                capture_ms=capture_ms,
+                error=f"decode_failed: {exc}",
+            )
             raise ChartAnalysisError(
                 f"Captured image bytes could not be decoded (declared format "
                 f"'{image_format}'); refusing to send an unreadable capture "
@@ -339,30 +358,100 @@ class ChartAnalysisService:
                         provider_name = event.get("provider", self._provider.name)
                         result = _parse_reply(final_text, provider_name)
                         result.capital_note = capital_note
+                        complete_ms = round((time.monotonic() - t0) * 1000)
                         yield {
                             "type": "complete",
                             "result": result.to_dict(),
                             "timing": {
                                 "claude_start_ms": claude_start_ms,
                                 "first_token_ms": first_token_ms,
-                                "complete_ms": round((time.monotonic() - t0) * 1000),
+                                "complete_ms": complete_ms,
                             },
                         }
+                        await self._record_trace(
+                            request_id=request_id,
+                            conversation_id=conversation_id,
+                            started_at=started_at,
+                            t0=t0,
+                            capture_ms=capture_ms,
+                            provider_id=provider_name,
+                            provider_start_ms=claude_start_ms,
+                            first_token_ms=first_token_ms,
+                            total_ms=complete_ms,
+                        )
             else:
                 reply = await self._provider.respond(request)
                 result = _parse_reply(reply.text, reply.provider)
                 result.capital_note = capital_note
+                complete_ms = round((time.monotonic() - t0) * 1000)
                 yield {
                     "type": "complete",
                     "result": result.to_dict(),
                     "timing": {
                         "claude_start_ms": claude_start_ms,
                         "first_token_ms": None,
-                        "complete_ms": round((time.monotonic() - t0) * 1000),
+                        "complete_ms": complete_ms,
                     },
                 }
+                diagnostics = reply.diagnostics
+                await self._record_trace(
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    started_at=started_at,
+                    t0=t0,
+                    capture_ms=capture_ms,
+                    provider_id=reply.provider,
+                    provider_start_ms=claude_start_ms,
+                    provider_latency_ms=diagnostics.latency_ms if diagnostics else None,
+                    total_ms=complete_ms,
+                )
+        except Exception as exc:
+            await self._record_trace(
+                request_id=request_id,
+                conversation_id=conversation_id,
+                started_at=started_at,
+                t0=t0,
+                capture_ms=capture_ms,
+                error=str(exc),
+            )
+            raise
         finally:
             image_path.unlink(missing_ok=True)
+
+    async def _record_trace(
+        self,
+        *,
+        request_id: str,
+        conversation_id: str,
+        started_at: str,
+        t0: float,
+        capture_ms: float | None,
+        provider_id: str | None = None,
+        provider_start_ms: float | None = None,
+        first_token_ms: float | None = None,
+        provider_latency_ms: float | None = None,
+        total_ms: float | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self._trace_store is None:
+            return
+        from app.latency_store import RequestTrace
+
+        await self._trace_store.record(
+            RequestTrace(
+                request_id=request_id,
+                kind="chart_analysis",
+                conversation_id=conversation_id,
+                provider_id=provider_id,
+                started_at=started_at,
+                capture_ms=capture_ms,
+                provider_start_ms=provider_start_ms,
+                first_token_ms=first_token_ms,
+                provider_latency_ms=provider_latency_ms,
+                total_ms=total_ms if total_ms is not None else round((time.monotonic() - t0) * 1000),
+                error=error,
+            )
+        )
 
 
 def _parse_reply(text: str, provider: str) -> ChartAnalysisResult:

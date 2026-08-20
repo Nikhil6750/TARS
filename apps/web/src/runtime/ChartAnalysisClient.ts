@@ -72,6 +72,7 @@ export class ChartAnalysisClient {
           conversation_id: conversationId,
           capture,
           active_context: activeContext,
+          capture_ms: captureMs,
         }),
         signal,
       });

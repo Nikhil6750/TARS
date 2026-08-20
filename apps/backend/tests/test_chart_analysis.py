@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import io
 
+import aiosqlite
 import pytest
 from PIL import Image
 
+from app.latency_store import LatencyTraceStore
 from assistant.chart_analysis import ChartAnalysisError, ChartAnalysisService
 from assistant.provider import AssistantProvider, AssistantReply, AssistantRequest
+from storage.migrator import run_migrations
 
 _STRUCTURED_JSON = """{
   "instrument": "EURUSD",
@@ -44,10 +47,39 @@ class _FakeProvider(AssistantProvider):
         return AssistantReply(text=self.reply_text, provider=self.name)
 
 
+class _FakeStreamingProvider(AssistantProvider):
+    name = "fake_stream"
+
+    def __init__(self, reply_text: str, *, raise_error: bool = False) -> None:
+        self.reply_text = reply_text
+        self.raise_error = raise_error
+
+    async def respond(self, request: AssistantRequest) -> AssistantReply:  # pragma: no cover - unused in stream tests
+        return AssistantReply(text=self.reply_text, provider=self.name)
+
+    async def respond_stream(self, request: AssistantRequest):
+        yield {"type": "status", "text": "Reading the chart..."}
+        if self.raise_error:
+            raise RuntimeError("provider exploded")
+        yield {"type": "delta", "text": self.reply_text[:5]}
+        yield {"type": "delta", "text": self.reply_text[5:]}
+        yield {"type": "complete", "text": self.reply_text, "provider": self.name}
+
+
 def _bmp_bytes(width: int = 4, height: int = 4) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (width, height), color=(10, 20, 30)).save(buf, format="BMP")
     return buf.getvalue()
+
+
+@pytest.fixture
+async def trace_conn(tmp_path):
+    db_path = tmp_path / "chart_trace_test.db"
+    run_migrations(db_path)
+    connection = await aiosqlite.connect(str(db_path))
+    connection.row_factory = aiosqlite.Row
+    yield connection
+    await connection.close()
 
 
 async def test_analyze_parses_structured_json_reply():
@@ -272,3 +304,83 @@ async def test_complete_result_is_not_overwritten_by_partial_provider_text():
     assert result.raw_text == _STRUCTURED_JSON
     assert result.to_dict()["raw_text"] == _STRUCTURED_JSON
     assert result.to_dict()["formatted_tars_text"] == result.formatted_tars_text()
+
+
+async def test_analyze_stream_records_a_trace_on_success(trace_conn):
+    trace_store = LatencyTraceStore(trace_conn)
+    provider = _FakeStreamingProvider(_STRUCTURED_JSON)
+    service = ChartAnalysisService(provider, trace_store=trace_store)
+
+    events = [
+        item
+        async for item in service.analyze_stream(
+            image_bytes=_bmp_bytes(),
+            image_format="image/bmp",
+            conversation_id="conv-stream",
+            capture_ms=312.0,
+        )
+    ]
+
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["result"]["instrument"] == "EURUSD"
+
+    rows = await trace_store.recent("chart_analysis")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["conversation_id"] == "conv-stream"
+    assert row["provider_id"] == "fake_stream"
+    assert row["capture_ms"] == 312.0
+    assert row["error"] is None
+    assert row["total_ms"] is not None and row["total_ms"] >= 0
+
+
+async def test_analyze_stream_records_a_trace_on_provider_error(trace_conn):
+    trace_store = LatencyTraceStore(trace_conn)
+    provider = _FakeStreamingProvider(_STRUCTURED_JSON, raise_error=True)
+    service = ChartAnalysisService(provider, trace_store=trace_store)
+
+    with pytest.raises(RuntimeError, match="provider exploded"):
+        async for _ in service.analyze_stream(
+            image_bytes=_bmp_bytes(),
+            image_format="image/bmp",
+            conversation_id="conv-err",
+        ):
+            pass
+
+    rows = await trace_store.recent("chart_analysis")
+    assert len(rows) == 1
+    assert rows[0]["error"] is not None
+    assert "provider exploded" in rows[0]["error"]
+
+
+async def test_analyze_stream_records_a_trace_on_undecodable_image(trace_conn):
+    trace_store = LatencyTraceStore(trace_conn)
+    provider = _FakeStreamingProvider(_STRUCTURED_JSON)
+    service = ChartAnalysisService(provider, trace_store=trace_store)
+
+    with pytest.raises(ChartAnalysisError):
+        async for _ in service.analyze_stream(
+            image_bytes=b"not an image",
+            image_format="image/bmp",
+            conversation_id="conv-decode",
+        ):
+            pass
+
+    rows = await trace_store.recent("chart_analysis")
+    assert len(rows) == 1
+    assert "decode_failed" in rows[0]["error"]
+
+
+async def test_analyze_stream_without_trace_store_does_not_error():
+    # trace_store is optional -- existing callers/tests that never wire one
+    # up must keep working exactly as before.
+    provider = _FakeStreamingProvider(_STRUCTURED_JSON)
+    service = ChartAnalysisService(provider)
+
+    events = [
+        item
+        async for item in service.analyze_stream(
+            image_bytes=_bmp_bytes(), image_format="image/bmp", conversation_id="conv-no-trace"
+        )
+    ]
+    assert events[-1]["type"] == "complete"
