@@ -84,6 +84,42 @@ ACTION: WATCH`;
       expect(screen.getByText(/Consolidating below resistance/i)).toBeInTheDocument();
     });
 
+    it('renders a 5000+ character assistant response fully, with no truncation', () => {
+      const longParagraph = 'Observed price action continues without a confirmed break of either zone. ';
+      const longContent = '### STRUCTURE\n' + longParagraph.repeat(80);
+      expect(longContent.length).toBeGreaterThan(5000);
+
+      render(<MarkdownContent content={longContent} />);
+
+      const container = screen.getByText('Structure').closest('div')!.parentElement!;
+      expect(container.textContent!.length).toBeGreaterThan(5000);
+      expect(container.textContent).toContain(longParagraph.trim());
+    });
+
+    it('AssistantMessage never clips/truncates content via CSS', () => {
+      const msg: TARSAssistantMessage = {
+        schema_version: '1.0.0',
+        message_id: 'm-long',
+        conversation_id: 'c1',
+        timestamp: '2026-08-19T10:00:00Z',
+        role: 'assistant',
+        content: '### STRUCTURE\n' + 'Full analysis line. '.repeat(100),
+        input_mode: 'text',
+      };
+
+      const { container } = render(<AssistantMessage message={msg} />);
+      const classNames = Array.from(container.querySelectorAll('*'))
+        .map((el) => el.className)
+        .filter((c) => typeof c === 'string')
+        .join(' ');
+
+      expect(classNames).not.toMatch(/line-clamp/);
+      expect(classNames).not.toMatch(/\btruncate\b/);
+      expect(classNames).not.toMatch(/overflow-hidden/);
+      expect(classNames).not.toMatch(/max-h-/);
+      expect(classNames).not.toMatch(/whitespace-nowrap/);
+    });
+
     it('renders AssistantMessage with TARS mark and action buttons', () => {
       const msg: TARSAssistantMessage = {
         schema_version: '1.0.0',

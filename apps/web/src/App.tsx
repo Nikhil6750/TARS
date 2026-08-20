@@ -333,10 +333,15 @@ export const App: React.FC = () => {
   // "Analyze this chart": captures active window and runs analysis
   const isAnalyzingChartRef = useRef(false);
 
-  const handleAnalyzeChart = useCallback(async () => {
+  const handleAnalyzeChart = useCallback(async (userText?: string) => {
     if (isAnalyzingChartRef.current) return;
     isAnalyzingChartRef.current = true;
     cancelAutoHide();
+    // The user's full request (e.g. "...and estimate the profit if my
+    // capital was 10000 rupees") must reach the backend, not just the
+    // generic default goal -- otherwise TARS silently drops half of what
+    // was actually asked.
+    const goal = userText?.trim() || undefined;
 
     const convId = activeSessionId;
     const newMessage = (content: string, error?: string, providerName?: string): TARSAssistantMessage => ({
@@ -385,7 +390,7 @@ export const App: React.FC = () => {
         const streamRes = await fetch(`${settings.apiEndpoint}/api/v1/assistant/analyze-chart/stream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext }),
+          body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext, goal }),
         });
 
         if (streamRes.ok && streamRes.body) {
@@ -419,11 +424,16 @@ export const App: React.FC = () => {
 
           if (finalData) {
             setAnalysisProgress(undefined);
-            const spoken: string =
-              typeof finalData.speech_text === 'string' && finalData.speech_text
+            // The full structured breakdown, not the short speech-only
+            // summary -- the chat bubble must show the complete analysis
+            // (headings/zones/levels), not a flattened one-line paragraph.
+            const displayText: string =
+              typeof finalData.formatted_tars_text === 'string' && finalData.formatted_tars_text
+                ? finalData.formatted_tars_text
+                : typeof finalData.speech_text === 'string' && finalData.speech_text
                 ? finalData.speech_text
                 : String(finalData.market_context || 'Chart analysis complete.');
-            handleIncomingAssistantMessage(newMessage(spoken, undefined, finalData.provider));
+            handleIncomingAssistantMessage(newMessage(displayText, undefined, finalData.provider));
             return;
           }
         }
@@ -436,7 +446,7 @@ export const App: React.FC = () => {
         const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/analyze-chart`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext }),
+          body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext, goal }),
         });
 
         setAnalysisProgress(undefined);
@@ -449,11 +459,13 @@ export const App: React.FC = () => {
         }
 
         const result = await response.json();
-        const spoken: string =
-          typeof result.speech_text === 'string' && result.speech_text
+        const displayText: string =
+          typeof result.formatted_tars_text === 'string' && result.formatted_tars_text
+            ? result.formatted_tars_text
+            : typeof result.speech_text === 'string' && result.speech_text
             ? result.speech_text
             : String(result.market_context || 'No analysis available.');
-        handleIncomingAssistantMessage(newMessage(spoken, undefined, result.provider));
+        handleIncomingAssistantMessage(newMessage(displayText, undefined, result.provider));
       }
     } catch (err) {
       setAnalysisProgress(undefined);
@@ -501,7 +513,7 @@ export const App: React.FC = () => {
         }
 
         if (ANALYZE_CHART_PATTERN.test(transcript)) {
-          await handleAnalyzeChart();
+          await handleAnalyzeChart(transcript);
           return;
         }
 
@@ -724,7 +736,7 @@ export const App: React.FC = () => {
 
     if (ANALYZE_CHART_PATTERN.test(text)) {
       console.info('[CHAT] route selected: chart analysis');
-      await handleAnalyzeChart();
+      await handleAnalyzeChart(text);
       return;
     }
 

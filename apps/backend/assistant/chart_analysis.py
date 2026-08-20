@@ -42,7 +42,17 @@ _SYSTEM_PROMPT = (
     "asked about. Clearly distinguish zones you merely observe from any "
     "validated signal (there is none -- you are qualitative-only). Keep "
     "every value short and high-signal -- this is read aloud to the user, "
-    "so concise phrases beat full sentences.\n\n"
+    "so concise phrases beat full sentences. Keep the ENTIRE response under "
+    "300 words total.\n\n"
+    "You must ALWAYS answer in the exact JSON format below, no matter what "
+    "else the user asks alongside the chart request -- never switch to plain "
+    "prose, markdown tables, or drop the JSON shape to answer a side "
+    "question. If the user asks something the schema below has no field "
+    "for, fold a one-line answer into \"risk_notes\" or \"action\" instead "
+    "of writing outside the JSON object. Never calculate or state a profit "
+    "or loss amount in any currency, with or without leverage, from the "
+    "chart image alone -- if asked, note in \"risk_notes\" that a concrete "
+    "entry, stop loss, target, and position size are required first.\n\n"
     "Respond with ONLY a single JSON object (no markdown fences, no prose outside it) "
     "with exactly these keys:\n"
     '- "instrument": string or null (ticker/symbol if legible, e.g. "EURUSD")\n'
@@ -68,6 +78,54 @@ _SYSTEM_PROMPT = (
 )
 
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+
+# Capital/profit questions ("estimate the profit if my capital was 10000
+# rupees") are handled deterministically, never by asking the vision model
+# to compute one -- see analyze()/analyze_stream() below. Detected once
+# here so the same check drives both goal-text stripping (part of the
+# request sent to Claude) and whether the fixed disclaimer gets appended.
+_CAPITAL_PROFIT_PATTERN = re.compile(
+    r"\b(profit|loss|capital|rupees?|₹|\brs\.?\b|return on|roi|how much (would|could|will) I (make|earn|lose|win)|"
+    r"position size|money (would|could) I)\b",
+    re.IGNORECASE,
+)
+# A concrete hypothetical trade plan (entry/stop/target/risk) makes a
+# deterministic calculation possible in principle -- not implemented here,
+# but its presence means "ask for parameters" is the wrong response, so
+# this pattern gates the disclaimer off rather than showing it needlessly.
+_TRADE_PARAMS_PATTERN = re.compile(
+    r"\b(entry|stop\s*-?loss|\bsl\b|target|take\s*-?profit|\btp\b|risk\s*%|risk\s*percent|lot\s*size|leverage)\b",
+    re.IGNORECASE,
+)
+
+_CAPITAL_DISCLAIMER = (
+    "A responsible profit estimate requires:\n"
+    "- entry\n"
+    "- stop loss\n"
+    "- target\n"
+    "- risk percentage or position size\n"
+    "- leverage/contract specification where relevant\n\n"
+    "I'm not going to invent a rupee figure from the chart image alone -- "
+    "share those and I can work it out."
+)
+
+
+def _wants_capital_estimate_without_params(goal_text: str) -> bool:
+    return bool(_CAPITAL_PROFIT_PATTERN.search(goal_text)) and not _TRADE_PARAMS_PATTERN.search(goal_text)
+
+
+def _split_capital_question(goal_text: str) -> tuple[str, str | None]:
+    """Returns (goal to actually send the vision model, capital_note or
+    None). The profit/capital half of the question is never sent to
+    Claude -- it reliably breaks the JSON-only response format and, worse,
+    invites the model to invent a rupee figure from image content alone
+    (observed directly: asking both together produced a markdown table of
+    fabricated profit numbers under assumed leverage). Answered
+    deterministically instead."""
+    if _wants_capital_estimate_without_params(goal_text):
+        return "Analyze this chart.", _CAPITAL_DISCLAIMER
+    return goal_text, None
+
 
 _STRUCTURED_KEYS = (
     "instrument",
@@ -107,6 +165,10 @@ class ChartAnalysisResult:
     demand_zone: str | None = None
     recent_price_sequence: str | None = None
     at_meaningful_location: bool | None = None
+    # Set deterministically (never model-generated) when the user asked
+    # about profit/capital without supplying entry/stop/target/risk --
+    # see _wants_capital_estimate_without_params(). None otherwise.
+    capital_note: str | None = None
     disclaimer: str = (
         "Qualitative read from TARS's assistant, not a quant_brain-validated "
         "signal. No confidence score; nothing here is a guaranteed outcome."
@@ -121,31 +183,54 @@ class ChartAnalysisResult:
         }
 
     def formatted_tars_text(self) -> str:
-        """Returns clean, formatted TARS response for HUD streaming. Leads
-        with observed grounding (current price, supply/demand zones, recent
-        sequence, meaningful-location check) before the qualitative
-        BIAS/WHAT I SEE/... read, matching direct-Claude's structure."""
-        lines = []
+        """Returns the full structured TARS response as real Markdown
+        (headings + bullets) -- the complete analysis, never a flattened
+        single paragraph and never truncated. Leads with observed grounding
+        (current price, supply/demand zones, recent sequence,
+        meaningful-location check) before the qualitative BIAS/WHAT I
+        SEE/... read, matching direct-Claude's structure."""
+        if not self.structured:
+            # The model didn't return the requested JSON shape -- there is
+            # no parsed bias/setup/key_levels to report, and wrapping raw
+            # prose in a BIAS/SETUP template would fabricate an assessment
+            # that was never actually produced. Show its real (untruncated)
+            # text as-is; it's already the model's own markdown/prose.
+            parts = [self.market_context.strip()] if self.market_context.strip() else []
+            if self.capital_note:
+                parts.append(f"### CAPITAL / PROFIT ESTIMATE\n{self.capital_note}")
+            return "\n\n".join(parts) if parts else "I couldn't produce a read from that image."
+
+        instrument_line = " · ".join(p for p in (self.instrument, self.timeframe) if p)
+        structure_bullets = []
         if self.current_price_context:
-            lines.append(f"PRICE: {self.current_price_context}")
-        if self.supply_zone:
-            lines.append(f"SUPPLY ZONE: {self.supply_zone}")
-        if self.demand_zone:
-            lines.append(f"DEMAND ZONE: {self.demand_zone}")
+            structure_bullets.append(f"- Current price: {self.current_price_context}")
+        structure_bullets.append(f"- Supply zone: {self.supply_zone or 'Not clearly visible'}")
+        structure_bullets.append(f"- Demand zone: {self.demand_zone or 'Not clearly visible'}")
         if self.recent_price_sequence:
-            lines.append(f"RECENT MOVEMENT: {self.recent_price_sequence}")
+            structure_bullets.append(f"- Recent movement: {self.recent_price_sequence}")
         if self.at_meaningful_location is not None:
-            lines.append(f"AT KEY LEVEL: {'Yes' if self.at_meaningful_location else 'No'}")
-        lines += [
-            f"BIAS: {self.bias or 'Neutral'}",
-            f"WHAT I SEE: {self.what_i_see or self.market_context or 'Observing active price structure.'}",
-            f"SETUP: {self.setup or 'Unclear'}",
-            f"KEY LEVEL: {', '.join(self.key_levels) if self.key_levels else 'None'}",
-            f"INVALIDATION: {self.invalidation or 'Structure break'}",
-            f"RISK: {self.risk_notes or 'Standard market risk.'}",
-            f"ACTION: {self.action or 'Watch'}",
-        ]
-        return "\n".join(lines)
+            structure_bullets.append(f"- At a key level right now: {'Yes' if self.at_meaningful_location else 'No'}")
+
+        sections = []
+        if instrument_line:
+            sections.append(f"### INSTRUMENT\n{instrument_line}")
+        sections.append("### STRUCTURE\n" + "\n".join(structure_bullets))
+        # BIAS/ACTION stay single-line ("BIAS: value") rather than
+        # header-then-value -- MarkdownContent.tsx's existing badge
+        # renderer for these two extracts the value from the SAME line and
+        # would otherwise silently show "Neutral"/"Watch & Wait" for every
+        # real value.
+        sections.append(f"BIAS: {self.bias or 'Neutral'}")
+        sections.append(f"### WHAT I SEE\n{self.what_i_see or self.market_context or 'Observing active price structure.'}")
+        sections.append(f"### SETUP\n{self.setup or 'Unclear'}")
+        key_levels_block = "\n".join(f"- {level}" for level in self.key_levels) if self.key_levels else "- None clearly visible"
+        sections.append(f"### KEY LEVELS\n{key_levels_block}")
+        sections.append(f"### INVALIDATION\n{self.invalidation or 'Structure break'}")
+        sections.append(f"### RISK\n{self.risk_notes or 'Standard market risk.'}")
+        sections.append(f"ACTION: {self.action or 'Watch'}")
+        if self.capital_note:
+            sections.append(f"### CAPITAL / PROFIT ESTIMATE\n{self.capital_note}")
+        return "\n\n".join(sections)
 
     def speech_text(self) -> str:
         """A short, spoken-friendly summary for TTS."""
@@ -176,6 +261,11 @@ class ChartAnalysisResult:
             parts.append(f"Action: {self.action}.")
         elif self.possible_setup:
             parts.append(f"Possible read: {self.possible_setup}.")
+        if self.capital_note:
+            parts.append(
+                "For a profit estimate I'd need your entry, stop loss, target, "
+                "and position size -- I won't guess a number from the chart alone."
+            )
         return " ".join(p.strip() for p in parts if p and p.strip())
 
 
@@ -220,6 +310,8 @@ class ChartAnalysisService:
                 "to the model."
             ) from exc
 
+        vision_goal, capital_note = _split_capital_question(goal_text)
+
         _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
         image_path = _SCRATCH_DIR / f"chart-{uuid4().hex}.png"
         image.convert("RGB").save(image_path, format="PNG")
@@ -232,7 +324,7 @@ class ChartAnalysisService:
                 )
 
             request = AssistantRequest(
-                text=goal_text,
+                text=vision_goal,
                 conversation_id=conversation_id,
                 system_context=system_context,
                 image_path=str(image_path),
@@ -241,7 +333,9 @@ class ChartAnalysisService:
         finally:
             image_path.unlink(missing_ok=True)
 
-        return _parse_reply(reply.text, reply.provider)
+        result = _parse_reply(reply.text, reply.provider)
+        result.capital_note = capital_note
+        return result
 
     async def analyze_stream(
         self,
@@ -270,6 +364,8 @@ class ChartAnalysisService:
                 "to the model."
             ) from exc
 
+        vision_goal, capital_note = _split_capital_question(goal_text)
+
         _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
         image_path = _SCRATCH_DIR / f"chart-{uuid4().hex}.png"
         image.convert("RGB").save(image_path, format="PNG")
@@ -282,7 +378,7 @@ class ChartAnalysisService:
                 )
 
             request = AssistantRequest(
-                text=goal_text,
+                text=vision_goal,
                 conversation_id=conversation_id,
                 system_context=system_context,
                 image_path=str(image_path),
@@ -304,6 +400,7 @@ class ChartAnalysisService:
                         final_text = event.get("text", "")
                         provider_name = event.get("provider", self._provider.name)
                         result = _parse_reply(final_text, provider_name)
+                        result.capital_note = capital_note
                         yield {
                             "type": "complete",
                             "result": result.to_dict(),
@@ -316,6 +413,7 @@ class ChartAnalysisService:
             else:
                 reply = await self._provider.respond(request)
                 result = _parse_reply(reply.text, reply.provider)
+                result.capital_note = capital_note
                 yield {
                     "type": "complete",
                     "result": result.to_dict(),
