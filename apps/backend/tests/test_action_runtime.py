@@ -154,11 +154,12 @@ def test_skill_argument_validation_denies_without_execution(client):
 
 
 @pytest.mark.parametrize(
-    "requested_at",
-    [datetime.now(UTC) - timedelta(minutes=6), datetime.now(UTC) + timedelta(minutes=1)],
+    "offset",
+    [-timedelta(minutes=6), timedelta(minutes=1)],
 )
-def test_expired_or_future_action_is_denied_before_skill_routing(client, requested_at):
+def test_expired_or_future_action_is_denied_before_skill_routing(client, offset):
     skill = register(client, FakeSkill("reader", RiskLevel.READ_ONLY))
+    requested_at = datetime.now(UTC) + offset
 
     response = client.post(
         "/api/v1/actions", json=payload(requested_at=requested_at)

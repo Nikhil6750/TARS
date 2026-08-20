@@ -39,6 +39,50 @@ const CodeBlock: React.FC<{ code: string; language: string }> = ({ code, languag
   );
 };
 
+function renderInline(text: string): React.ReactNode[] {
+  const regex = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^)]+\))/g;
+  const parts = text.split(regex);
+  return parts.map((part, i) => {
+    if (!part) return null;
+    if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
+      return (
+        <code key={i} className="px-1 py-0.5 mx-0.5 rounded bg-slate-100 font-mono text-xs text-slate-800 border border-slate-200">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if (
+      (part.startsWith('**') && part.endsWith('**') && part.length >= 4) ||
+      (part.startsWith('__') && part.endsWith('__') && part.length >= 4)
+    ) {
+      return (
+        <strong key={i} className="font-semibold text-slate-900">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (
+      (part.startsWith('*') && part.endsWith('*') && part.length >= 2) ||
+      (part.startsWith('_') && part.endsWith('_') && part.length >= 2)
+    ) {
+      return (
+        <em key={i} className="italic text-slate-800">
+          {part.slice(1, -1)}
+        </em>
+      );
+    }
+    const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (linkMatch) {
+      return (
+        <a key={i} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+          {linkMatch[1]}
+        </a>
+      );
+    }
+    return part;
+  });
+}
+
 export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStreaming = false }) => {
   if (!content) return null;
 
@@ -67,9 +111,16 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStr
       return;
     }
 
+    const trimmed = line.trim();
+    const cleanHeader = trimmed
+      .replace(/^\*\*|\*\*$/g, '')
+      .replace(/^#{1,6}\s*/, '')
+      .replace(/:$/, '')
+      .trim()
+      .toUpperCase();
+
     // Structured Trading Sections Formatter
-    const upper = line.trim().toUpperCase();
-    if (upper === 'STRUCTURE' || upper === '### STRUCTURE') {
+    if (cleanHeader === 'STRUCTURE') {
       elements.push(
         <div key={index} className="flex items-center gap-1.5 mt-4 mb-1.5 font-semibold text-slate-900 text-xs uppercase tracking-wider">
           <span className="w-1.5 h-1.5 rounded-full bg-slate-700" />
@@ -78,8 +129,44 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStr
       );
       return;
     }
-    if (upper === 'BIAS' || upper.startsWith('BIAS:') || upper === '### BIAS') {
-      const biasVal = line.replace(/#* BIAS:?/i, '').trim();
+    if (cleanHeader === 'WHAT I SEE') {
+      elements.push(
+        <div key={index} className="flex items-center gap-1.5 mt-4 mb-1.5 font-semibold text-slate-900 text-xs uppercase tracking-wider">
+          <span className="w-1.5 h-1.5 rounded-full bg-indigo-600" />
+          <span>What I See</span>
+        </div>
+      );
+      return;
+    }
+    if (cleanHeader === 'MARKET STATE' || cleanHeader === 'MARKET STATE & STRUCTURE') {
+      elements.push(
+        <div key={index} className="flex items-center gap-1.5 mt-4 mb-1.5 font-semibold text-slate-900 text-xs uppercase tracking-wider">
+          <span className="w-1.5 h-1.5 rounded-full bg-blue-600" />
+          <span>Market State</span>
+        </div>
+      );
+      return;
+    }
+    if (cleanHeader === 'BULLISH SCENARIO') {
+      elements.push(
+        <div key={index} className="flex items-center gap-1.5 mt-3 mb-1.5 font-semibold text-emerald-700 text-xs uppercase tracking-wider">
+          <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
+          <span>Bullish Scenario</span>
+        </div>
+      );
+      return;
+    }
+    if (cleanHeader === 'BEARISH SCENARIO') {
+      elements.push(
+        <div key={index} className="flex items-center gap-1.5 mt-3 mb-1.5 font-semibold text-rose-700 text-xs uppercase tracking-wider">
+          <TrendingDown className="w-3.5 h-3.5 text-rose-600" />
+          <span>Bearish Scenario</span>
+        </div>
+      );
+      return;
+    }
+    if (cleanHeader === 'BIAS' || trimmed.toUpperCase().startsWith('BIAS:')) {
+      const biasVal = trimmed.replace(/^#*\s*BIAS:?/i, '').replace(/^\*\*|\*\*$/g, '').trim();
       const isBull = /bull/i.test(biasVal);
       const isBear = /bear/i.test(biasVal);
       elements.push(
@@ -101,16 +188,16 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStr
       );
       return;
     }
-    if (upper === 'SETUP' || upper.startsWith('SETUP:') || upper === '### SETUP') {
+    if (cleanHeader === 'SETUP' || cleanHeader === 'TRADE STATUS' || trimmed.toUpperCase().startsWith('SETUP:')) {
       elements.push(
         <div key={index} className="flex items-center gap-1.5 mt-3 mb-1.5 font-semibold text-slate-900 text-xs uppercase tracking-wider">
           <span className="w-1.5 h-1.5 rounded-full bg-slate-700" />
-          <span>Setup</span>
+          <span>{cleanHeader === 'TRADE STATUS' ? 'Trade Status' : 'Setup'}</span>
         </div>
       );
       return;
     }
-    if (upper === 'KEY LEVELS' || upper === '### KEY LEVELS') {
+    if (cleanHeader === 'KEY LEVELS') {
       elements.push(
         <div key={index} className="flex items-center gap-1.5 mt-3 mb-1.5 font-semibold text-slate-900 text-xs uppercase tracking-wider">
           <span className="w-1.5 h-1.5 rounded-full bg-slate-700" />
@@ -119,7 +206,16 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStr
       );
       return;
     }
-    if (upper === 'RISK' || upper.startsWith('RISK:') || upper === '### RISK') {
+    if (cleanHeader === 'INVALIDATION' || trimmed.toUpperCase().startsWith('INVALIDATION:')) {
+      elements.push(
+        <div key={index} className="flex items-center gap-1.5 mt-3 mb-1.5 font-semibold text-amber-700 text-xs uppercase tracking-wider">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-600" />
+          <span>Invalidation</span>
+        </div>
+      );
+      return;
+    }
+    if (cleanHeader === 'RISK' || cleanHeader === 'RISK WARNING' || cleanHeader === 'RISK FACTORS' || trimmed.toUpperCase().startsWith('RISK:')) {
       elements.push(
         <div key={index} className="flex items-center gap-1.5 mt-3 mb-1.5 font-semibold text-amber-700 text-xs uppercase tracking-wider">
           <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
@@ -128,8 +224,8 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStr
       );
       return;
     }
-    if (upper === 'ACTION' || upper.startsWith('ACTION:') || upper === '### ACTION') {
-      const actVal = line.replace(/#* ACTION:?/i, '').trim();
+    if (cleanHeader === 'ACTION' || trimmed.toUpperCase().startsWith('ACTION:')) {
+      const actVal = trimmed.replace(/^#*\s*ACTION:?/i, '').replace(/^\*\*|\*\*$/g, '').trim();
       elements.push(
         <div key={index} className="flex items-center gap-2 mt-3 mb-2 p-2 rounded-lg bg-slate-100 border border-slate-200">
           <span className="font-semibold text-slate-900 text-xs uppercase tracking-wider">Action:</span>
@@ -139,11 +235,11 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStr
       return;
     }
 
-    // Headings
+    // Standard Headings
     if (line.startsWith('### ')) {
       elements.push(
         <h3 key={index} className="text-sm font-semibold text-slate-900 mt-3 mb-1.5">
-          {line.slice(4)}
+          {renderInline(line.slice(4))}
         </h3>
       );
       return;
@@ -151,7 +247,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStr
     if (line.startsWith('## ')) {
       elements.push(
         <h2 key={index} className="text-base font-semibold text-slate-900 mt-4 mb-2">
-          {line.slice(3)}
+          {renderInline(line.slice(3))}
         </h2>
       );
       return;
@@ -159,32 +255,32 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content, isStr
     if (line.startsWith('# ')) {
       elements.push(
         <h1 key={index} className="text-lg font-bold text-slate-900 mt-4 mb-2">
-          {line.slice(2)}
+          {renderInline(line.slice(2))}
         </h1>
       );
       return;
     }
 
-    // Bullet points
-    if (line.trim().startsWith('- ') || line.trim().startsWith('* ')) {
+    // Bullet points (-, *, •)
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.startsWith('• ')) {
       elements.push(
         <li key={index} className="ml-4 list-disc text-slate-800 my-0.5">
-          {line.trim().slice(2)}
+          {renderInline(trimmed.slice(2))}
         </li>
       );
       return;
     }
 
     // Empty line / paragraph break
-    if (!line.trim()) {
+    if (!trimmed) {
       elements.push(<div key={index} className="h-2" />);
       return;
     }
 
-    // Standard paragraph line
+    // Standard paragraph line with full inline formatting
     elements.push(
       <p key={index} className="my-0.5 leading-relaxed text-slate-800">
-        {line}
+        {renderInline(line)}
       </p>
     );
   });

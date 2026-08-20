@@ -20,6 +20,7 @@ from assistant.grounding import build_system_context
 from assistant.provider import AssistantProvider, AssistantRequest
 from events.service import EventService
 from intelligence.router import IntelligenceRouter, IntentKind
+from intelligence.strategy_evaluation import StrategyEvaluationEngine
 from intelligence.trade_calculation import TradeCalculationEngine
 
 if TYPE_CHECKING:
@@ -93,14 +94,18 @@ class AssistantRouter:
             )
         else:
             classified_intent = self._intelligence_router.classify_intent(text)
-            if classified_intent == IntentKind.MARKET_RESEARCH:
-                _, research_content, provider_name = await self._intelligence_router.handle(
+            if classified_intent in (
+                IntentKind.MARKET_RESEARCH,
+                IntentKind.CHART_ANALYSIS,
+                IntentKind.STRATEGY_EVALUATION,
+            ):
+                _, intel_content, provider_name = await self._intelligence_router.handle(
                     text, conversation_id
                 )
                 assistant_message = AssistantMessage(
                     conversation_id=UUID(conversation_id),
                     role=MessageRole.assistant,
-                    content=research_content,
+                    content=intel_content,
                     input_mode=InputMode.text,
                     intent=classified_intent.value,
                     providers=MessageProviders(assistant=provider_name),
@@ -145,7 +150,11 @@ class AssistantRouter:
             return
 
         classified_intent = self._intelligence_router.classify_intent(text)
-        if classified_intent == IntentKind.MARKET_RESEARCH:
+        if classified_intent in (
+            IntentKind.MARKET_RESEARCH,
+            IntentKind.CHART_ANALYSIS,
+            IntentKind.STRATEGY_EVALUATION,
+        ):
             accumulated = ""
             provider_used = self._provider.name
             async for event in self._intelligence_router.handle_stream(text, conversation_id):
@@ -251,6 +260,9 @@ class AssistantRouter:
                 (e for e in history if e.get("state") == "SETUP_INVALIDATED"), None
             )
             return "last_invalidation_reason", _format_invalidation_summary(invalidated)
+        if StrategyEvaluationEngine.is_entry_inquiry(text):
+            active = await self._events.get_active_setups()
+            return "strategy_evaluation", StrategyEvaluationEngine.evaluate_entry_decision(active)
         if TradeCalculationEngine.is_calculation_query(text):
             res = TradeCalculationEngine.evaluate(text)
             return "trade_calculation", res.formatted_text

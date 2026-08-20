@@ -4,7 +4,7 @@ import pytest
 from assistant.chart_analysis import ChartAnalysisResult, _split_capital_question
 from assistant.provider import AssistantProvider, AssistantReply, AssistantRequest
 from intelligence.composer import IntelligenceComposer
-from intelligence.market_research import MarketResearchEngine
+from intelligence.market_research import MarketEvidence, MarketResearchEngine
 from intelligence.router import IntelligenceRouter, IntentKind
 from intelligence.strategy_evaluation import StrategyEvaluationEngine
 from intelligence.trade_calculation import TradeCalculationEngine
@@ -29,10 +29,26 @@ class MockAssistantProvider(AssistantProvider):
                 "### CROSS-ASSET CONTEXT\n"
                 "• DXY showing mild pullback, supporting commodity upside.\n\n"
                 "### RISK FACTORS\n"
-                "• Elevated CPI print risk could trigger rate hike expectations."
+                "• Elevated CPI print risk could trigger rate hike expectations.\n\n"
+                "### SOURCES & EVIDENCE\n"
+                "• Source: Federal Reserve Statements (https://federalreserve.gov)"
             ),
             provider=self.name,
         )
+
+
+class FakeRetrievalProvider:
+    async def retrieve(self, query: str):
+        return [
+            {
+                "source": "FRED Macro Feed",
+                "url": "https://fred.stlouisfed.org/series/DGS10",
+                "retrieval_timestamp": "2026-08-20T09:00:00Z",
+                "publication_timestamp": "2026-08-20T08:30:00Z",
+                "text": "10-Year Treasury Constant Maturity Rate: 4.28%",
+                "value": 4.28,
+            }
+        ]
 
 
 def test_trade_calculation_missing_parameters():
@@ -63,22 +79,59 @@ def test_trade_calculation_with_complete_parameters():
 
 
 @pytest.mark.asyncio
-async def test_market_research_engine():
+async def test_market_research_fails_closed_without_real_retrieval():
     provider = MockAssistantProvider()
-    engine = MarketResearchEngine(provider=provider)
+    engine = MarketResearchEngine(provider=provider, retrieval_provider=None, memory_service=None)
     
-    assert engine.is_research_query("Research the current market structure and key macro drivers")
+    assert engine.is_research_query("Research the current market structure and key macro drivers for EURUSD")
     
     report = await engine.generate_research(
-        query="Research the current market structure and key macro drivers",
+        query="Research the current market structure and key macro drivers for EURUSD",
         conversation_id="test-conv",
     )
-    assert "### MACRO DRIVERS" in report.content
-    assert "### MARKET STRUCTURE & REGIME" in report.content
-    assert "### KEY CATALYSTS & EVENTS" in report.content
-    assert "### CROSS-ASSET CONTEXT" in report.content
-    assert "### RISK FACTORS" in report.content
+    assert not report.is_available
+    assert "CURRENT RESEARCH UNAVAILABLE" in report.content
+    assert "Missing Integration: Live Macro/News Retrieval Provider" in report.content
     assert "CURRENT STATE" not in report.content
+    assert "c:\\tars" not in report.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_market_research_with_real_retrieved_evidence():
+    provider = MockAssistantProvider()
+    retrieval = FakeRetrievalProvider()
+    engine = MarketResearchEngine(provider=provider, retrieval_provider=retrieval)
+    
+    report = await engine.generate_research(
+        query="Research 10Y yields and macro drivers",
+        conversation_id="test-conv",
+    )
+    assert report.is_available
+    assert len(report.evidence_objects) == 1
+    assert report.evidence_objects[0].source == "FRED Macro Feed"
+    assert "https://fred.stlouisfed.org/series/DGS10" in report.sources_consulted
+    assert "### MACRO DRIVERS" in report.content
+
+
+def test_six_domain_intent_classification():
+    provider = MockAssistantProvider()
+    router = IntelligenceRouter(provider=provider)
+
+    assert router.classify_intent("estimate profit on 10000 rupees") == IntentKind.TRADE_CALCULATION
+    assert router.classify_intent("Analyze the chart") == IntentKind.CHART_ANALYSIS
+    assert router.classify_intent("Should I enter now?") == IntentKind.STRATEGY_EVALUATION
+    assert router.classify_intent("What active setups exist?") == IntentKind.STRATEGY_EVALUATION
+    assert router.classify_intent("Research the current market structure and key macro drivers for EURUSD") == IntentKind.MARKET_RESEARCH
+    assert router.classify_intent("git status on branch") == IntentKind.DEVELOPER_REQUEST
+    assert router.classify_intent("How confident are you?") == IntentKind.GENERAL_CHAT
+    assert router.classify_intent("Hello TARS") == IntentKind.GENERAL_CHAT
+
+
+def test_strategy_evaluation_entry_inquiry_without_valid_setup():
+    reply = StrategyEvaluationEngine.evaluate_entry_decision(active_setups=[])
+    assert "### STRATEGY EVALUATION" in reply
+    assert "NO VALIDATED TRADE." in reply
+    assert "quant_brain" in reply
 
 
 def test_strategy_evaluation_engine_not_configured():
@@ -113,7 +166,7 @@ def test_strategy_evaluation_engine_active_setups():
     assert "Entry: `2680.5`" in report.formatted_text
 
 
-def test_intelligence_composer_chart_formatting():
+def test_intelligence_composer_chart_formatting_complete_sections():
     formatted = IntelligenceComposer.format_chart_response(
         instrument="XAUUSD",
         timeframe="15M",
@@ -131,16 +184,17 @@ def test_intelligence_composer_chart_formatting():
     )
     
     assert "### INSTRUMENT\nXAUUSD · 15M" in formatted
+    assert "### MARKET STATE" in formatted
     assert "### STRUCTURE" in formatted
-    assert "- Current price: 2684.50, testing supply zone" in formatted
-    assert "- Supply zone: 2690.00 - 2695.00" in formatted
-    assert "BIAS: Bullish" in formatted
+    assert "### KEY LEVELS" in formatted
+    assert "### BULLISH SCENARIO" in formatted
+    assert "### BEARISH SCENARIO" in formatted
     assert "### WHAT I SEE" in formatted
-    assert "### SETUP\nBreakout & Retest" in formatted
-    assert "### KEY LEVELS\n- Resistance: 2700.00\n- Support: 2660.00\n- Demand: 2645.00" in formatted
-    assert "### INVALIDATION\nClose below 2660.00 on 15M" in formatted
-    assert "### RISK\nUpcoming US session open" in formatted
+    assert "### INVALIDATION" in formatted
+    assert "### TRADE STATUS" in formatted
+    assert "NO VALIDATED TRADE" in formatted
     assert "ACTION: Watch for Confirmation" in formatted
+    assert "### RISK" in formatted
 
 
 def test_chart_analysis_split_capital_question():
