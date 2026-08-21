@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import time
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -10,9 +12,17 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.responses import StreamingResponse
 
 from app.contracts import ContractValidationError, validate_assistant_message
-from app.deps import get_chart_analysis_service, get_orchestrator
+from app.deps import (
+    get_chart_analysis_service,
+    get_hot_chart_state_store,
+    get_latency_trace_store,
+    get_orchestrator,
+)
+from app.latency_store import LatencyTraceStore, RequestTrace
 from assistant.chart_analysis import ChartAnalysisError, ChartAnalysisService
 from assistant.errors import AssistantProviderError
+from assistant.fast_chart_response import try_fast_response
+from assistant.hot_chart_state_store import HotChartStateStore
 from orchestrator.orchestrator import TarsOrchestrator
 
 router = APIRouter(tags=["assistant"])
@@ -176,7 +186,10 @@ async def analyze_chart(
 async def analyze_chart_stream(
     request: Request,
     chart_analysis: ChartAnalysisService = Depends(get_chart_analysis_service),
+    hot_chart_state_store: HotChartStateStore = Depends(get_hot_chart_state_store),
+    trace_store: LatencyTraceStore = Depends(get_latency_trace_store),
 ) -> StreamingResponse:
+    t0 = time.monotonic()
     try:
         raw: Any = await request.json()
     except Exception as exc:
@@ -223,6 +236,38 @@ async def analyze_chart_stream(
     goal_text = raw_goal.strip() if isinstance(raw_goal, str) and raw_goal.strip() else "Analyze this chart."
     raw_capture_ms = raw.get("capture_ms")
     capture_ms = float(raw_capture_ms) if isinstance(raw_capture_ms, (int, float)) else None
+    window_id = capture.get("window_id")
+    window_id = window_id if isinstance(window_id, str) and window_id.strip() else None
+
+    # Only the generic "analyze the chart" goal is eligible for the fast
+    # path -- a specific follow-up question (a different goal_text) could
+    # be answered wrong by a cached generic read, so it always gets a
+    # fresh vision call instead. Never attempted for a custom goal.
+    fast_response = None
+    if goal_text == "Analyze this chart.":
+        fast_response = await try_fast_response(
+            window_id=window_id, image_bytes=image_bytes, hot_state_store=hot_chart_state_store, t0=t0
+        )
+
+    if fast_response is not None:
+
+        async def fast_event_generator():
+            request_id = uuid4().hex
+            yield f"data: {json.dumps({'type': 'complete', 'result': fast_response.result, 'timing': fast_response.timing})}\n\n"
+            await trace_store.record(
+                RequestTrace(
+                    request_id=request_id,
+                    kind="chart_analysis",
+                    conversation_id=str(conversation_id) if conversation_id else None,
+                    provider_id=None,
+                    warm_path=True,
+                    started_at=datetime.now(UTC).isoformat(),
+                    capture_ms=capture_ms,
+                    total_ms=fast_response.timing["complete_ms"],
+                )
+            )
+
+        return StreamingResponse(fast_event_generator(), media_type="text/event-stream")
 
     async def event_generator():
         try:

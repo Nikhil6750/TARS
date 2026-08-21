@@ -89,6 +89,12 @@ class ChartIdentity:
 class HotChartState:
     identity: ChartIdentity
     analysis: ChartAnalysisResult
+    # A perceptual (average) hash of the frame this analysis was made
+    # from -- see assistant/perceptual_hash.py. Deliberately not a
+    # cryptographic hash: a fast-path lookup needs "close enough to still
+    # be the same chart" (tolerating ordinary price-tick/candle movement),
+    # not "byte-for-byte identical," which a real chart almost never is
+    # between two captures a few seconds apart.
     screenshot_hash: str
     # "vision" today (a Claude Code CLI vision call) -- reserved for a
     # future "structured" value if/when a real non-vision market-data

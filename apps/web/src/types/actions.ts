@@ -57,6 +57,10 @@ export interface ScreenCaptureResult {
   image_data_base64?: string | null;
   temp_file_path?: string | null;
   error?: string | null;
+  /** The captured window's own HWND as a string (active_window captures
+   * with a real target only) -- lets the backend look up HotChartState
+   * for this exact window (TARS Alexa-Speed Phase D). */
+  window_id?: string | null;
 }
 
 export interface UIElementNode {

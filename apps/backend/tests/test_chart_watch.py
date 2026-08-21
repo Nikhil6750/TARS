@@ -10,6 +10,7 @@ from assistant.chart_analysis import ChartAnalysisService
 from assistant.chart_watch import ChartWatchService
 from assistant.hot_chart_state import ChartIdentity, HotChartState
 from assistant.hot_chart_state_store import HotChartStateStore
+from assistant.perceptual_hash import average_hash_hex
 from assistant.provider import AssistantProvider, AssistantReply, AssistantRequest
 from storage.migrator import run_migrations
 
@@ -44,10 +45,34 @@ class _FakeProvider(AssistantProvider):
         return AssistantReply(text=self.reply_text, provider=self.name)
 
 
-def _bmp_bytes() -> bytes:
+def _bmp_bytes(color: tuple[int, int, int] = (10, 20, 30)) -> bytes:
     buf = io.BytesIO()
-    Image.new("RGB", (4, 4), color=(10, 20, 30)).save(buf, format="BMP")
+    Image.new("RGB", (32, 32), color=color).save(buf, format="BMP")
     return buf.getvalue()
+
+
+def _structured_bmp_bytes(*, flipped: bool = False) -> bytes:
+    # A solid-color image is a degenerate case for average-hash (every
+    # pixel equals the frame's own mean, so nothing is ever "above the
+    # mean" -- see assistant/perceptual_hash.py's docstring and the
+    # equivalent chart_watcher.rs test). A real chart has actual visual
+    # structure, so tests standing in for "a different chart" need a
+    # checkerboard-like split, not a different flat color.
+    img = Image.new("RGB", (32, 32))
+    pixels = img.load()
+    for y in range(32):
+        for x in range(32):
+            quadrant_dark = (x < 16) != (y < 16)  # checkerboard
+            if flipped:
+                quadrant_dark = not quadrant_dark
+            pixels[x, y] = (10, 10, 10) if quadrant_dark else (230, 230, 230)
+    buf = io.BytesIO()
+    img.save(buf, format="BMP")
+    return buf.getvalue()
+
+
+def _hash_of(image_bytes: bytes) -> str:
+    return average_hash_hex(Image.open(io.BytesIO(image_bytes)))
 
 
 @pytest.fixture
@@ -114,7 +139,7 @@ async def test_handle_frame_cooldown_is_scoped_per_window(conn):
     assert provider.call_count == 2
 
 
-async def test_handle_frame_skips_when_existing_state_is_still_fresh(conn):
+async def test_handle_frame_skips_when_existing_state_is_still_fresh_and_content_matches(conn):
     store = HotChartStateStore(conn)
     provider = _FakeProvider()
     # min_vision_cooldown_seconds=0 isolates this test to the freshness
@@ -124,15 +149,42 @@ async def test_handle_frame_skips_when_existing_state_is_still_fresh(conn):
     from datetime import UTC, datetime
 
     now = datetime.now(UTC).isoformat()
+    frame = _bmp_bytes()
     fresh_identity = ChartIdentity(chart_window_id="hwnd-1", symbol="XAUUSD", timeframe="15M")
-    await store.upsert(_hot_state_with_result(fresh_identity, now))
+    await store.upsert(_hot_state_with_result(fresh_identity, now, screenshot_hash=_hash_of(frame)))
 
     outcome = await service.handle_frame(
-        chart_window_id="hwnd-1", image_bytes=_bmp_bytes(), image_format="image/bmp", trigger_reason="visual_change"
+        chart_window_id="hwnd-1", image_bytes=frame, image_format="image/bmp", trigger_reason="visual_change"
     )
 
     assert outcome.action == "skipped_fresh"
     assert provider.call_count == 0
+
+
+async def test_handle_frame_refreshes_when_fresh_by_age_but_content_changed(conn):
+    # Regression for Part 19/26's cache-correctness rule: age-based
+    # freshness alone must never be sufficient. A time-fresh row for a
+    # visually different frame (e.g. the user switched symbols in the same
+    # window a moment ago) must still trigger a real vision call rather
+    # than silently answering with the old symbol's cached read.
+    store = HotChartStateStore(conn)
+    provider = _FakeProvider()
+    service = ChartWatchService(ChartAnalysisService(provider), store, min_vision_cooldown_seconds=0.0)
+
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC).isoformat()
+    old_frame = _structured_bmp_bytes(flipped=False)
+    new_frame = _structured_bmp_bytes(flipped=True)  # a clearly different chart
+    fresh_identity = ChartIdentity(chart_window_id="hwnd-1", symbol="XAUUSD", timeframe="15M")
+    await store.upsert(_hot_state_with_result(fresh_identity, now, screenshot_hash=_hash_of(old_frame)))
+
+    outcome = await service.handle_frame(
+        chart_window_id="hwnd-1", image_bytes=new_frame, image_format="image/bmp", trigger_reason="visual_change"
+    )
+
+    assert outcome.action == "refreshed"
+    assert provider.call_count == 1
 
 
 async def test_handle_frame_refreshes_when_existing_state_is_stale(conn):
@@ -144,7 +196,7 @@ async def test_handle_frame_refreshes_when_existing_state_is_stale(conn):
 
     old = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     stale_identity = ChartIdentity(chart_window_id="hwnd-1", symbol="XAUUSD", timeframe="5M")
-    await store.upsert(_hot_state_with_result(stale_identity, old))
+    await store.upsert(_hot_state_with_result(stale_identity, old, screenshot_hash=_hash_of(_bmp_bytes())))
 
     outcome = await service.handle_frame(
         chart_window_id="hwnd-1", image_bytes=_bmp_bytes(), image_format="image/bmp", trigger_reason="visual_change"
@@ -169,7 +221,7 @@ async def test_handle_frame_surfaces_provider_error_without_persisting(conn):
     assert await store.get_latest_for_window("hwnd-1") is None
 
 
-def _hot_state_with_result(identity: ChartIdentity, analyzed_at: str) -> HotChartState:
+def _hot_state_with_result(identity: ChartIdentity, analyzed_at: str, *, screenshot_hash: str) -> HotChartState:
     from assistant.chart_analysis import ChartAnalysisResult
 
     result = ChartAnalysisResult(
@@ -187,7 +239,7 @@ def _hot_state_with_result(identity: ChartIdentity, analyzed_at: str) -> HotChar
     return HotChartState(
         identity=identity,
         analysis=result,
-        screenshot_hash="prior",
+        screenshot_hash=screenshot_hash,
         source="vision",
         observed_at=analyzed_at,
         analyzed_at=analyzed_at,

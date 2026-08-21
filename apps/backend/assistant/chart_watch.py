@@ -32,14 +32,17 @@ here changes what `ChartAnalysisResult` is allowed to claim.
 """
 from __future__ import annotations
 
-import hashlib
+import io
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from PIL import Image
+
 from assistant.chart_analysis import ChartAnalysisService
 from assistant.hot_chart_state import ChartIdentity, HotChartState
 from assistant.hot_chart_state_store import HotChartStateStore
+from assistant.perceptual_hash import average_hash_hex, is_same_chart_content
 
 DEFAULT_MIN_VISION_COOLDOWN_SECONDS = 20.0
 
@@ -83,8 +86,23 @@ class ChartWatchService:
         if last_call is not None and (now - last_call) < self._min_cooldown:
             return ChartWatchOutcome(action="skipped_cooldown", chart_window_id=chart_window_id)
 
+        try:
+            current_hash = average_hash_hex(Image.open(io.BytesIO(image_bytes)))
+        except Exception:
+            current_hash = None  # undecodable -- let analyze() raise its own honest error below
+
         existing = await self._store.get_latest_for_window(chart_window_id)
-        if existing is not None and existing.usable_for(existing.identity):
+        if (
+            existing is not None
+            and existing.usable_for(existing.identity)
+            and current_hash is not None
+            and is_same_chart_content(current_hash, existing.screenshot_hash)
+        ):
+            # Time-fresh AND still visually the same chart -- a real
+            # symbol/timeframe switch changes the hash enough to fail this
+            # check even if it happens well inside the freshness window
+            # (Part 19/26: age alone must never be the only cache-
+            # correctness signal).
             return ChartWatchOutcome(
                 action="skipped_fresh", chart_window_id=chart_window_id, identity=existing.identity
             )
@@ -108,7 +126,7 @@ class ChartWatchService:
         state = HotChartState(
             identity=identity,
             analysis=result,
-            screenshot_hash=hashlib.sha256(image_bytes).hexdigest(),
+            screenshot_hash=current_hash or "",
             source="vision",
             observed_at=observed_at,
             analyzed_at=datetime.now(UTC).isoformat(),

@@ -118,6 +118,14 @@ pub struct ScreenCaptureResult {
     pub image_data_base64: Option<String>,
     pub temp_file_path: Option<String>,
     pub error: Option<String>,
+    // The captured window's own HWND, as a string -- present only for
+    // "active_window" captures with a real target (None for the no-window,
+    // region, and monitor cases). Lets the backend look up HotChartState
+    // for this exact window using the SAME chart_window_id scheme
+    // chart_watcher.rs already uses (hwnd.to_string()) -- see TARS
+    // Alexa-Speed Phase D. Additive field; existing consumers that ignore
+    // unknown JSON fields are unaffected.
+    pub window_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -668,6 +676,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
                     dpi: 96,
                     width: 0,
                     height: 0,
+                    window_id: None,
                     is_secure_desktop: false,
                     image_format: "image/bmp".into(),
                     image_data_base64: None,
@@ -726,6 +735,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
                     dpi: 96,
                     width: 0,
                     height: 0,
+                    window_id: None,
                     is_secure_desktop: true,
                     image_format: "image/bmp".into(),
                     image_data_base64: None,
@@ -810,6 +820,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
                 dpi,
                 width: w as u32,
                 height: h as u32,
+                window_id: Some((hwnd as isize).to_string()),
                 is_secure_desktop: false,
                 image_format: "image/bmp".into(),
                 image_data_base64: base64_str,
@@ -826,6 +837,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
             capture_id,
             captured_at: chrono::Utc::now().to_rfc3339(),
             source: "active_window".into(),
+            window_id: None,
             executable: "mock_browser.exe".into(),
             window_title: "Mock Window".into(),
             bounds: WindowBounds { x: 100, y: 100, width: 800, height: 600 },
@@ -927,6 +939,7 @@ fn capture_screen_region(
                 dpi,
                 width: w as u32,
                 height: h as u32,
+                window_id: None,
                 is_secure_desktop: false,
                 image_format: "image/bmp".into(),
                 image_data_base64: base64_str,
@@ -943,6 +956,7 @@ fn capture_screen_region(
             capture_id,
             captured_at: chrono::Utc::now().to_rfc3339(),
             source: "region".into(),
+            window_id: None,
             executable: "mock_region".into(),
             window_title: format!("Region ({}, {}, {}x{})", x, y, width, height),
             bounds: WindowBounds { x, y, width, height },
