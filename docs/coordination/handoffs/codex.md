@@ -6,6 +6,122 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Latest handoff — core-experience recovery evidence
+
+**Branch**: `feature/tars-core-experience-v2`
+
+**Commit SHA**: `1ba31161c785f56a740e5909ff08f5b90b4ecd67`
+
+**Work completed**:
+
+- Reproduced the requested flow from the latest integrated hot-state base and
+  built the source-matched Tauri release. The production binary is
+  self-contained: no Vite listener was present during native verification.
+- Replaced the old screenshot helper (which wrote into an external
+  Antigravity artifact directory) with a Windows-native verifier that selects
+  the real `tars-companion.exe` window, captures it with `PrintWindow`, clicks
+  Chat/Workspace/Memory/Settings through UI Automation, and fails for a
+  missing/clipped window or missing navigation controls.
+- Added a source/runtime release-blocker detector. It currently reports 13
+  findings rather than treating HTTP/process health as proof of a usable app.
+- Added a fixed 30-prompt, 10-category Claude Code/Codex benchmark with seven
+  deterministic quality/hygiene checks and a separate bounded Markdown-free
+  speech representation. Human correctness review remains explicit.
+- Ran all 30 exact prompts through both current CLI adapters. Claude Code
+  failed all 30 nested invocations; Codex returned 30 responses but passed
+  zero corpus-specific completeness checks, usually asking what repository
+  work to perform. No provider winner is claimed.
+- Added an offline-only Kokoro A/B/C generator using installed model assets
+  and the four required listening lines. Candidates are `am_michael`,
+  `am_onyx`, and `bm_george`, with optional current `af_heart` reference.
+- Added regression tests for native-window selection, all principal detected
+  source blockers, corpus shape/categories, speech sanitization, and internal
+  implementation-detail leakage.
+
+**Files changed**:
+
+- `tools/capture_native_tars.py`
+- `tools/core_experience_checks.py`
+- `tools/assistant_quality_benchmark.py`
+- `tools/quality_corpus.json`
+- `tools/generate_voice_comparison.py`
+- `tools/README.md`
+- `tests/unit/test_core_experience_tools.py`
+- This Codex handoff file only under shared coordination docs.
+
+**Interfaces exposed**:
+
+- `python tools/core_experience_checks.py --runtime`
+- `python tools/capture_native_tars.py --pid <pid> --verify-navigation --output-dir <dir>`
+- `python tools/assistant_quality_benchmark.py --provider claude_code --provider codex --output <file>`
+- `python tools/generate_voice_comparison.py --include-current-reference --output-dir <dir>`
+
+**Tests run**:
+
+- `python -m pytest tests -q` — 65 passed, 24 expected external/hardware
+  skips after `npm ci --prefix tools/codegen`.
+- New regression module — 5 passed.
+- Ruff on all changed Python files — passed.
+- Repository-wide `python -m ruff check tests tools` — nonzero only for 34
+  pre-existing violations in unchanged `tools/verify_integrated_voice_runtime.py`.
+- Backend targeted voice/assistant/readiness suite — 29 passed.
+- Frontend Vitest — 140 passed; TypeScript check and production build passed.
+- Frontend lint — nonzero because the configured
+  `react-hooks/exhaustive-deps` rule has no installed plugin (two errors).
+- Tauri Rust tests — 6 passed, one hardware WGC capture test ignored.
+- Source-matched `npm run tauri build` — passed and produced the release EXE
+  and NSIS installer in the configured shared Cargo target.
+- Native UI Automation run — actual Tauri Chat, Workspace, Memory, and
+  Settings controls were found and clicked; actual native captures were saved
+  under ignored `scratch/` evidence.
+- Full provider corpus — 30 Claude Code failures; 30 Codex responses,
+  174/210 deterministic checks but 0/30 completeness anchors; human review
+  still required.
+
+**Known limitations / current release blockers**:
+
+- Launcher requires a copied per-worktree `.env`, can launch/accept a stale
+  shared Cargo binary, can confuse an existing port owner with the process it
+  started, does not verify the native main webview, and prints `TARS READY` /
+  `Say: Hey TARS` while runtime readiness is false.
+- Default `compactMode: true` shrinks the full workstation to roughly 380x180;
+  navigation works only after manually expanding/summoning the real window.
+- Native wake code has only Wake/Command modes, lacks the requested timing
+  markers, drops the command tail in a general one-utterance “Hey TARS ...”
+  request, and lacks sufficient adaptive-noise/output-suppression diagnostics.
+- `/health` and `/runtime/readiness` disagree about the wake provider, while
+  Voice Control displays hard-coded provider names unrelated to runtime state.
+- Raw streaming Markdown and persisted display Markdown are both passed to
+  TTS. The actual native Chat capture also shows raw `**` markers and leaked
+  provider/tool wording.
+- There is no response-quality contract or task-based Claude/Codex routing in
+  the application. The benchmark shows the current CLI invocation context is
+  not a valid basis for choosing a provider.
+- Physical microphone wake reliability and A/B/C voice quality cannot be
+  certified headlessly. A user must perform the required 20/20 wake trial and
+  listen to all candidates before selection.
+
+**Exact dependencies required from other agents**:
+
+- Antigravity/frontend + Tauri: implement the explicit wake lifecycle and
+  timing telemetry; preserve same-utterance command tails; improve adaptive
+  audio handling/output suppression; default to a usable workstation window;
+  expose runtime-backed provider state; repair streaming Markdown rendering;
+  and separate display text from sanitized spoken text at every TTS entry.
+- Claude Code/backend: implement the response-quality contract/composer,
+  improve user-facing internal-detail sanitization, add task-based provider
+  routing with explicit diagnostics, and make readiness accurately reflect
+  the active native wake path without weakening deterministic trading facts.
+- Coordinator/integration owner: harden `scripts/start_tars.ps1` around
+  worktree env discovery, source/binary provenance, backend PID/port
+  ownership, runtime readiness, and native-window verification.
+- User/hardware: listen to the generated Kokoro candidates and run the 20/20
+  physical “Hey TARS” acceptance matrix after product-owner fixes land.
+
+**Next recommended action**: Product owners implement the enumerated blockers
+on their own branches, then run these tools plus the full certification suite.
+Do not merge this branch as part of the handoff.
+
 ## Latest handoff — overnight agent and safety runtime
 
 **Branch**: `feature/overnight-agent-runtime`
