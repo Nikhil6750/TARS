@@ -10,65 +10,71 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (TRADING INTELLIGENCE AUDIT & PROVENANCE VERIFICATION)
+## Latest handoff (TARS CORE EXPERIENCE — NATIVE / VOICE / UI RECOVERY)
 
-**Status**: COMPLETE — Completed comprehensive audit and verification of trading intelligence architecture, enforced strict fail-closed real retrieval for market research, separated 6 explicit conceptual routing domains, resolved test parameterization skews, eliminated raw markdown asterisks in web/desktop UI, and verified full 520-test backend suite.
-**Branch**: `feature/trading-intelligence-architecture`
-**Commit SHA**: `babba97c1370195cff27b2d18a35b9c78b0920c8`
+**Status**: COMPLETE — Fixed native wake state machine, same-utterance command extraction, speech sanitization pipeline, Kokoro candidate evaluation UI, and launcher verification.
+**Branch**: `feature/tars-core-experience-recovery`
+**Commit SHA**: `05c74b73b53e99a25fafb546b4dc5eba4e786093`
+
 **Work completed**:
-1. **Chart Analysis Visible Evidence & Grounding Correction**:
-   - Restrict `CHART_ANALYSIS` prompts and composition strictly to visible price structure, levels, and chart patterns.
-   - Removed and sanitized speculative terms (`order flow shows`, `major liquidity pool`, `institutional accumulation`, `upcoming high-impact macro announcements`).
-   - Replaced with evidence-grounded phrasing (e.g. `Price is near the lower boundary of the visible range.`).
-   - Enforced mandatory chart-only risk disclaimer: `Macro/event risk has not been checked in this chart-only analysis.`.
-2. **Market Research Real Retrieval & Provenance Enforcement**:
-   - Audited `MarketResearchEngine` (`apps/backend/intelligence/market_research.py`).
-   - Implemented `MarketEvidence` dataclass preserving `source`, `retrieval_timestamp`, `publication_timestamp`, `url` / `source_id`, and `evidence_text` / `value`.
-   - Enforced fail-closed behavior: without real retrieval feeds configured, returns `CURRENT RESEARCH UNAVAILABLE` and explicitly names the missing integration (`Live Macro/News Retrieval Provider (e.g. FRED, Financial Modeling Prep, Finnhub, or Live Economic Calendar API)`). Never relies on Claude model memory for current Fed stance, macro releases, yields, or DXY.
-2. **Explicit 6-Domain Routing**:
-   - Verified and implemented 6 distinct conceptual domains in `IntentKind` (`apps/backend/intelligence/router.py` & `apps/backend/assistant/router.py`):
-     1. `MARKET_RESEARCH`: Macro drivers, catalysts, and cross-asset context (fail-closed without real retrieval).
-     2. `CHART_ANALYSIS`: Native chart capture and institutional structure/scenario formatting.
-     3. `STRATEGY_EVALUATION`: Deterministic quant_brain setup evaluation; returns `NO VALIDATED TRADE` when unvalidated.
-     4. `TRADE_CALCULATION`: Deterministic math for capital, risk, position sizing, and profit projections; rejects calculation without parameters.
-     5. `GENERAL_CHAT`: General dialogue; strictly rejects numerical confidence percentages.
-     6. `DEVELOPER_REQUEST`: Repository and internal tooling queries.
-3. **Institutional Chart Formatting**:
-   - Updated `IntelligenceComposer.format_chart_response` (`apps/backend/intelligence/composer.py`) to generate all 8 required analytical sections: `Market State`, `Structure`, `Key Levels`, `Bullish Scenario`, `Bearish Scenario`, `Invalidation`, `Trade Status` (`NO VALIDATED TRADE` indicator), and `Action`.
-4. **Markdown Rendering & Native UI**:
-   - Overhauled `apps/web/src/components/assistant/MarkdownContent.tsx` with an inline parser (`renderInline`) that parses bold (`**text**`), italic (`*text*`), code (`` `code` ``), and links into native React elements, preventing raw asterisk leakage.
-5. **Full Backend Test Suite Execution**:
-   - Fixed dynamic time offset parameterization in `apps/backend/tests/test_action_runtime.py`.
-   - Fixed `direction` NoneType handling in `apps/backend/intelligence/strategy_evaluation.py`.
-   - Executed full backend pytest suite: **520 passed, 0 failed, 0 skipped** across all 58 test files.
-   - Frontend TypeScript check (`npm run typecheck`): **0 errors**.
+1. **Priority 1: Native Wake State Machine & Single-Utterance Extraction (`apps/web/src-tauri/src/wake_engine.rs`)**:
+   - Replaced basic enum with explicit 7-state `WakeState`: `Idle`, `Audio`, `Transcribing`, `WakeDetected`, `CommandListening`, `Processing`, `Speaking`.
+   - Added timing and latency instrumentation: `audio_detected_at`, `speech_end_at`, `transcription_start`, `transcription_complete`, `wake_detected_at`, `command_ready_at`.
+   - Implemented single-utterance trailing command extraction: trailing phrase after "Hey TARS" is extracted and dispatched via ONE canonical event (`tars://analyze-chart-detected` or `tars://command-transcript`), eliminating duplicate event triggers.
+   - Handled two-stage flow: if trailing text is empty, transitions to `CommandListening` and emits `tars://wake-detected`.
+2. **Priority 2: Startup Launcher Hardening (`scripts/start_tars.ps1`)**:
+   - Added worktree `.env` auto-discovery (from parent workspace or `.env.example` fallback) preventing worktree launch crashes.
+   - Enforced build provenance verification for `tars-companion.exe` and verified `MainWindowHandle` visibility before claiming launch success.
+   - Gated `[7/7] TARS READY` strictly behind verified `$readiness.ready -eq $true`.
+3. **Priority 4: Speech Sanitization & Markdown Cleaning (`apps/web/src/services/speech.ts`)**:
+   - Implemented `composeSpeech(displayText, limit)` TypeScript helper to clean Markdown markers, headers, bullet asterisks, URLs, Windows/Unix file paths, and omit raw code blocks.
+   - Refactored `VoiceAssistantRuntime.tsx` streaming loop to accumulate chunks until complete speakable sentences are detected (`/[^.!?]*[.!?]+\s*/g`) before sanitizing and synthesizing to TTS.
+   - Sanitized manual read-aloud handler in `AssistantMessage.tsx`.
+   - Updated `MarkdownContent.tsx` to handle partial streaming markdown delimiters cleanly.
+4. **Priority 5: Kokoro Voice Candidate UI (`apps/web/src/components/voice/VoiceControlView.tsx` & `SettingsView.tsx`)**:
+   - Truthfully exposed candidate audition cards for `am_michael` (A), `am_onyx` (B), `bm_george` (C), and `af_heart` (Reference) with interactive Listen buttons.
+   - Prevented fake dynamic live swapping and surfaced real runtime readiness provider cards.
+5. **Priority 6: Real Runtime States & Native Bridge (`apps/web/src-tauri/src/lib.rs`, `WakeClient.ts`)**:
+   - Added `set_wake_playback_state` command to sync frontend audio playback state directly into Rust native state machine (`Processing` -> `Speaking` -> `Idle`).
+   - Changed default `compactMode` to `false` in `storage.ts` so initial layout preserves full workstation interface dimensions.
 
 **Files changed**:
-- `apps/backend/assistant/router.py`
-- `apps/backend/intelligence/composer.py`
-- `apps/backend/intelligence/market_research.py`
-- `apps/backend/intelligence/router.py`
-- `apps/backend/intelligence/strategy_evaluation.py`
-- `apps/backend/tests/test_action_runtime.py`
-- `apps/backend/tests/test_trading_intelligence.py`
+- `apps/web/src-tauri/src/lib.rs`
+- `apps/web/src-tauri/src/wake_engine.rs`
+- `apps/web/src/components/assistant/AssistantMessage.tsx`
 - `apps/web/src/components/assistant/MarkdownContent.tsx`
-- `apps/web/vitest.config.ts`
+- `apps/web/src/components/settings/SettingsView.tsx`
+- `apps/web/src/components/voice/VoiceControlView.tsx`
+- `apps/web/src/runtime/VoiceAssistantRuntime.tsx`
+- `apps/web/src/runtime/WakeClient.ts`
+- `apps/web/src/services/speech.ts` (NEW)
+- `apps/web/src/services/storage.ts`
+- `apps/web/src/test/single-utterance-wake.test.ts` (NEW)
+- `apps/web/src/test/speech.test.ts` (NEW)
+- `scripts/start_tars.ps1`
 - `docs/coordination/handoffs/antigravity.md`
 
 **Interfaces exposed**:
-- `MarketEvidence`, `MarketResearchReport`, `MarketResearchEngine`, `StrategyEvaluationEngine.evaluate_entry_decision()`, `IntelligenceComposer.format_chart_response()`
+- `WakeState` (7-state enum), `WakeTimingTelemetry`, `set_wake_playback_state(speaking: bool)`, `composeSpeech(displayText, limit)`, `onWakeStateChanged` listener.
 
 **Tests run**:
-- Backend full suite: `python -m pytest apps/backend/tests -q` -> 520 passed in 478s (100%).
-- Frontend TypeScript check: `npm run typecheck` in `apps/web` -> 0 errors.
+- **Vitest Unit & Integration**: `npm --prefix apps/web test -- --run` -> **147 passed across 23 test files (100%)**.
+- **TypeScript Typecheck**: `npm --prefix apps/web run typecheck` -> **0 errors**.
+- **Production Bundle Build**: `npm --prefix apps/web run build` -> **Built in 7.81s (PWA precache generated)**.
+- **Cargo Tests**: `cargo test --manifest-path apps/web/src-tauri/Cargo.toml` -> **6 passed, 0 failed, 1 ignored (WGC live capture)**.
+- **Cargo Release Build**: `cargo build --release --manifest-path apps/web/src-tauri/Cargo.toml` -> **Finished release profile [optimized] target(s) in 7m 35s, binary `tars-companion.exe` created (12.8MB)**.
+- **Blocker Inspections**: `python tools/core_experience_checks.py` -> **All 11 frontend/launcher/wake/speech findings resolved (remaining finding is Codex backend response_quality contract)**.
 
 **Known limitations**:
-- Live macro news feeds (FRED, Finnhub, etc.) require external API integration to supply real-time `MarketEvidence` objects.
-- Physical screenshot verification of the native desktop window is marked `PHYSICAL VERIFICATION REQUIRED` when the Tauri executable is not running in the active desktop session.
+- Background wake word listening on iOS PWA remains bounded by mobile OS sandbox constraints (ADR-007).
+- Backend dynamic voice changing is exposed as user preference candidate audition until backend multi-voice synthesis endpoint is fully connected by Codex.
 
 **Exact dependencies required from other agents**:
-- `claude.md`: Integration of real external macroeconomic feeds / calendar API into `MarketResearchEngine.retrieval_provider`.
-- `codex.md`: Verification against acceptance test suites A through E.
+- `claude.md` / `codex.md`: Wire `apps/backend/assistant/response_quality.py` (`ResponseQualityContract`) on the backend side in parallel.
 
 **Next recommended action**:
-- Hand off to coordinator for cross-agent evaluation. Do not merge into `integration/v1` or `main`.
+- Hand off to coordinator for integration verification. Do not merge automatically into `integration/v1` or `main`.
+
+---
+
+## Older handoffs
