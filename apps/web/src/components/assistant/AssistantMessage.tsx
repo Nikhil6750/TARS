@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { TARSAssistantMessage } from '../../types/assistant-message';
 import { MarkdownContent } from './MarkdownContent';
+import { composeSpeech } from '../../services/speech';
 import { Copy, Check, Volume2 } from 'lucide-react';
 
 interface AssistantMessageProps {
@@ -24,7 +25,10 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 
   const handleSpeak = () => {
     if (onSpeak) {
-      onSpeak(message.content);
+      const speechText = composeSpeech(message.content);
+      if (speechText) {
+        onSpeak(speechText);
+      }
     }
   };
 

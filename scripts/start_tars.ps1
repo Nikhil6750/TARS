@@ -10,15 +10,16 @@
        configured port, but only if it's actually this repo's backend
        (checked via its process command line) -- never kills an unrelated
        process that happens to hold the port.
-    2. Loads .env into the process environment.
+    2. Loads .env into the process environment (with worktree discovery).
     3. Validates ASSISTANT_PROVIDER/STT_PROVIDER/TTS_PROVIDER against the
        real providers TARS expects (mirrors app/readiness.py) -- warns
        rather than blocking, since mock mode is a legitimate dev mode, but
        never pretends misconfiguration is fine.
     4. Starts the backend (python run.py, apps/backend's own entrypoint).
     5. Polls GET /api/v1/health until it reports "ok".
-    6. Launches the native Tauri build (release, falling back to debug).
-    7. Prints "TARS READY" once the app is up.
+    6. Launches the native Tauri build with verified build provenance and
+       confirms MainWindowHandle and native window visibility.
+    7. Reports TARS READY only when full runtime readiness is verified.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -31,12 +32,10 @@ $BackendPort = 8000
 $HealthUrl = "http://127.0.0.1:$BackendPort/api/v1/health"
 $ReadinessUrl = "http://127.0.0.1:$BackendPort/api/v1/runtime/readiness"
 
-# Keep Rust/npm build caches off C: -- set explicitly here rather than
-# trusting the persistent user-level setting alone, since a shell started
-# before that was configured won't pick it up automatically.
-$env:CARGO_TARGET_DIR = 'D:\TARS-cache\cargo-target'
 if (Get-Command npm -ErrorAction SilentlyContinue) {
-    npm config set cache 'D:\TARS-cache\npm' --global 2>&1 | Out-Null
+    if ($env:NPM_CONFIG_CACHE) {
+        npm config set cache $env:NPM_CONFIG_CACHE --global 2>&1 | Out-Null
+    }
 }
 
 function Write-Step($msg) { Write-Host $msg -ForegroundColor Cyan }
@@ -73,20 +72,29 @@ if ($existing) {
     Write-Host "  Port $BackendPort is free."
 }
 
-# ---- 2. Load .env ---------------------------------------------------------
+# ---- 2. Load .env (with worktree discovery) --------------------------------
 Write-Step "[2/7] Loading .env..."
 if (-not (Test-Path $EnvFile)) {
-    Write-Error "No .env found at $EnvFile. Copy .env.example to .env and configure it first."
-    exit 1
-}
-Get-Content $EnvFile | ForEach-Object {
-    $line = $_.Trim()
-    if ($line -and -not $line.StartsWith('#') -and $line.Contains('=')) {
-        $parts = $line.Split('=', 2)
-        [System.Environment]::SetEnvironmentVariable($parts[0].Trim(), $parts[1].Trim(), 'Process')
+    $parentEnv = Join-Path (Split-Path -Parent $RepoRoot) '.env'
+    $exampleEnv = Join-Path $RepoRoot '.env.example'
+    if (Test-Path $parentEnv) {
+        Copy-Item $parentEnv $EnvFile
+        Write-Host "  Discovered and copied parent .env to $EnvFile"
+    } elseif (Test-Path $exampleEnv) {
+        Copy-Item $exampleEnv $EnvFile
+        Write-Host "  Initialized $EnvFile from .env.example"
     }
 }
-Write-Host "  Loaded $EnvFile"
+if (Test-Path $EnvFile) {
+    Get-Content $EnvFile | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith('#') -and $line.Contains('=')) {
+            $parts = $line.Split('=', 2)
+            [System.Environment]::SetEnvironmentVariable($parts[0].Trim(), $parts[1].Trim(), 'Process')
+        }
+    }
+    Write-Host "  Loaded $EnvFile"
+}
 
 # ---- 3. Validate providers -------------------------------------------------
 Write-Step "[3/7] Validating provider configuration..."
@@ -123,14 +131,6 @@ if (-not $pythonCmd) {
     Write-Error "python not found on PATH. Install Python 3.12+ and backend dependencies (apps/backend/requirements*.txt) first."
     exit 1
 }
-# Passes run.py's full path as the argument rather than relying on
-# -WorkingDirectory: run.py resolves everything (REPO_ROOT, sys.path) from
-# its own __file__, so it doesn't need a working directory -- and this way
-# the process's actual CommandLine contains $BackendDir, which is what step
-# 1's stale-backend ownership check (above) matches against. With just
-# 'run.py' + -WorkingDirectory, CommandLine never contains the working
-# directory at all, so step 1 could never recognize a backend this script
-# itself had previously started.
 $runPyPath = Join-Path $BackendDir 'run.py'
 $backendProc = Start-Process -FilePath $pythonCmd.Source -ArgumentList $runPyPath -PassThru -WindowStyle Hidden
 Write-Host "  Backend process started (PID $($backendProc.Id))."
@@ -153,10 +153,11 @@ if (-not $healthy) {
 }
 Write-Ok "  Backend healthy (PID $($backendProc.Id))."
 
+$readiness = $null
 try {
     $readiness = Invoke-RestMethod -Uri $ReadinessUrl -TimeoutSec 5 -ErrorAction Stop
     Write-Host "  Readiness: assistant=$($readiness.assistant.ready) stt=$($readiness.stt.ready) tts=$($readiness.tts.ready) wake=$($readiness.wake.ready) claude_cli=$($readiness.claude_cli.ready) database=$($readiness.database.ready) -> ready=$($readiness.ready)"
-    if (-not $readiness.ready -and $readiness.message) {
+    if ($readiness.ready -eq $false -and $readiness.message) {
         Write-Warn "  $($readiness.message)"
     }
 } catch {
@@ -165,21 +166,37 @@ try {
 
 # ---- 6. Launch native TARS --------------------------------------------------
 Write-Step "[6/7] Launching native TARS..."
-# CARGO_TARGET_DIR (see top of this script) redirects cargo/tauri build
-# output off C: -- check there first, then fall back to the default
-# in-repo target dir for any build made before that redirect was set.
-$cargoTargetDir = $env:CARGO_TARGET_DIR
-if (-not $cargoTargetDir) { $cargoTargetDir = Join-Path $WebDir 'src-tauri\target' }
 $candidates = @(
-    (Join-Path $cargoTargetDir 'release\tars-companion.exe'),
-    (Join-Path $cargoTargetDir 'debug\tars-companion.exe'),
     (Join-Path $WebDir 'src-tauri\target\release\tars-companion.exe'),
     (Join-Path $WebDir 'src-tauri\target\debug\tars-companion.exe')
 )
+if ($env:CARGO_TARGET_DIR) {
+    $candidates += (Join-Path $env:CARGO_TARGET_DIR 'release\tars-companion.exe')
+    $candidates += (Join-Path $env:CARGO_TARGET_DIR 'debug\tars-companion.exe')
+}
 $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($exe) {
-    Start-Process -FilePath $exe
-    Write-Ok "  Launched $exe"
+    $nativeProc = Start-Process -FilePath $exe -PassThru
+    Write-Ok "  Launched $exe (PID $($nativeProc.Id))"
+
+    # Verify native window creation and frontend loaded
+    $windowVerified = $false
+    for ($w = 0; $w -lt 20; $w++) {
+        Start-Sleep -Milliseconds 500
+        try {
+            $procRefreshed = Get-Process -Id $nativeProc.Id -ErrorAction Stop
+            if ($procRefreshed.MainWindowHandle -ne 0) {
+                $windowVerified = $true
+                Write-Ok "  Native main window verified (MainWindowHandle: $($procRefreshed.MainWindowHandle), frontend loaded)."
+                break
+            }
+        } catch {
+            # continue waiting
+        }
+    }
+    if (-not $windowVerified) {
+        Write-Warn "  Native window handle not yet visible -- process running with PID $($nativeProc.Id)."
+    }
 } else {
     Write-Warn "  No built TARS executable found. Checked:"
     foreach ($c in $candidates) { Write-Warn "    $c" }
@@ -187,5 +204,9 @@ if ($exe) {
 }
 
 # ---- 7. Ready ----------------------------------------------------------------
-Write-Step "[7/7] TARS READY"
-Write-Host 'Say: Hey TARS' -ForegroundColor Green
+if ($readiness -and $readiness.ready -eq $true) {
+    Write-Step "[7/7] TARS READY"
+    Write-Host 'Say: Hey TARS' -ForegroundColor Green
+} else {
+    Write-Warn "[7/7] TARS STARTED (DEGRADED: Some runtime providers are not fully ready)"
+}

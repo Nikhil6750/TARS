@@ -330,8 +330,14 @@ fn wake_engine_status() -> WakeEngineStatus {
 }
 
 #[tauri::command]
-fn force_wake_command_capture() -> Result<(), String> {
-    wake_engine::force_command_capture();
+fn force_wake_command_capture(app: tauri::AppHandle) -> Result<(), String> {
+    wake_engine::force_command_capture(Some(&app));
+    Ok(())
+}
+
+#[tauri::command]
+fn set_wake_playback_state(app: tauri::AppHandle, speaking: bool) -> Result<(), String> {
+    wake_engine::set_playback_speaking(speaking, &app);
     Ok(())
 }
 
@@ -1254,6 +1260,7 @@ pub fn run() {
             set_autostart,
             wake_engine_status,
             force_wake_command_capture,
+            set_wake_playback_state,
         ])
         .on_window_event(|window, event| {
             // M2A/M2B Background persistence (Close-to-tray)

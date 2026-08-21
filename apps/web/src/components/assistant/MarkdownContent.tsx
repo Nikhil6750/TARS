@@ -39,9 +39,18 @@ const CodeBlock: React.FC<{ code: string; language: string }> = ({ code, languag
   );
 };
 
-function renderInline(text: string): React.ReactNode[] {
+function renderInline(text: string, isStreaming: boolean = false): React.ReactNode[] {
+  let processed = text;
+  if (isStreaming) {
+    if (processed.endsWith('**') || processed.endsWith('__')) {
+      processed = processed.slice(0, -2);
+    } else if (processed.endsWith('`') || processed.endsWith('*') || processed.endsWith('_')) {
+      processed = processed.slice(0, -1);
+    }
+  }
+
   const regex = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^)]+\))/g;
-  const parts = text.split(regex);
+  const parts = processed.split(regex);
   return parts.map((part, i) => {
     if (!part) return null;
     if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
@@ -77,6 +86,20 @@ function renderInline(text: string): React.ReactNode[] {
         <a key={i} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
           {linkMatch[1]}
         </a>
+      );
+    }
+    if (isStreaming && (part.startsWith('**') || part.startsWith('__')) && part.length > 2) {
+      return (
+        <strong key={i} className="font-semibold text-slate-900">
+          {part.slice(2)}
+        </strong>
+      );
+    }
+    if (isStreaming && (part.startsWith('*') || part.startsWith('_')) && part.length > 1) {
+      return (
+        <em key={i} className="italic text-slate-800">
+          {part.slice(1)}
+        </em>
       );
     }
     return part;

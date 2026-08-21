@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { VoicePanel, toVoicePanelStatus } from '../components/voice/VoicePanel';
 import { audioService } from '../services/audio';
 import { nativeBridge } from '../services/native-bridge';
+import { composeSpeech } from '../services/speech';
 import { CompanionVisualState } from '../types/companion';
 import { wakeClient } from './WakeClient';
 import { windowLifecycle, SummonMode } from './WindowLifecycle';
@@ -80,6 +81,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
         const next = ttsQueueRef.current.shift();
         if (!next) continue;
         setStatus('SPEAKING');
+        void wakeClient.setPlaybackSpeaking(true);
         try {
           await audioService.synthesizeAndPlay(next, apiEndpoint, setAudioVolume);
         } catch (err) {
@@ -89,6 +91,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
     } finally {
       ttsDrainingRef.current = false;
       setAudioVolume(0);
+      void wakeClient.setPlaybackSpeaking(false);
     }
   }, [apiEndpoint]);
 
@@ -102,16 +105,23 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
     [drainTtsQueue]
   );
 
-  /** Feeds one streamed text chunk in; enqueues each sentence for TTS as soon as it completes, without waiting for the full reply. */
-  const feedStreamingText = useCallback(
+  /**
+   * Accumulates streaming tokens, extracts complete speakable sentences,
+   * sanitizes each complete sentence into clean speech (free of Markdown,
+   * URLs, and code blocks), and enqueues to TTS.
+   */
+  const accumulateStreamingSpeech = useCallback(
     (chunk: string) => {
       pendingSentenceRef.current += chunk;
       const matches = pendingSentenceRef.current.match(/[^.!?]*[.!?]+\s*/g);
       if (matches) {
         const consumedLen = matches.join('').length;
         pendingSentenceRef.current = pendingSentenceRef.current.slice(consumedLen);
-        for (const sentence of matches) {
-          enqueueSentence(sentence);
+        for (const rawSentence of matches) {
+          const clean = composeSpeech(rawSentence);
+          if (clean) {
+            enqueueSentence(clean);
+          }
         }
       }
     },
@@ -120,7 +130,10 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
 
   const flushPendingSentence = useCallback(() => {
     if (pendingSentenceRef.current.trim()) {
-      enqueueSentence(pendingSentenceRef.current);
+      const clean = composeSpeech(pendingSentenceRef.current);
+      if (clean) {
+        enqueueSentence(clean);
+      }
     }
     pendingSentenceRef.current = '';
   }, [enqueueSentence]);
@@ -148,7 +161,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
         {
           onDelta: (chunk) => {
             setStreamedAnswer((prev) => prev + chunk);
-            feedStreamingText(chunk);
+            accumulateStreamingSpeech(chunk);
           },
           onComplete: () => {
             flushPendingSentence();
@@ -163,7 +176,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
         controller.signal
       );
     },
-    [apiEndpoint, beginNewTurn, cancelAutoHide, drainTtsQueue, feedStreamingText, finishTurn, flushPendingSentence, scheduleAutoHide]
+    [apiEndpoint, beginNewTurn, cancelAutoHide, drainTtsQueue, accumulateStreamingSpeech, finishTurn, flushPendingSentence, scheduleAutoHide]
   );
 
   const runChartAnalysis = useCallback(
@@ -184,7 +197,12 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
           onComplete: (result, timing) => {
             console.info('[VoiceAssistantRuntime] chart analysis timing (ms):', timing);
             setStreamedAnswer(result.formatted_tars_text || result.market_context);
-            if (result.speech_text) enqueueSentence(result.speech_text);
+            if (result.speech_text) {
+              enqueueSentence(result.speech_text);
+            } else if (result.formatted_tars_text) {
+              const fallback = composeSpeech(result.formatted_tars_text);
+              if (fallback) enqueueSentence(fallback);
+            }
             void drainTtsQueue().then(finishTurn);
           },
           onError: (detail) => {
@@ -205,6 +223,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
     ttsQueueRef.current = [];
     pendingSentenceRef.current = '';
     audioService.stopSpeaking();
+    void wakeClient.setPlaybackSpeaking(false);
     void wakeClient.forceCommandCapture();
     setStatus('LISTENING');
     setStreamedAnswer('');
@@ -245,6 +264,17 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
       onSpeechStart: () => handleBargeIn(),
       onAudioLevel: (level) => {
         if (statusRef.current === 'LISTENING') setAudioVolume(level);
+      },
+      onWakeStateChanged: (telemetry) => {
+        if (telemetry.state === 'AUDIO' || telemetry.state === 'COMMAND_LISTENING') {
+          if (statusRef.current !== 'SPEAKING' && statusRef.current !== 'THINKING') {
+            setStatus('LISTENING');
+          }
+        } else if (telemetry.state === 'PROCESSING' || telemetry.state === 'TRANSCRIBING') {
+          if (statusRef.current !== 'SPEAKING') {
+            setStatus('THINKING');
+          }
+        }
       },
     });
 

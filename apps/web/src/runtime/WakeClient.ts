@@ -8,6 +8,27 @@
  */
 import { isTauri } from '../services/tauri';
 
+export type NativeWakeState =
+  | 'IDLE'
+  | 'AUDIO'
+  | 'TRANSCRIBING'
+  | 'WAKE_DETECTED'
+  | 'COMMAND_LISTENING'
+  | 'PROCESSING'
+  | 'SPEAKING';
+
+export interface WakeTimingTelemetry {
+  state: NativeWakeState;
+  audio_detected_at?: number | null;
+  speech_end_at?: number | null;
+  transcription_start?: number | null;
+  transcription_complete?: number | null;
+  wake_detected_at?: number | null;
+  command_ready_at?: number | null;
+  duration_ms?: number | null;
+  transcript?: string | null;
+}
+
 export interface WakeClientCallbacks {
   onWakeDetected?: (phrase: string) => void;
   onAnalyzeChartDetected?: (phrase: string) => void;
@@ -15,6 +36,7 @@ export interface WakeClientCallbacks {
   onCommandTimeout?: () => void;
   onSpeechStart?: () => void;
   onAudioLevel?: (level: number) => void;
+  onWakeStateChanged?: (telemetry: WakeTimingTelemetry) => void;
 }
 
 type UnlistenFn = () => void;
@@ -57,6 +79,11 @@ export class WakeClient {
     if (callbacks.onAudioLevel) {
       subs.push(listen<number>('tars://wake-audio-level', (e) => callbacks.onAudioLevel!(e.payload)));
     }
+    if (callbacks.onWakeStateChanged) {
+      subs.push(
+        listen<WakeTimingTelemetry>('tars://wake-state-changed', (e) => callbacks.onWakeStateChanged!(e.payload))
+      );
+    }
 
     this.unlisten = await Promise.all(subs);
     return true;
@@ -80,6 +107,20 @@ export class WakeClient {
       await invoke('force_wake_command_capture');
     } catch (err) {
       console.warn('[WakeClient] force_wake_command_capture failed:', err);
+    }
+  }
+
+  /**
+   * Informs the native wake runtime whether frontend audio playback is actively speaking,
+   * transitioning native state machine between PROCESSING -> SPEAKING -> IDLE.
+   */
+  public async setPlaybackSpeaking(speaking: boolean): Promise<void> {
+    if (!isTauri()) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('set_wake_playback_state', { speaking });
+    } catch (err) {
+      console.warn('[WakeClient] set_wake_playback_state failed:', err);
     }
   }
 
