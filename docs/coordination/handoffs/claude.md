@@ -11,6 +11,162 @@ for that).
 
 ---
 
+## Latest handoff — Alexa-speed hot-state, Phases B+C: HotChartState + non-intrusive BackgroundChartWatcher (2026-08-21)
+
+**Branch**: `feature/realtime-hot-state`
+**Worktree**: `C:\TARS-worktrees\realtime-hot-state`
+**Base SHA**: `17713e4` (unchanged from the Phase A entry below)
+**Final SHA**: `d4ce217` (Phase B: `28e2cef`, Phase C: `d4ce217`)
+
+**Live baseline run (between Phase A and Phase B)**: 7 valid real
+`analyze-chart` requests against a real XAUUSD 15m chart in the actual
+native TradingView desktop app (not mocked), driven by a standalone
+harness against the Phase A-instrumented backend on an isolated port/DB.
+Total time P50 24.3s / P90 28.3s / P95 28.5s / max 28.7s. First-meaningful-
+text (server `first_token_ms`) P50 5.3s but P90/P95 ~23.2-23.4s -- **2 of 7
+runs got zero visible/speakable text until the entire response arrived as
+one final chunk**, not the incremental stream the other 5 runs showed.
+This is a real Claude CLI streaming-behavior variance, not something this
+backend controls, and is a genuine risk to the "first TTS audio <=5s"
+target that Phase F/H should measure again with a larger sample. Quality:
+6/7 correctly read the real chart (accurate price levels, matched the
+image), but **0/7 returned the strict JSON schema** the chart-analysis
+system prompt demands -- all fell back to the existing, tested unstructured
+markdown path. This matters for Phase D: the deterministic composer needs
+parsed fields, so before relying on them, either tighten the prompt or make
+the composer degrade honestly when `structured=False`. One run (excluded
+from the stats above) accidentally captured this very Claude Code/IDE
+session instead of the chart -- a live, unplanned demonstration of exactly
+the window-occlusion problem that motivated Phase C's capture-architecture
+decision below (Claude correctly refused to analyze it as a chart, which
+is the correct/desired truthfulness behavior).
+
+**Phase B — HotChartState** (`28e2cef`): new
+`assistant/hot_chart_state.py` (`HotChartState`/`ChartIdentity`/
+`Freshness` -- HOT/WARM/STALE/MISSING with documented, timeframe-adaptive
+thresholds) and `assistant/hot_chart_state_store.py`, reusing
+`ChartAnalysisResult` as the analysis payload rather than duplicating its
+fields. New migration `0006_hot_chart_state.sql` (composite PK on
+`chart_window_id, symbol, timeframe`, with `''` rather than SQL `NULL` for
+unknown symbol/timeframe -- SQLite's `PRIMARY KEY` does not imply
+`NOT NULL` for non-INTEGER composite keys, and `NULL != NULL` for
+uniqueness, which would have silently allowed duplicate "unknown identity"
+rows). Purely additive: nothing in the live path used it yet as of this
+commit.
+
+**Phase C — BackgroundChartWatcher** (`d4ce217`): the substantial piece.
+Per explicit direction, background capture uses **Windows.Graphics.Capture
+(WGC)**, not the existing `capture_chart_window` hide/BitBlt/focus-steal
+path (unusable for a silent loop -- it steals OS input focus on every
+restore) and not DXGI Desktop Duplication (still captures the composited
+desktop, so it wouldn't actually solve the occlusion problem WGC's
+per-window mode does). New Rust modules:
+
+- `capture_wgc.rs` -- `WgcCapture`: D3D11 device + WGC capture session
+  bound to a target hwnd, polled via `try_capture_frame()`. **Verified
+  against the real, live TradingView window this session**, not just
+  compiled: captured a genuine 1920x1020 frame, decoded it back to PNG and
+  visually inspected it (right side up, correct colors, the actual chart)
+  while VS Code was in front on another window -- proving the "no
+  occlusion problem" claim directly, not just asserting it. Caught two
+  real bugs only a live run could catch: (1) `TryGetNextFrame`'s "no frame
+  yet" case surfaces as `Err(HRESULT S_OK)` in this WinRT binding, not
+  `Ok(None)` -- the first version treated every `Err` as fatal, which
+  would have made the watcher never produce a frame against a real
+  session; (2) D3D11 texture memory is top-down but the reused
+  `create_bmp_bytes` (lib.rs) expects bottom-up rows (matching its other
+  caller, `GetDIBits` with positive `biHeight`) -- unflipped, every
+  background-watcher frame would have shipped upside down to Claude.
+- `chart_watcher.rs` -- the polling/diff/trigger loop on its own
+  background OS thread (same independence-from-the-webview pattern as
+  `wake_engine.rs`). Window discovery is **not** foreground-biased (unlike
+  the existing `get_target_chart_window_hwnd`, deliberately, since the
+  watcher must keep tracking the chart while the user works elsewhere) --
+  matches by process name or title containing "tradingview"; confirmed via
+  the live baseline that the real app's process name is "TradingView" but
+  its *title* is the ticker/price (not "TradingView"), so both fields
+  must be checked, and an earlier test-only helper that checked title only
+  was caught failing against the live window and fixed. Cheap 16x16
+  average-hash frame diffing (hand-rolled, no image crate) gates whether
+  to push a frame to the backend; separate cooldown floors on the Rust
+  side (anti-spam, 5s) and Python side (anti-cost, per-window, default
+  20s) are deliberately distinct concerns. Pauses on idle/lock
+  (`GetLastInputInfo`) and when no chart window is found.
+- `assistant/chart_watch.py` -- `ChartWatchService`, the real vision-call
+  policy: per-window cooldown plus a freshness pre-check against
+  `HotChartStateStore.get_latest_for_window()` so a still-HOT window never
+  re-triggers a vision call just because Rust detected some pixel change.
+  Reuses `ChartAnalysisService.analyze()` verbatim -- same system prompt,
+  same epistemic discipline, same disclaimer -- never a second vision-call
+  path.
+- `app/routers/chart_watch.py` -- `POST /api/v1/chart-watch/frame`, the
+  Rust watcher's receiving endpoint (not reachable from the
+  frontend/webview, matching `wake_engine.rs`'s own backend-direct
+  pattern for `/api/v1/voice/transcribe`).
+
+**Deliberately not done in Phase C**: the state-update WebSocket broadcast
+Part 3 mentions is not wired -- there is no consumer until Phase D's fast
+path exists to react to it, and building unused pub/sub plumbing now would
+be speculative infrastructure. `HotChartState` persistence itself is fully
+wired and tested; a future session adds the broadcast once Phase D needs
+it.
+
+**Files changed** (Phase B+C combined): `apps/backend/assistant/
+hot_chart_state.py`, `hot_chart_state_store.py`, `chart_watch.py` (new),
+`apps/backend/app/routers/chart_watch.py` (new), `apps/backend/app/
+{deps,main}.py`, `apps/backend/storage/migrations/0006_hot_chart_state.sql`,
+`apps/backend/tests/test_hot_chart_state{,_store}.py`,
+`test_chart_watch{,_router}.py`, `apps/web/src-tauri/src/{capture_wgc,
+chart_watcher}.rs` (new), `apps/web/src-tauri/src/lib.rs` (module
+registration + startup wiring only -- `capture_chart_window`/
+`capture_active_window`/`get_target_chart_window_hwnd` untouched),
+`apps/web/src-tauri/Cargo.toml` (additive `windows` crate dependency +
+two new `windows-sys` features for idle detection).
+
+**Tests run**: Rust -- `cargo check`, `cargo clippy --no-deps` (clean
+except one pre-existing, untouched warning in `lib.rs`), `cargo test --lib`
+(6 pure-logic tests passing; the live-hardware capture test is
+`#[ignore]`d by default and was run explicitly this session, see above --
+it needs a real TradingView window open and is not part of normal CI).
+Backend -- full suite **581 passed**, `ruff check` clean, `mypy` clean
+(same 7 pre-existing errors as Phase A, none new, none in touched files).
+
+**Known limitations**:
+- Chart-window discovery is hardcoded to matching "tradingview" in
+  process name or title -- not configurable yet if a different charting
+  app needs support later.
+- The average-hash diff threshold (`HASH_DIFF_THRESHOLD = 14` out of 256
+  bits) is a reasoned starting constant, not empirically tuned against a
+  large real-world sample of "meaningful vs. cosmetic" chart changes.
+- Symbol/timeframe-change detection relies entirely on the vision call
+  itself (via `ChartIdentity`) -- the originally discussed cheap local OCR
+  of the ticker label (`Windows.Media.Ocr`) to detect a symbol switch
+  *before* spending a vision call was not built this session; flagged as a
+  Phase C follow-up, not silently dropped.
+- No physical, multi-hour resource/CPU/RAM measurement of the watcher
+  running continuously yet (Part 21) -- only a few real capture cycles
+  were exercised interactively this session.
+- The Rust `windows` crate direct dependency sits alongside two already-
+  transitively-resolved `windows` crate versions (0.61.3, 0.62.2) pulled
+  in by `tauri`'s own dependency tree -- confirmed this compiles and links
+  correctly (both `cargo check` and the live capture test succeeded), just
+  flagging the duplication for awareness, not a defect.
+
+**Exact dependencies required from other agents**: this session again
+touched `apps/web/src-tauri/` (Antigravity's normal lane per `AGENTS.md`)
+-- two new files (`capture_wgc.rs`, `chart_watcher.rs`) plus additive-only
+changes to `lib.rs`/`Cargo.toml`. No existing Rust command, struct, or
+behavior was modified. Flagging for review before any merge, per the same
+rationale as the Phase A entry below.
+
+**Next recommended action**: Phase D (wire a real `FAST_CHART_ANALYSIS`
+path into the actual trigger -- today's `IntelligenceRouter.CHART_ANALYSIS`
+branch is still a stub that just says "use the HUD trigger"; the
+deterministic composer must handle `structured=False` gracefully given the
+0/7 JSON-compliance finding above).
+
+---
+
 ## Latest handoff — Alexa-speed hot-state, Phase A: latency instrumentation (2026-08-20)
 
 **Branch**: `feature/realtime-hot-state`
