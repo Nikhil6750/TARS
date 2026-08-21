@@ -93,3 +93,49 @@ python tools\run_certification.py
 
 `tools/tauri_checks.py --cargo-check` can be run separately for deterministic
 npm/Cargo version, configuration, and Rust build-metadata diagnostics.
+
+## Core-experience recovery checks
+
+`core_experience_checks.py` reports source-level and optional live-runtime
+release blockers without treating HTTP 200 or process existence as proof of a
+usable assistant:
+
+```powershell
+python tools/core_experience_checks.py --runtime
+```
+
+On Windows, capture and click the actual Tauri window (not a Vite page) with:
+
+```powershell
+python tools/capture_native_tars.py --verify-navigation `
+  --output-dir .\scratch\native-evidence
+```
+
+The command returns nonzero when the main window is missing/clipped or a
+required Chat/Workspace/Memory/Settings control cannot be exercised.
+
+The fixed 30-case provider corpus is validated or executed with:
+
+```powershell
+python tools/assistant_quality_benchmark.py
+python tools/assistant_quality_benchmark.py `
+  --provider claude_code --provider codex `
+  --output .\scratch\quality\claude-vs-codex.json
+```
+
+Deterministic scoring covers directness, explicit grounding constraints,
+completeness anchors, structure, uncertainty, user-mode cleanliness, and
+speech suitability. Human correctness review remains required; the benchmark
+does not spend a second model call grading every answer.
+
+Generate local Kokoro listening candidates from already-installed model files:
+
+```powershell
+python tools/generate_voice_comparison.py `
+  --include-current-reference `
+  --output-dir .\scratch\voice-comparison
+```
+
+The manifest records synthesis latency and duration only. Voice naturalness,
+warmth, clarity, authority, and conversational quality require user listening
+before any permanent candidate is selected.
