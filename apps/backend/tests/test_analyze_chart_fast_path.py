@@ -89,6 +89,44 @@ def test_fast_path_is_never_attempted_without_a_window_id(client, monkeypatch):
     assert '"warm_path": true' not in resp.text
 
 
+def test_fast_path_schedules_deep_verification_after_responding(client, monkeypatch):
+    from assistant.fast_chart_response import FastResponse
+
+    async def fake_try_fast_response(*, window_id, image_bytes, hot_state_store, t0):
+        return FastResponse(
+            result={"instrument": "XAUUSD", "timeframe": "15M", "raw_text": "{}"},
+            timing={"claude_start_ms": 0, "first_token_ms": 2, "complete_ms": 2, "warm_path": True},
+        )
+
+    calls = []
+
+    async def spying_deep_verification(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr("app.routers.assistant.try_fast_response", fake_try_fast_response)
+    monkeypatch.setattr("app.routers.assistant.run_deep_verification", spying_deep_verification)
+
+    resp = client.post(
+        "/api/v1/assistant/analyze-chart/stream",
+        json={
+            "conversation_id": "conv-fast-deep",
+            "capture": {
+                "image_data_base64": _bmp_base64(),
+                "image_format": "image/bmp",
+                "window_id": "hwnd-42",
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    # BackgroundTasks run as part of completing the ASGI response cycle,
+    # which TestClient's in-process transport has already done by the
+    # time client.post() returns -- no polling/sleeping needed here.
+    assert len(calls) == 1
+    assert calls[0]["window_id"] == "hwnd-42"
+    assert calls[0]["served_result"]["instrument"] == "XAUUSD"
+
+
 def test_fast_path_is_skipped_for_a_custom_goal_text(client, monkeypatch):
     called = {"count": 0}
 

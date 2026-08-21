@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from starlette.responses import StreamingResponse
 
 from app.contracts import ContractValidationError, validate_assistant_message
@@ -20,6 +20,7 @@ from app.deps import (
 )
 from app.latency_store import LatencyTraceStore, RequestTrace
 from assistant.chart_analysis import ChartAnalysisError, ChartAnalysisService
+from assistant.deep_verification import run_deep_verification
 from assistant.errors import AssistantProviderError
 from assistant.fast_chart_response import try_fast_response
 from assistant.hot_chart_state_store import HotChartStateStore
@@ -185,6 +186,7 @@ async def analyze_chart(
 @router.post("/api/v1/assistant/analyze-chart/stream")
 async def analyze_chart_stream(
     request: Request,
+    background_tasks: BackgroundTasks,
     chart_analysis: ChartAnalysisService = Depends(get_chart_analysis_service),
     hot_chart_state_store: HotChartStateStore = Depends(get_hot_chart_state_store),
     trace_store: LatencyTraceStore = Depends(get_latency_trace_store),
@@ -250,6 +252,23 @@ async def analyze_chart_stream(
         )
 
     if fast_response is not None:
+        # Kick a real re-verification vision call in the background (Part
+        # 7/Phase E) so a fast-but-possibly-outdated read gets corrected
+        # for the *next* request if it materially differs -- runs after
+        # this response has already gone out (FastAPI BackgroundTasks),
+        # never delays what the user just got. window_id is guaranteed
+        # non-None here since try_fast_response only returns non-None when
+        # it was given one.
+        assert window_id is not None
+        background_tasks.add_task(
+            run_deep_verification,
+            window_id=window_id,
+            image_bytes=image_bytes,
+            image_format=image_format,
+            chart_analysis_service=chart_analysis,
+            hot_state_store=hot_chart_state_store,
+            served_result=fast_response.result,
+        )
 
         async def fast_event_generator():
             request_id = uuid4().hex
