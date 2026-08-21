@@ -10,7 +10,7 @@ integration/quality harness). Only Codex edits this file. See
 
 **Branch**: `feature/tars-core-experience-v2`
 
-**Commit SHA**: `1ba31161c785f56a740e5909ff08f5b90b4ecd67`
+**Commit SHA**: `1b6fe6207b1cefbb5bda2a7408e7f38e98790266`
 
 **Work completed**:
 
@@ -58,9 +58,9 @@ integration/quality harness). Only Codex edits this file. See
 
 **Tests run**:
 
-- `python -m pytest tests -q` — 65 passed, 24 expected external/hardware
+- `python -m pytest tests -q` — 66 passed, 24 expected external/hardware
   skips after `npm ci --prefix tools/codegen`.
-- New regression module — 5 passed.
+- New regression module — 6 passed.
 - Ruff on all changed Python files — passed.
 - Repository-wide `python -m ruff check tests tools` — nonzero only for 34
   pre-existing violations in unchanged `tools/verify_integrated_voice_runtime.py`.
@@ -72,8 +72,8 @@ integration/quality harness). Only Codex edits this file. See
 - Source-matched `npm run tauri build` — passed and produced the release EXE
   and NSIS installer in the configured shared Cargo target.
 - Native UI Automation run — actual Tauri Chat, Workspace, Memory, and
-  Settings controls were found and clicked; actual native captures were saved
-  under ignored `scratch/` evidence.
+  Settings controls were invoked and produced four distinct capture hashes;
+  actual native captures were saved under untracked `scratch/` evidence.
 - Full provider corpus — 30 Claude Code failures; 30 Codex responses,
   174/210 deterministic checks but 0/30 completeness anchors; human review
   still required.
