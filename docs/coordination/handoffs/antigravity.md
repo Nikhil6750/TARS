@@ -10,11 +10,40 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (TARS CORE EXPERIENCE — NATIVE / VOICE / UI RECOVERY)
+## Latest handoff (TARS CORE EXPERIENCE — FINAL INTEGRATION PASS)
 
-**Status**: COMPLETE — Fixed native wake state machine, same-utterance command extraction, speech sanitization pipeline, Kokoro candidate evaluation UI, and launcher verification.
-**Branch**: `feature/tars-core-experience-recovery`
-**Commit SHA**: `05c74b73b53e99a25fafb546b4dc5eba4e786093`
+**Status**: COMPLETE — Integrated backend presentation contract (`display_text` / `speech_text` / `quality`), voice telemetry correlation IDs, streaming display/speech separation, and full verification suite pass.
+**Branch**: `feature/tars-core-experience-integration`
+**Commit SHA**: `f2801da287e02e078519fc57593c66fe85303ec3`
+**Integrated Backend Base**: `a57544acc520cb20139f38982a9b79ba4b79bfa8`
+**Integrated Native/Web Base**: `8c576e6462719c8ca60b135bb5f9bc68e30b6567`
+
+**Work completed**:
+1. **Integration Branch Setup & Cherry-Pick**:
+   - Created dedicated integration branch `feature/tars-core-experience-integration` branched from `feature/tars-core-experience-recovery`.
+   - Cherry-picked backend commit `a57544acc520cb20139f38982a9b79ba4b79bfa8` cleanly with zero conflicts (`d9e2805`).
+2. **Backend Presentation Contract Consumption (`display_text` & `speech_text`)**:
+   - Updated `apps/web/src/types/assistant-message.ts` to include `display_text`, `speech_text`, and `AssistantResponseQuality` types.
+   - Upgraded `AssistantClient` (`apps/web/src/runtime/AssistantClient.ts`) to query `/api/v2/assistant/query` by default (falling back to `/api/v1/assistant/query` if 404), extracting `display_text`, `speech_text`, and `quality`.
+   - Updated streaming SSE consumption on `/api/v1/assistant/query/stream` to receive delta chunks for streaming UI updates and complete payloads carrying `display_text` and `speech_text`.
+   - Separated presentation layers: `display_text` is rendered through `MarkdownContent` in Chat and Workstation views; `speech_text` is fed directly to TTS upon turn completion with frontend `composeSpeech()` retained strictly as a fallback.
+3. **Voice & Wake Telemetry ID Correlation**:
+   - Updated Rust native wake engine (`apps/web/src-tauri/src/wake_engine.rs`) to extract `telemetry_id` from backend `/api/v1/voice/transcribe` JSON responses and emit it in `WakeTimingTelemetry` payloads (`tars://wake-state-changed`).
+   - Added `telemetry_id` to TypeScript `WakeTimingTelemetry` interface.
+   - Propagated telemetry turn IDs as `X-TARS-Voice-Turn-ID` HTTP headers on all assistant queries to correlate voice transcription turns with assistant LLM routing and voice telemetry traces.
+4. **Canonical Single-Utterance Wake Preservation**:
+   - Preserved Antigravity's single-utterance wake dispatch model: requests like "Hey TARS, analyze the chart" emit exactly one event (`tars://analyze-chart-detected` or `tars://command-transcript`) with no duplicate dispatches.
+5. **Full Multi-System Verification**:
+   - Backend Pytest: 643 passed, 0 failed.
+   - Backend Ruff: All checks passed.
+   - Backend MyPy: 105 source files checked with 0 errors.
+   - Frontend Vitest: 23 test files, 147 passed, 0 failed.
+   - Frontend TypeScript Typecheck: `tsc --noEmit` passed with 0 errors.
+   - Frontend Production Build: `vite build` generated full PWA distribution without errors.
+   - Native Rust Tests: 6 passed, 0 failed.
+   - Native Release Compilation: `cargo build --release` built `tars-companion.exe` (12.8 MB) cleanly.
+   - Contract & Blocker Checks: `python tools/core_experience_checks.py` passed with 0 findings.
+   - One-Command Launcher: `scripts/start_tars.ps1` verified clean port check, .env loading, provider validation, backend health, and native window launch.
 
 **Work completed**:
 1. **Priority 1: Native Wake State Machine & Single-Utterance Extraction (`apps/web/src-tauri/src/wake_engine.rs`)**:
