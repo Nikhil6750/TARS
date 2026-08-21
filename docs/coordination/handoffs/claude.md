@@ -11,6 +11,124 @@ for that).
 
 ---
 
+## Latest handoff — Alexa-speed hot-state, Phase D: real fast-path proof (2026-08-21)
+
+**Branch**: `feature/realtime-hot-state`
+**Base SHA**: `17713e4` (unchanged)
+**Final SHA**: `f787e98`
+
+**The headline result**: a genuine, live, end-to-end measurement, not a
+projection. Simulated the watcher pushing a real WGC-captured frame to
+`/api/v1/chart-watch/frame` (real Claude Code CLI vision call, 19.3s,
+persisted `HotChartState`), then immediately called
+`/api/v1/assistant/analyze-chart/stream` against the same window with a
+fresh capture of the same chart. **Total response time: 0.537s**, correctly
+served the same accurate, real analysis, correctly flagged
+`timing.warm_path: true`. That's this repo's own 15-31s cold baseline
+(Phase A entry below) down to well under 1s -- a ~30-50x speedup, well
+inside the task's ~5s target, for the case that matters (a window the
+watcher has recently seen).
+
+**What actually shipped**: `/api/v1/assistant/analyze-chart/stream` now
+tries `assistant/fast_chart_response.py`'s `try_fast_response()` first;
+`None` means "nothing honest to serve fast," and the handler falls through
+to the existing cold `analyze_stream()` path completely unchanged -- there
+is no code path where a fast answer gets fabricated. Deliberately
+conservative for this first cut: only `Freshness.HOT` state is served (not
+`WARM`, which `HotChartState.usable_for()` would technically allow) --
+serving `WARM` honestly needs an "as of Ns ago" caveat that
+`ChartAnalysisResult`'s render methods have no hook for yet; flagged as a
+follow-up, not silently dropped. The fast path is also only attempted for
+the generic "Analyze this chart." goal -- any more specific question
+(a different `goal_text`) always gets a fresh vision call, since a cached
+generic read could easily answer the wrong question.
+
+**A real correctness gap found and closed before this could be wired
+safely**: a fast-path lookup only has `chart_window_id` at request time,
+not the exact `symbol`/`timeframe` identity `usable_for()` needs (that's
+only known *after* a vision call runs). Age-based freshness alone cannot
+catch the Part 19/26 case this implies: the user switches symbols in the
+same window, then asks again before the watcher's own vision-call cooldown
+produces a fresh read for the new symbol -- a HOT-by-age row for the *old*
+symbol would otherwise get served. `assistant/perceptual_hash.py` (new --
+the Python half of `chart_watcher.rs`'s average-hash technique) compares
+the *current* request's own capture against the stored analysis's frame;
+a real symbol/timeframe switch fails this check even inside the freshness
+window, ordinary price-tick movement does not. `ChartWatchService`
+(Phase C) was updated to use this same check -- it previously stored a
+cryptographic sha256 of the raw bytes, which would almost never match
+between two real captures a few seconds apart (prices tick every second)
+and made its own freshness pre-check nearly a no-op. Caught via a
+dedicated regression test (`test_returns_none_when_content_has_drifted_
+even_if_hot`), not by inspection.
+
+**Rust side**: `ScreenCaptureResult` gains an additive `window_id` field
+(the captured window's own HWND as a string, matching
+`chart_watcher.rs`'s identity scheme exactly) so the frontend's existing
+user-triggered capture can tell the backend which physical window it came
+from. `capture_chart_window`/`capture_active_window` behavior is otherwise
+completely unchanged; `capture_screen_region` always reports `window_id:
+None` (no window concept applies to a region capture).
+
+**A live testing pitfall worth recording**: the first attempt at this
+verification used a standalone PowerShell screen-rect capture (this
+session's own throwaway test harness, not any shipped code) and got a
+stale/wrong result -- a different window happened to be occluding the
+target's screen region at that exact moment (several windows on this
+machine share identical bounds `1550x830 @(-7,-7)`, apparently all
+maximized in place). That is precisely the occlusion problem Phase C's
+WGC choice exists to solve, live-demonstrated by my own flawed ad-hoc
+tooling, not by the production code -- `capture_wgc.rs`'s real capture
+path was unaffected (already proven immune to this in the Phase C entry
+below) and was used instead for the corrected, honest re-verification
+above.
+
+**Files changed**: `apps/backend/assistant/fast_chart_response.py` (new),
+`perceptual_hash.py` (new), `chart_watch.py` (hash method changed),
+`hot_chart_state.py` (docstring only), `apps/backend/app/{deps,routers/
+assistant}.py`, `apps/backend/tests/test_{fast_chart_response,
+perceptual_hash,analyze_chart_fast_path}.py` (new),
+`test_chart_watch.py` (updated for the hash change + new regression case),
+`apps/web/src-tauri/src/lib.rs` (additive field only),
+`apps/web/src/types/actions.ts` (additive field only).
+
+**Tests run**: 7 new `fast_chart_response` cases, 5 `perceptual_hash`
+cases, 3 router-level integration tests (provider genuinely never called
+via `monkeypatch` assertion on the fast path; cold path confirmed for
+no-`window_id` and custom-goal cases), `chart_watch.py`'s tests updated
+and passing with a new content-drift regression. Full backend suite --
+**597 passed**, `ruff check` clean, `mypy` clean (same 7 pre-existing
+errors, none new). `cargo check`/`cargo clippy --no-deps` clean (same one
+pre-existing, untouched warning). Live verification as described above,
+against the real backend, real Claude CLI, and a real WGC-captured chart
+-- not a mock or a projection.
+
+**Known limitations**:
+- WARM-tier fast responses are not served yet (see above) -- narrows how
+  often the fast path fires today; a real, deliberate scope decision, not
+  an oversight.
+- The fast path answers `capital_note`-less generic analysis only; a
+  capital/profit sub-question riding on "Analyze this chart." would still
+  need `TradeCalculationEngine`'s deterministic split (`chart_analysis.py`
+  already does this on the cold path) -- not exercised on the fast path
+  since `try_fast_response` only fires for the exact default goal text and
+  a capital question changes the goal text, which routes it to cold
+  automatically. Not a gap, just worth naming why it's safe.
+- No WebSocket "state updated" push yet (still true from the Phase C
+  entry) -- the fast path is pull-only (the user has to ask); nothing
+  proactively tells the UI a fresher read exists.
+
+**Exact dependencies required from other agents**: same as Phase C --
+`apps/web/src-tauri/src/lib.rs` touched again (additive field only), no
+existing behavior changed. Flagging for review before any merge.
+
+**Next recommended action**: Phase E (async deep verification -- after a
+fast response, kick the same refresh path in the background and diff for
+material differences before ever pushing a follow-up correction to the
+user).
+
+---
+
 ## Latest handoff — Alexa-speed hot-state, Phases B+C: HotChartState + non-intrusive BackgroundChartWatcher (2026-08-21)
 
 **Branch**: `feature/realtime-hot-state`
