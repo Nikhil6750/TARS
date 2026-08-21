@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import tempfile
@@ -149,6 +150,11 @@ def capture_window(hwnd: int, destination: Path) -> None:
         win32gui.ReleaseDC(hwnd, window_dc)
 
 
+def navigation_captures_are_distinct(results: list[dict[str, object]]) -> bool:
+    hashes = [item.get("capture_sha256") for item in results]
+    return bool(hashes) and all(hashes) and len(set(hashes)) == len(hashes)
+
+
 def verify_navigation(hwnd: int, output_dir: Path) -> list[dict[str, object]]:
     try:
         import uiautomation as auto
@@ -160,11 +166,31 @@ def verify_navigation(hwnd: int, output_dir: Path) -> list[dict[str, object]]:
     for tab in ("Chat", "Workspace", "Memory", "Settings"):
         control = root.ButtonControl(searchDepth=30, Name=tab)
         exists = control.Exists(2, 0.2)
+        invoked = False
+        capture_sha256: str | None = None
+        error: str | None = None
         if exists:
-            control.Click()
-            time.sleep(0.8)
-            capture_window(hwnd, output_dir / f"native-{tab.lower()}.png")
-        results.append({"tab": tab, "found": exists, "clicked": exists})
+            try:
+                invoke_pattern = control.GetInvokePattern()
+                if invoke_pattern is None:
+                    raise RuntimeError("control does not expose the Invoke pattern")
+                invoke_pattern.Invoke()
+                invoked = True
+                time.sleep(0.8)
+                destination = output_dir / f"native-{tab.lower()}.png"
+                capture_window(hwnd, destination)
+                capture_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
+            except Exception as exc:  # noqa: BLE001 - recorded as verification evidence
+                error = str(exc)
+        results.append(
+            {
+                "tab": tab,
+                "found": exists,
+                "invoked": invoked,
+                "capture_sha256": capture_sha256,
+                "error": error,
+            }
+        )
     return results
 
 
@@ -211,9 +237,15 @@ def main() -> None:
         if args.verify_navigation:
             navigation = verify_navigation(main_window.hwnd, args.output_dir)
             payload["navigation"] = navigation
-            missing = [item["tab"] for item in navigation if not item["found"]]
-            if missing:
-                payload["errors"].append(f"missing native navigation controls: {missing}")
+            failed = [item["tab"] for item in navigation if not item["invoked"]]
+            if failed:
+                payload["errors"].append(
+                    f"native navigation controls could not be invoked: {failed}"
+                )
+            if not navigation_captures_are_distinct(navigation):
+                payload["errors"].append(
+                    "native navigation captures are not distinct after UIA invocation"
+                )
         payload["output_dir"] = str(args.output_dir.resolve())
     except Exception as exc:  # noqa: BLE001 - diagnostics return structured evidence
         payload["errors"].append(str(exc))

@@ -8,7 +8,11 @@ from tools.assistant_quality_benchmark import (
     evaluate_response,
     load_corpus,
 )
-from tools.capture_native_tars import NativeWindow, choose_main_window
+from tools.capture_native_tars import (
+    NativeWindow,
+    choose_main_window,
+    navigation_captures_are_distinct,
+)
 from tools.core_experience_checks import inspect_source
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,6 +26,18 @@ def test_native_window_selection_rejects_plugin_helper_windows() -> None:
         NativeWindow(4, 10, "TARS", 20, 20, 1120, 800, True),
     ]
     assert choose_main_window(windows) == windows[3]
+
+
+def test_navigation_evidence_requires_four_distinct_captures() -> None:
+    distinct = [
+        {"capture_sha256": "chat"},
+        {"capture_sha256": "workspace"},
+        {"capture_sha256": "memory"},
+        {"capture_sha256": "settings"},
+    ]
+    assert navigation_captures_are_distinct(distinct) is True
+    distinct[-1]["capture_sha256"] = "chat"
+    assert navigation_captures_are_distinct(distinct) is False
 
 
 def test_source_diagnostics_reproduce_core_experience_blockers() -> None:
