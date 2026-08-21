@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from app.deps import get_latency_trace_store
+from app.deps import get_latency_trace_store, get_voice_trace_store
 from app.latency_store import LatencyTraceStore
+from app.voice_telemetry import VoiceTraceStore
 from assistant.provider_health import ProviderHealth, ProviderHealthTracker
 
 router = APIRouter(tags=["diagnostics"])
@@ -44,3 +45,12 @@ async def provider_health(
         "max_ms": health.max_ms,
         "last_error": health.last_error,
     }
+
+
+@router.get("/api/v1/diagnostics/voice-latency")
+async def voice_latency(
+    limit: int = Query(100, ge=1, le=500),
+    store: VoiceTraceStore = Depends(get_voice_trace_store),
+) -> dict:
+    traces = await store.recent(limit=limit)
+    return {"sample_size": len(traces), "traces": traces}

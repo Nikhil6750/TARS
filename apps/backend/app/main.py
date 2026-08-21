@@ -145,8 +145,18 @@ async def lifespan(app: FastAPI):
     frontend_bridge = FrontendCommandBridge(action_ws_manager)
     app.state.frontend_bridge = frontend_bridge
 
+    from app.latency_store import LatencyTraceStore
+
+    latency_trace_store = LatencyTraceStore(db.conn)
+    app.state.latency_trace_store = latency_trace_store
+    from app.voice_telemetry import VoiceTraceStore
+
+    app.state.voice_trace_store = VoiceTraceStore(db.conn)
+
     try:
-        app.state.assistant_provider = build_assistant_provider(settings)
+        app.state.assistant_provider = build_assistant_provider(
+            settings, trace_store=latency_trace_store
+        )
         logger.info("assistant provider: %s", settings.assistant_provider)
     except Exception:
         logger.exception(
@@ -154,11 +164,6 @@ async def lifespan(app: FastAPI):
             settings.assistant_provider,
         )
         app.state.assistant_provider = MockAssistantProvider()
-
-    from app.latency_store import LatencyTraceStore
-
-    latency_trace_store = LatencyTraceStore(db.conn)
-    app.state.latency_trace_store = latency_trace_store
 
     chart_analysis_service = ChartAnalysisService(
         build_chart_assistant_provider(settings), trace_store=latency_trace_store

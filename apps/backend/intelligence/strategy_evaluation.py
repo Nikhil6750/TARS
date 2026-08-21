@@ -10,7 +10,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-
 _ENTRY_INQUIRY_PATTERN = re.compile(
     r"\b(should\s+i\s+enter|can\s+i\s+enter|is\s+it\s+time\s+to\s+enter|enter\s+now|take\s+the\s+trade|buy\s+now|sell\s+now)\b",
     re.IGNORECASE,

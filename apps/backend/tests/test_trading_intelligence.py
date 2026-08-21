@@ -1,10 +1,10 @@
 """Tests for TARS Professional Trading Intelligence Architecture."""
 import pytest
 
-from assistant.chart_analysis import ChartAnalysisResult, _split_capital_question
+from assistant.chart_analysis import _split_capital_question
 from assistant.provider import AssistantProvider, AssistantReply, AssistantRequest
 from intelligence.composer import IntelligenceComposer
-from intelligence.market_research import MarketEvidence, MarketResearchEngine
+from intelligence.market_research import MarketResearchEngine
 from intelligence.router import IntelligenceRouter, IntentKind
 from intelligence.strategy_evaluation import StrategyEvaluationEngine
 from intelligence.trade_calculation import TradeCalculationEngine

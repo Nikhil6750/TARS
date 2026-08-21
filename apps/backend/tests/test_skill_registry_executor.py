@@ -3,14 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 
-import pytest
-
 from skill_registry.executor import (
     MAX_INSTRUCTION_CHARS,
     build_skill_execution_payload,
     execute_skill_prompt,
 )
-
 
 # ---- payload construction -------------------------------------------------
 

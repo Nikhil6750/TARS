@@ -23,7 +23,6 @@ from skill_registry import db as registry_db
 from skill_registry import obsidian_notes, vault_writer
 from skill_registry.catalog import (
     CatalogFetchError,
-    CatalogPayload,
     fetch_hermes_catalog,
     load_catalog_from_gzip,
     save_gzip_snapshot,

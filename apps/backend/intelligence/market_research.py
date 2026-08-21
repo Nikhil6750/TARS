@@ -19,7 +19,6 @@ from typing import Any
 
 from assistant.provider import AssistantProvider, AssistantRequest
 
-
 _RESEARCH_PATTERNS = re.compile(
     r"\b(research|macro|macroeconomic|drivers|catalysts|market structure|"
     r"fundamental|fundamentals|sentiment|central bank|inflation|fed|fomc|"

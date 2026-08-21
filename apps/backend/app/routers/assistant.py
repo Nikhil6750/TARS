@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -24,9 +25,11 @@ from assistant.deep_verification import run_deep_verification
 from assistant.errors import AssistantProviderError
 from assistant.fast_chart_response import try_fast_response
 from assistant.hot_chart_state_store import HotChartStateStore
+from assistant.response_quality import public_error_message
 from orchestrator.orchestrator import TarsOrchestrator
 
 router = APIRouter(tags=["assistant"])
+logger = logging.getLogger("tars.assistant_api")
 
 _MAX_IMAGE_BYTES = 15 * 1_048_576
 
@@ -34,6 +37,7 @@ _MAX_IMAGE_BYTES = 15 * 1_048_576
 @router.post("/api/v1/assistant/query")
 @router.post("/api/assistant/messages")
 @router.post("/api/v1/assistant/messages")
+@router.post("/api/v2/assistant/query")
 async def assistant_query(
     request: Request,
     orchestrator: TarsOrchestrator = Depends(get_orchestrator),
@@ -73,6 +77,8 @@ async def assistant_query(
         text=text,
         conversation_id=str(conversation_id) if conversation_id else str(uuid4()),
     )
+    if request.url.path.startswith("/api/v2/"):
+        return reply.to_response_dict()
     return reply.assistant_message.to_contract_dict()
 
 
@@ -104,8 +110,9 @@ async def assistant_query_stream(
                 conversation_id=str(conversation_id) if conversation_id else str(uuid4()),
             ):
                 yield f"data: {json.dumps(item)}\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+        except Exception:
+            logger.exception("assistant stream failed")
+            yield f"data: {json.dumps({'type': 'error', 'detail': public_error_message()})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -178,7 +185,7 @@ async def analyze_chart(
     except ChartAnalysisError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except AssistantProviderError as exc:
-        raise HTTPException(status_code=502, detail=f"Chart analysis provider failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=public_error_message("chart")) from exc
 
     return result.to_dict()
 
@@ -299,8 +306,9 @@ async def analyze_chart_stream(
                 capture_ms=capture_ms,
             ):
                 yield f"data: {json.dumps(item)}\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+        except Exception:
+            logger.exception("chart analysis stream failed")
+            yield f"data: {json.dumps({'type': 'error', 'detail': public_error_message('chart')})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

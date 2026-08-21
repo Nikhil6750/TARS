@@ -29,6 +29,7 @@ from uuid import uuid4
 from PIL import Image, UnidentifiedImageError
 
 from assistant.provider import AssistantProvider, AssistantRequest
+from assistant.response_quality import prepare_speech_text
 from intelligence.composer import IntelligenceComposer
 from intelligence.trade_calculation import TradeCalculationEngine
 
@@ -140,11 +141,12 @@ class ChartAnalysisResult:
     )
 
     def to_dict(self) -> dict[str, Any]:
-        # Includes speech_text and formatted_tars_text
+        display_text = self.formatted_tars_text()
         return {
             **asdict(self),
             "speech_text": self.speech_text(),
-            "formatted_tars_text": self.formatted_tars_text(),
+            "display_text": display_text,
+            "formatted_tars_text": display_text,
         }
 
     def formatted_tars_text(self) -> str:
@@ -182,7 +184,7 @@ class ChartAnalysisResult:
             # Neutral" here would be fabricating a read that was never
             # actually produced. Speak a markdown-stripped, capped version
             # of its real raw text instead.
-            return _strip_markdown_for_speech(self.market_context)
+            return prepare_speech_text(_strip_markdown_for_speech(self.market_context))
 
         parts: list[str] = []
         bias_label = self.bias or "Neutral"
@@ -208,7 +210,7 @@ class ChartAnalysisResult:
                 "For a profit estimate I'd need your entry, stop loss, target, "
                 "and position size -- I won't guess a number from the chart alone."
             )
-        return " ".join(p.strip() for p in parts if p and p.strip())
+        return prepare_speech_text(" ".join(p.strip() for p in parts if p and p.strip()))
 
 
 class ChartAnalysisError(RuntimeError):

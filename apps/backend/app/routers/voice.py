@@ -4,12 +4,22 @@ import asyncio
 import logging
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.deps import get_voice_providers
 from app.voice_state import VoiceProviders
+from app.voice_telemetry import VoiceTurnRecorder
+from assistant.response_quality import prepare_speech_text, public_error_message
 from assistant.router import AssistantRouter
 from voice.audio_utils import wav_to_pcm16
 from voice.errors import VoiceProviderError
@@ -24,6 +34,7 @@ VOICE_READY_TIMEOUT_SECONDS = 5.0
 class TranscribeResponse(BaseModel):
     text: str
     language: str | None = None
+    telemetry_id: str | None = None
 
 
 class SynthesizeRequest(BaseModel):
@@ -69,35 +80,62 @@ async def status(voice: VoiceProviders = Depends(get_voice_providers)) -> VoiceS
 @router.post("/api/v1/voice/transcribe", response_model=TranscribeResponse)
 @router.post("/api/voice/transcribe", response_model=TranscribeResponse)
 async def transcribe(
+    request: Request,
     file: UploadFile,
     voice: VoiceProviders = Depends(get_voice_providers),
 ) -> TranscribeResponse:
     wav_bytes = await file.read()
+    telemetry = VoiceTurnRecorder(request.app.state.voice_trace_store, None)
+    await telemetry.start_turn(audio_received=True)
     try:
         pcm, _sample_rate = wav_to_pcm16(wav_bytes)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"invalid WAV upload: {exc}") from exc
+        await telemetry.fail("audio_decode")
+        raise HTTPException(
+            status_code=422,
+            detail="The audio upload isn't a supported WAV file.",
+        ) from exc
 
     try:
+        await telemetry.mark("stt_started")
         result = await voice.stt.transcribe(pcm)
     except VoiceProviderError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        await telemetry.fail("stt")
+        raise HTTPException(status_code=503, detail=public_error_message("stt")) from exc
 
-    return TranscribeResponse(text=result.text, language=result.language)
+    await telemetry.mark("stt_completed")
+    if result.text:
+        await telemetry.mark("command_available")
+
+    return TranscribeResponse(
+        text=result.text,
+        language=result.language,
+        telemetry_id=telemetry.turn_id,
+    )
 
 
 @router.post("/api/v1/voice/synthesize")
 @router.post("/api/voice/synthesize")
 async def synthesize(
+    request: Request,
     body: SynthesizeRequest,
     voice: VoiceProviders = Depends(get_voice_providers),
 ) -> Response:
+    telemetry = VoiceTurnRecorder(request.app.state.voice_trace_store, None)
+    await telemetry.start_turn()
+    await telemetry.mark("tts_synthesis_started")
     try:
-        result = await voice.tts.synthesize(body.text)
+        result = await voice.tts.synthesize(prepare_speech_text(body.text))
     except VoiceProviderError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        await telemetry.fail("tts")
+        raise HTTPException(status_code=503, detail=public_error_message("tts")) from exc
 
-    return Response(content=result.audio, media_type="audio/wav")
+    await telemetry.mark("tts_ready")
+    return Response(
+        content=result.audio,
+        media_type="audio/wav",
+        headers={"X-TARS-Voice-Turn-ID": telemetry.turn_id or ""},
+    )
 
 
 @router.websocket("/api/v1/voice/session")
@@ -124,6 +162,7 @@ async def voice_session(
         conversation_store=ConversationStore(db.conn),
         provider=websocket.app.state.assistant_provider,
         memory_service=websocket.app.state.memory_service,
+        trace_store=websocket.app.state.latency_trace_store,
     )
 
     conversation_id = conversation_id or str(uuid4())
@@ -138,6 +177,7 @@ async def voice_session(
             assistant_router=assistant_router,
             conversation_id=conversation_id,
             action_runtime=websocket.app.state.action_runtime,
+            voice_trace_store=websocket.app.state.voice_trace_store,
         )
     except WebSocketDisconnect:
         pass

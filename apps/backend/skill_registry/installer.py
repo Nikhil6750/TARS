@@ -20,7 +20,11 @@ from uuid import uuid4
 
 import httpx
 
-from skill_registry.validation import ValidationResult, compute_bundle_hash, validate_quarantined_bundle
+from skill_registry.validation import (
+    ValidationResult,
+    compute_bundle_hash,
+    validate_quarantined_bundle,
+)
 
 GITHUB_API = "https://api.github.com"
 

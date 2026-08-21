@@ -15,7 +15,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-
 _CAPITAL_PROFIT_PATTERN = re.compile(
     r"\b(profit|loss|pnl|capital|rupees?|₹|\brs\.?\b|return on|roi|"
     r"how much (would|could|will) I (make|earn|lose|win)|"

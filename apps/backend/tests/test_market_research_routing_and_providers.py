@@ -4,6 +4,7 @@ and strict non-fallback provider health.
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
+
 import pytest
 
 from assistant.errors import AssistantProviderError
@@ -14,14 +15,11 @@ from assistant.provider import (
     AssistantRequest,
     ProviderDiagnostics,
 )
-from assistant.providers.claude_code import ClaudeCodeProvider, sanitize_user_facing_text
+from assistant.providers.claude_code import sanitize_user_facing_text
 from assistant.providers.codex import CodexProvider
 from assistant.providers.gemini import GeminiProvider
 from intelligence.market_research import (
-    MarketEvidence,
     MarketResearchEngine,
-    _EDUCATIONAL_CONTEXT_MESSAGE,
-    _UNAVAILABLE_MESSAGE,
 )
 from intelligence.router import IntelligenceRouter, IntentKind
 

@@ -20,6 +20,12 @@ from assistant.conversation_store import ConversationStore
 from assistant.errors import AssistantProviderError
 from assistant.grounding import build_system_context
 from assistant.provider import AssistantProvider, AssistantRequest
+from assistant.response_quality import (
+    QUALITY_SYSTEM_PROMPT,
+    ResponseComposer,
+    ResponsePresentation,
+    public_error_message,
+)
 from events.service import EventService
 from intelligence.router import IntelligenceRouter, IntentKind
 from intelligence.strategy_evaluation import StrategyEvaluationEngine
@@ -49,6 +55,36 @@ class RouterReply:
     conversation_id: str
     user_message: AssistantMessage
     assistant_message: AssistantMessage
+    presentation: ResponsePresentation | None = None
+
+    @property
+    def display_text(self) -> str:
+        return (
+            self.presentation.display_text
+            if self.presentation is not None
+            else self.assistant_message.content
+        )
+
+    @property
+    def speech_text(self) -> str:
+        if self.presentation is not None:
+            return self.presentation.speech_text
+        return ResponseComposer().compose(
+            user_text=self.user_message.content,
+            display_text=self.assistant_message.content,
+        ).speech_text
+
+    def to_response_dict(self) -> dict[str, Any]:
+        """V2 envelope; the nested message remains the frozen v1 contract."""
+
+        presentation = self.presentation or ResponseComposer().compose(
+            user_text=self.user_message.content,
+            display_text=self.assistant_message.content,
+        )
+        return {
+            "message": self.assistant_message.to_contract_dict(),
+            **presentation.to_dict(),
+        }
 
 
 class AssistantRouter:
@@ -65,6 +101,7 @@ class AssistantRouter:
         self._provider = provider
         self._memory = memory_service
         self._trace_store = trace_store
+        self._composer = ResponseComposer()
         self._intelligence_router = IntelligenceRouter(
             provider=self._provider,
             memory_service=self._memory,
@@ -118,11 +155,18 @@ class AssistantRouter:
             else:
                 assistant_message = await self._call_provider(text, conversation_id)
 
+        presentation = self._composer.compose(
+            user_text=text,
+            display_text=assistant_message.content,
+            grounding_context="deterministic-router",
+        )
+        assistant_message.content = presentation.display_text
         await self._save(assistant_message)
         return RouterReply(
             conversation_id=conversation_id,
             user_message=user_message,
             assistant_message=assistant_message,
+            presentation=presentation,
         )
 
     async def handle_text_stream(self, text: str, conversation_id: str | None):
@@ -141,17 +185,26 @@ class AssistantRouter:
 
         intent, deterministic_text = await self._try_deterministic(text)
         if deterministic_text is not None:
+            presentation = self._composer.compose(
+                user_text=text,
+                display_text=deterministic_text,
+                grounding_context="deterministic-router",
+            )
             assistant_message = AssistantMessage(
                 conversation_id=UUID(conversation_id),
                 role=MessageRole.assistant,
-                content=deterministic_text,
+                content=presentation.display_text,
                 input_mode=InputMode.text,
                 intent=intent,
                 providers=MessageProviders(assistant="deterministic"),
             )
             await self._save(assistant_message)
-            yield {"type": "delta", "text": deterministic_text}
-            yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+            yield {"type": "delta", "text": presentation.display_text}
+            yield {
+                "type": "complete",
+                "message": assistant_message.to_contract_dict(),
+                **presentation.to_dict(),
+            }
             return
 
         classified_intent = self._intelligence_router.classify_intent(text)
@@ -172,16 +225,25 @@ class AssistantRouter:
                     if event.get("text"):
                         accumulated = event["text"]
 
+            presentation = self._composer.compose(
+                user_text=text,
+                display_text=accumulated,
+                grounding_context="deterministic-intelligence-router",
+            )
             assistant_message = AssistantMessage(
                 conversation_id=UUID(conversation_id),
                 role=MessageRole.assistant,
-                content=accumulated,
+                content=presentation.display_text,
                 input_mode=InputMode.text,
                 intent=classified_intent.value,
                 providers=MessageProviders(assistant=provider_used),
             )
             await self._save(assistant_message)
-            yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+            yield {
+                "type": "complete",
+                "message": assistant_message.to_contract_dict(),
+                **presentation.to_dict(),
+            }
             return
 
         active = await self._events.get_active_setups()
@@ -201,7 +263,10 @@ class AssistantRouter:
         request = AssistantRequest(
             text=text,
             conversation_id=conversation_id,
-            system_context=build_system_context(active, memory_notes=memory_notes),
+            system_context=(
+                f"{build_system_context(active, memory_notes=memory_notes)}\n\n"
+                f"{QUALITY_SYSTEM_PROMPT}"
+            ),
             history=history,
         )
 
@@ -218,26 +283,37 @@ class AssistantRouter:
                     elif event.get("type") == "complete":
                         accumulated = event.get("text", accumulated)
                         final_provider = event.get("provider", final_provider)
-            except AssistantProviderError as exc:
+            except AssistantProviderError:
+                user_error = public_error_message()
+                presentation = self._composer.compose(
+                    user_text=text,
+                    display_text=user_error,
+                )
                 assistant_message = AssistantMessage(
                     conversation_id=UUID(conversation_id),
                     role=MessageRole.assistant,
-                    content=(
-                        "I couldn't reach the configured assistant provider "
-                        f"({self._provider.name}) to answer that."
-                    ),
+                    content=presentation.display_text,
                     input_mode=InputMode.text,
                     providers=MessageProviders(assistant=self._provider.name),
-                    error=str(exc),
+                    error=user_error,
                 )
                 await self._save(assistant_message)
-                yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+                yield {
+                    "type": "complete",
+                    "message": assistant_message.to_contract_dict(),
+                    **presentation.to_dict(),
+                }
                 return
 
+            presentation = self._composer.compose(
+                user_text=text,
+                display_text=accumulated,
+                grounding_context=request.system_context,
+            )
             assistant_message = AssistantMessage(
                 conversation_id=UUID(conversation_id),
                 role=MessageRole.assistant,
-                content=accumulated,
+                content=presentation.display_text,
                 input_mode=InputMode.text,
                 providers=MessageProviders(assistant=final_provider),
             )
@@ -246,10 +322,25 @@ class AssistantRouter:
             # call, delivered as a single delta so callers still only ever
             # handle the delta/complete shape.
             assistant_message = await self._call_provider(text, conversation_id)
-            yield {"type": "delta", "text": assistant_message.content}
+            presentation = self._composer.compose(
+                user_text=text,
+                display_text=assistant_message.content,
+                grounding_context=request.system_context,
+            )
+            assistant_message.content = presentation.display_text
+            yield {"type": "delta", "text": presentation.display_text}
 
         await self._save(assistant_message)
-        yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+        presentation = self._composer.compose(
+            user_text=text,
+            display_text=assistant_message.content,
+            grounding_context=request.system_context,
+        )
+        yield {
+            "type": "complete",
+            "message": assistant_message.to_contract_dict(),
+            **presentation.to_dict(),
+        }
 
     async def _try_deterministic(self, text: str) -> tuple[str | None, str | None]:
         if _ACTIVE_SETUPS_PATTERN.search(text):
@@ -292,7 +383,10 @@ class AssistantRouter:
         request = AssistantRequest(
             text=text,
             conversation_id=conversation_id,
-            system_context=build_system_context(active, memory_notes=memory_notes),
+            system_context=(
+                f"{build_system_context(active, memory_notes=memory_notes)}\n\n"
+                f"{QUALITY_SYSTEM_PROMPT}"
+            ),
             history=history,
         )
         request_id = uuid4().hex
@@ -316,16 +410,14 @@ class AssistantRouter:
                     provider_id=self._provider.name,
                     error=str(exc),
                 )
+                user_error = public_error_message()
                 return AssistantMessage(
                     conversation_id=UUID(conversation_id),
                     role=MessageRole.assistant,
-                    content=(
-                        "I couldn't reach the configured assistant provider "
-                        f"({self._provider.name}) to answer that."
-                    ),
+                    content=user_error,
                     input_mode=InputMode.text,
                     providers=MessageProviders(assistant=self._provider.name),
-                    error=str(exc),
+                    error=user_error,
                 )
 
         await self._record_trace(
@@ -336,10 +428,15 @@ class AssistantRouter:
             provider_id=reply.provider,
             provider_latency_ms=reply.diagnostics.latency_ms if reply.diagnostics else None,
         )
+        presentation = self._composer.compose(
+            user_text=text,
+            display_text=reply.text,
+            grounding_context=request.system_context,
+        )
         return AssistantMessage(
             conversation_id=UUID(conversation_id),
             role=MessageRole.assistant,
-            content=reply.text,
+            content=presentation.display_text,
             input_mode=InputMode.text,
             providers=MessageProviders(assistant=reply.provider),
         )
