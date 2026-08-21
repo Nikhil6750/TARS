@@ -6,7 +6,6 @@ Reports strict availability / missing provider errors with zero silent fallback.
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 import time
 from datetime import UTC, datetime
@@ -52,8 +51,10 @@ class GeminiProvider(AssistantProvider):
                 "install it or configure GEMINI_COMMAND"
             )
 
+        command = self._command
+        assert command is not None
         prompt = request.text
-        base_args = [self._command, "-p", prompt]  # type: ignore[list-item]
+        base_args = [command, "-p", prompt]
         if request.system_context:
             base_args += ["--system-prompt", request.system_context]
 

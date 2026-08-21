@@ -32,6 +32,7 @@ from app.action_contracts import ActionRequest, ActionSource, ActionStatus
 from app.latency import LatencyTracker
 from app.schemas import AssistantMessage, InputMode, MessageProviders, MessageRole
 from assistant.conversation_store import ConversationStore
+from assistant.response_quality import ResponseComposer
 from assistant.router import AssistantRouter, RouterReply
 from memory.service import MemoryService
 from orchestrator import patterns
@@ -86,6 +87,7 @@ class TarsOrchestrator:
         # constructed fresh per request -- an in-process dict here would be
         # wiped between the "install this?" turn and the "confirm" turn.
         self._skill_state = pending_skill_confirmations if pending_skill_confirmations is not None else {}
+        self._response_composer = ResponseComposer()
 
     async def handle_text(self, text: str, conversation_id: str | None) -> RouterReply:
         conversation_id = conversation_id or str(uuid4())
@@ -122,11 +124,18 @@ class TarsOrchestrator:
             intent=intent,
             providers=MessageProviders(assistant="deterministic"),
         )
+        presentation = self._response_composer.compose(
+            user_text=text,
+            display_text=assistant_message.content,
+            grounding_context="authoritative-action-runtime",
+        )
+        assistant_message.content = presentation.display_text
         await self._save(assistant_message)
         return RouterReply(
             conversation_id=conversation_id,
             user_message=user_message,
             assistant_message=assistant_message,
+            presentation=presentation,
         )
 
     async def handle_text_stream(self, text: str, conversation_id: str | None):
@@ -167,9 +176,19 @@ class TarsOrchestrator:
             intent=intent,
             providers=MessageProviders(assistant="deterministic"),
         )
+        presentation = self._response_composer.compose(
+            user_text=text,
+            display_text=assistant_message.content,
+            grounding_context="authoritative-action-runtime",
+        )
+        assistant_message.content = presentation.display_text
         await self._save(assistant_message)
-        yield {"type": "delta", "text": reply_text}
-        yield {"type": "complete", "message": assistant_message.to_contract_dict()}
+        yield {"type": "delta", "text": presentation.display_text}
+        yield {
+            "type": "complete",
+            "message": assistant_message.to_contract_dict(),
+            **presentation.to_dict(),
+        }
 
     # ---- routing ----------------------------------------------------------
 
@@ -497,11 +516,8 @@ class TarsOrchestrator:
         result = await self._dispatch_skill("use_skill", {"identifier": identifier, "task": task}, conversation_id)
         self._skill_state.setdefault(conversation_id, {})["last_identifier"] = identifier
         if result.status != ActionStatus.SUCCEEDED:
-            diag = (result.data or {}).get("diagnostics", {})
             return (
-                f"Skill execution failed for `{identifier}`: {result.error}. "
-                f"(attempts={diag.get('attempts')}, exit={diag.get('returncode')}, "
-                f"events={diag.get('event_count')})"
+                f"Skill execution failed for `{identifier}`. Please try again."
             ), "skill_use"
         return result.data["answer"], "skill_use"
 

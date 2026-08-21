@@ -344,13 +344,19 @@ async def record_audit(
 
 async def catalog_summary(conn: aiosqlite.Connection) -> dict[str, Any]:
     total_cursor = await conn.execute("SELECT COUNT(*) AS n FROM skill_catalog")
-    total = (await total_cursor.fetchone())["n"]
+    total_row = await total_cursor.fetchone()
+    assert total_row is not None
+    total = total_row["n"]
     trusted_cursor = await conn.execute(
         "SELECT COUNT(*) AS n FROM skill_catalog WHERE trust_level IN ('builtin','official','verified')"
     )
-    trusted = (await trusted_cursor.fetchone())["n"]
+    trusted_row = await trusted_cursor.fetchone()
+    assert trusted_row is not None
+    trusted = trusted_row["n"]
     installed_cursor = await conn.execute("SELECT COUNT(*) AS n FROM installed_skills WHERE status = 'installed'")
-    installed = (await installed_cursor.fetchone())["n"]
+    installed_row = await installed_cursor.fetchone()
+    assert installed_row is not None
+    installed = installed_row["n"]
     sources_cursor = await conn.execute("SELECT source, record_count, last_synced_at FROM skill_sources ORDER BY record_count DESC")
     sources = [dict(r) for r in await sources_cursor.fetchall()]
     return {

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 
-
 _DEV_LEAK_PATTERNS = [
     re.compile(r"c:\\tars[^\s\n]*", re.IGNORECASE),
     re.compile(r"branch:\s*feature/[^\s\n]*", re.IGNORECASE),

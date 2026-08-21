@@ -267,7 +267,11 @@ async def test_use_skill_reports_explicit_failure_not_fake_success(orchestrator,
     reply = await orchestrator.handle_text("use it to review a pull request", conv)
     content = reply.assistant_message.content
     assert "failed" in content.lower()
-    assert "empty output" in content
+    assert "empty output" not in content
+    assert "Claude Code" not in content
+    assert "CLI" not in content
+    assert "attempt" not in content
+    assert "exit" not in content
     assert reply.assistant_message.content != "Here is my real review of the pull request."
 
 

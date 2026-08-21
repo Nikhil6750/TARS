@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
+import os
 import re
+import shutil
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +23,7 @@ from assistant.provider import (
     AssistantReply,
     AssistantRequest,
     ProviderDiagnostics,
+    render_provider_prompt,
 )
 
 # asyncio.create_subprocess_exec's stdout defaults to a 64KB StreamReader
@@ -54,11 +57,27 @@ def sanitize_user_facing_text(text: str) -> str:
 class ClaudeCodeProvider(AssistantProvider):
     name = "claude_code"
 
-    def __init__(self, command: str = "claude", timeout_seconds: float = 60.0):
+    def __init__(
+        self,
+        command: str = "claude",
+        timeout_seconds: float = 60.0,
+        *,
+        working_directory: str | None = None,
+        persist_sessions: bool = True,
+    ):
         self._raw_command = command
         self._command = shutil.which(command) or command
         self._timeout = timeout_seconds
+        self._working_directory = working_directory or str(
+            Path(tempfile.gettempdir()) / "tars-assistant-runtime"
+        )
+        Path(self._working_directory).mkdir(parents=True, exist_ok=True)
+        self._persist_sessions = persist_sessions
         self._sessions: dict[str, str] = {}
+
+    @property
+    def is_available(self) -> bool:
+        return shutil.which(self._raw_command) is not None or Path(self._command).is_file()
 
     def _resume_args(self, conversation_id: str) -> list[str]:
         session_id = self._sessions.get(conversation_id)
@@ -71,7 +90,7 @@ class ClaudeCodeProvider(AssistantProvider):
     async def respond(self, request: AssistantRequest) -> AssistantReply:
         started_at = datetime.now(UTC).isoformat()
         t0 = time.perf_counter()
-        prompt = request.text
+        prompt = render_provider_prompt(request)
         allowed_tools: list[str] = []
         extra_dir: str | None = None
         if request.image_path:
@@ -79,17 +98,29 @@ class ClaudeCodeProvider(AssistantProvider):
             allowed_tools = ["Read"]
             extra_dir = str(Path(request.image_path).parent)
 
-        base_args = [self._command, "-p", prompt, "--output-format", "json"]
+        base_args = [
+            self._command,
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--setting-sources",
+            "user",
+        ]
         system_context = request.system_context or ""
         # Instruction to prevent ungrounded tool searching
         system_context += "\nDo not invoke external search tools or invent current unretrieved facts."
         base_args += ["--append-system-prompt", system_context]
         if allowed_tools:
             base_args += ["--allowedTools", *allowed_tools]
+        else:
+            base_args += ["--tools", ""]
         if extra_dir:
             base_args += ["--add-dir", extra_dir]
+        if not self._persist_sessions:
+            base_args += ["--no-session-persistence"]
 
-        resume_args = self._resume_args(request.conversation_id)
+        resume_args = self._resume_args(request.conversation_id) if self._persist_sessions else []
         returncode, stdout, stderr = await self._run_cli(base_args + resume_args)
         if returncode != 0 and resume_args:
             self._sessions.pop(request.conversation_id, None)
@@ -147,6 +178,8 @@ class ClaudeCodeProvider(AssistantProvider):
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=self._working_directory,
+                env=_claude_subprocess_env(),
             )
         except FileNotFoundError as exc:
             raise AssistantProviderError(
@@ -167,7 +200,7 @@ class ClaudeCodeProvider(AssistantProvider):
         return process.returncode or 0, stdout, stderr
 
     async def respond_stream(self, request: AssistantRequest):
-        prompt = request.text
+        prompt = render_provider_prompt(request)
         allowed_tools: list[str] = []
         extra_dir: str | None = None
         if request.image_path:
@@ -175,18 +208,32 @@ class ClaudeCodeProvider(AssistantProvider):
             allowed_tools = ["Read"]
             extra_dir = str(Path(request.image_path).parent)
 
-        args = [self._command, "-p", prompt, "--output-format", "stream-json", "--verbose"]
+        args = [
+            self._command,
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--setting-sources",
+            "user",
+        ]
         system_context = request.system_context or ""
         system_context += "\nDo not invoke external search tools or invent current unretrieved facts."
         args += ["--append-system-prompt", system_context]
         if allowed_tools:
             args += ["--allowedTools", *allowed_tools]
+        else:
+            args += ["--tools", ""]
         if extra_dir:
             args += ["--add-dir", extra_dir]
         # Best-effort session reuse only here (no stale-session retry, unlike
         # respond() -- streaming may have already yielded partial content by
         # the time a failure surfaces, so silently restarting isn't safe).
-        args += self._resume_args(request.conversation_id)
+        if self._persist_sessions:
+            args += self._resume_args(request.conversation_id)
+        else:
+            args += ["--no-session-persistence"]
         session_id: str | None = None
 
         try:
@@ -196,6 +243,8 @@ class ClaudeCodeProvider(AssistantProvider):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=CLAUDE_STREAM_READER_LIMIT_BYTES,
+                cwd=self._working_directory,
+                env=_claude_subprocess_env(),
             )
         except FileNotFoundError as exc:
             raise AssistantProviderError(
@@ -203,6 +252,8 @@ class ClaudeCodeProvider(AssistantProvider):
                 "install it or set CLAUDE_CODE_COMMAND to its full path"
             ) from exc
 
+        assert process.stdout is not None
+        assert process.stderr is not None
         accumulated_text = ""
         emitted_length = 0
         final_result_text = ""
@@ -274,4 +325,13 @@ class ClaudeCodeProvider(AssistantProvider):
             process.kill()
             await process.wait()
             raise
+
+
+def _claude_subprocess_env() -> dict[str, str]:
+    """Keep authentication but remove parent-agent recursion markers."""
+
+    env = dict(os.environ)
+    for name in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID"):
+        env.pop(name, None)
+    return env
 

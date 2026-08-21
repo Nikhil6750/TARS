@@ -71,3 +71,21 @@ class AssistantProvider(ABC):
     @abstractmethod
     async def respond(self, request: AssistantRequest) -> AssistantReply:
         """Raises AssistantProviderError on any failure to produce a reply."""
+
+
+def render_provider_prompt(request: AssistantRequest) -> str:
+    """Render bounded conversation context for stateless provider adapters."""
+
+    history = request.history[-8:]
+    if history and history[-1].get("role") == "user" and history[-1].get("content") == request.text:
+        history = history[:-1]
+    if not history:
+        return request.text
+    lines = ["Relevant conversation context:"]
+    for turn in history:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        content = str(turn.get("content", "")).strip()
+        if content:
+            lines.append(f"{role}: {content[:2000]}")
+    lines.extend(("", "Current user request:", request.text))
+    return "\n".join(lines)

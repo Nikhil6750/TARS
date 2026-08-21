@@ -8,8 +8,10 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import tempfile
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from assistant.errors import AssistantProviderError
 from assistant.provider import (
@@ -17,16 +19,27 @@ from assistant.provider import (
     AssistantReply,
     AssistantRequest,
     ProviderDiagnostics,
+    render_provider_prompt,
 )
 
 
 class CodexProvider(AssistantProvider):
     name = "codex"
 
-    def __init__(self, command: str = "codex", timeout_seconds: float = 60.0):
+    def __init__(
+        self,
+        command: str = "codex",
+        timeout_seconds: float = 60.0,
+        *,
+        working_directory: str | None = None,
+    ):
         self._raw_command = command
         self._command = shutil.which(command)
         self._timeout = timeout_seconds
+        self._working_directory = working_directory or str(
+            Path(tempfile.gettempdir()) / "tars-assistant-runtime"
+        )
+        Path(self._working_directory).mkdir(parents=True, exist_ok=True)
 
     @property
     def is_available(self) -> bool:
@@ -52,27 +65,37 @@ class CodexProvider(AssistantProvider):
                 "install it or configure CODEX_COMMAND"
             )
 
-        prompt = request.text
+        prompt = render_provider_prompt(request)
         if request.system_context:
             prompt = f"System Context:\n{request.system_context}\n\nTask:\n{prompt}"
 
+        command = self._command
+        assert command is not None
         base_args = [
-            self._command,
+            command,
             "exec",
             "--ephemeral",
             "--json",
-            prompt,
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "--ignore-rules",
+            "--ignore-user-config",
+            "-C",
+            self._working_directory,
+            "-",
         ]
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *base_args,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=self._working_directory,
             )
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self._timeout
+                process.communicate(input=prompt.encode("utf-8")), timeout=self._timeout
             )
         except TimeoutError as exc:
             process.kill()
@@ -116,7 +139,7 @@ class CodexProvider(AssistantProvider):
 
         diagnostics = ProviderDiagnostics(
             provider_id=self.name,
-            provider_executable=self._command,
+            provider_executable=command,
             model=model_name,
             request_id=thread_id,
             started_at=started_at,

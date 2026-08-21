@@ -14,7 +14,7 @@ import re
 from enum import Enum
 from typing import Any
 
-from assistant.provider import AssistantProvider, AssistantRequest
+from assistant.provider import AssistantProvider
 from intelligence.market_research import MarketResearchEngine
 from intelligence.strategy_evaluation import StrategyEvaluationEngine
 from intelligence.trade_calculation import TradeCalculationEngine

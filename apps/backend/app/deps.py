@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from agent_runtime.runtime import AgentRuntime as AgentJobRuntime
     from agents.base import Agent, AgentRuntime
     from app.voice_state import VoiceProviders
+    from app.voice_telemetry import VoiceTraceStore
     from assistant.chart_analysis import ChartAnalysisService
     from assistant.chart_watch import ChartWatchService
     from assistant.hot_chart_state_store import HotChartStateStore
@@ -95,6 +96,10 @@ def get_chart_analysis_service(request: Request) -> ChartAnalysisService:
 
 def get_latency_trace_store(request: Request) -> LatencyTraceStore:
     return request.app.state.latency_trace_store
+
+
+def get_voice_trace_store(request: Request) -> VoiceTraceStore:
+    return request.app.state.voice_trace_store
 
 
 def get_chart_watch_service(request: Request) -> ChartWatchService:

@@ -135,4 +135,7 @@ def test_analyze_chart_surfaces_provider_failure_as_502_never_fabricated_success
         json={"capture": {"image_data_base64": _png_data_uri(), "image_format": "image/png"}},
     )
     assert resp.status_code == 502
-    assert "claude CLI not found" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert detail == "I couldn't analyze that chart right now. Please try again."
+    assert "claude" not in detail.lower()
+    assert "cli" not in detail.lower()

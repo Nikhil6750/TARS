@@ -86,7 +86,7 @@ async def main() -> None:
     results.append(await run_batch("MEDIUM skill", MEDIUM_SKILL, task, count=3))
     results.append(await run_batch("LARGE skill", LARGE_SKILL, task, count=3))
 
-    print(f"\n=== 20x repeated real executions of the SAME skill/request (MEDIUM skill) ===")
+    print("\n=== 20x repeated real executions of the SAME skill/request (MEDIUM skill) ===")
     repeated = await run_batch("MEDIUM skill x20", MEDIUM_SKILL, task, count=20)
     results.append(repeated)
 

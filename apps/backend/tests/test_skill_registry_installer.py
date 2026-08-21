@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from skill_registry.categorize import categorize, safe_folder_slug
-from skill_registry.installer import UnresolvableSourceError, download_to_quarantine, promote_to_vault
+from skill_registry.installer import (
+    UnresolvableSourceError,
+    download_to_quarantine,
+    promote_to_vault,
+)
 from skill_registry.validation import compute_bundle_hash, validate_quarantined_bundle
 
 
