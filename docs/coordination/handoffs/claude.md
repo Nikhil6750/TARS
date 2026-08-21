@@ -11,6 +11,157 @@ for that).
 
 ---
 
+## Latest handoff — Alexa-speed hot-state, Phases E-H: deep verification, provider health, benchmark harness (2026-08-21)
+
+**Branch**: `feature/realtime-hot-state`
+**Base SHA**: `17713e4` (unchanged across the whole effort)
+**Final SHA**: `4eec097` (Phase E: `b636287`, Phase G: `f601f57`, Phase H: `4eec097`)
+
+All eight phases of the Alexa-speed hot-state architecture are now
+implemented and committed on this branch, not merged anywhere. See the
+Phase A/B+C/D entries below for the earlier phases; this entry covers the
+remainder plus a scope note on Phase F.
+
+**Phase E — async deep verification** (`b636287`): after a fast response,
+the router now schedules `assistant/deep_verification.py`'s
+`run_deep_verification()` via FastAPI `BackgroundTasks` -- runs a real
+re-verification vision call after the response has already gone out,
+compares it against what was served (`materially_different()`: bias,
+setup, action, invalidation, key levels -- never wording-only changes),
+and updates `HotChartState` for the *next* request if it genuinely
+differs. Caught a real integration bug via a corrected test before this
+shipped: the router passes `ChartAnalysisResult.to_dict()`'s output
+(which adds `speech_text`/`formatted_tars_text`) as the "served" payload
+to compare against, and reconstructing a `ChartAnalysisResult` from that
+dict directly would reject those two extra keys -- fixed by filtering to
+known dataclass fields before reconstructing, and by changing the test to
+use the same `.to_dict()` the router actually calls (a `dataclasses.
+asdict()`-based version of the test had missed this entirely). No push
+channel exists yet to proactively notify an already-answered user of a
+correction -- same "no consumer yet" reasoning Phase C used to defer its
+own broadcast wiring.
+
+**Phase F — voice latency: mostly already true, one piece not
+implementable as scoped**. Confirmed via Phase A's recon: STT
+(faster-whisper) and TTS (Kokoro) are already warm singletons loaded once
+at startup, not per-request, and TTS is already sentence-chunked. The one
+remaining piece in the original plan -- partial-transcript prefetch (Part
+12: "begin intent detection from partial transcript") -- turns out not to
+be buildable as a "narrow" addition: `faster-whisper` in this codebase is
+used as a **batch** transcriber, only run after `wake_engine.rs`'s
+silence-based utterance finalization, not a streaming ASR that emits
+partial hypotheses mid-utterance. There is no partial-transcript signal
+anywhere in the current pipeline to hook into. Implementing genuine
+partial-transcript prefetch would require adding real streaming STT first
+-- a separate, materially larger undertaking, not a small addition to this
+effort. Reported honestly rather than building something cosmetic that
+looks like prefetch but has no real partial signal driving it.
+
+**Phase G — provider health tracking** (`f601f57`):
+`assistant/provider_health.py`'s `ProviderHealthTracker` computes real
+success rate / P50 / P90 / P95 / last error from Phase A's `request_traces`
+table -- this repo's own recorded evidence, never assumed numbers.
+Exposed at `GET /api/v1/diagnostics/provider-health` (same dev-only
+exposure level as the existing latency/readiness endpoints). Scope stated
+honestly: this repo has exactly one vision-capable provider adapter
+(`ClaudeCodeProvider` -- `build_chart_assistant_provider()` always returns
+it), so there is no second real candidate to dynamically route
+chart-analysis requests between yet. `healthiest()` is a real, tested
+selection helper (success-rate-first, then lowest P50) usable once/where
+more than one provider genuinely serves the same capability -- not wired
+into `AssistantRouter`/`ChartAnalysisService`'s construction this session,
+since both are built once at app startup from static config today; making
+provider choice a genuine per-request decision is a separate, larger
+structural change than "add health tracking off telemetry."
+
+**Phase H — benchmark harness, and the acceptance evidence itself**
+(`4eec097`): `scripts/chart_latency_benchmark.py`, a real CLI driving
+warm/cold runs against a live backend with a real chart image, reporting
+P50/P90/P95/max plus Part 25's quality checklist (a fast-but-fabricated
+response fails the run). Uses `httpx` (already pinned) rather than adding
+`requests` as a new dependency -- caught mid-session that `requests` was
+only ever present in this environment via unrelated third-party packages,
+not anything this repo declares.
+
+**Actually run, not just built** -- the headline acceptance numbers for
+the whole effort:
+
+| | P50 | P90 | P95 | max | sample |
+|---|---|---|---|---|---|
+| **Warm path** (real backend, real chart, real HotChartState) | 0.744s | 1.511s | 1.714s | 2.140s | 20 runs, 0 errors, 0 quality failures |
+| **Cold path** (formal tool cross-check) | 26.0s | 28.3s | 28.7s | 29.1s | 5 runs, 0 errors, 0 quality failures |
+| **Cold path** (Phase A's original live baseline) | 24.3s | 28.3s | 28.5s | 28.7s | 7 runs |
+
+Part 24's acceptance bar (>=18/20 warm runs within ~5s) is cleared with
+the full 20/20, and every single warm run landed under 2.2s -- not a
+narrow pass. A bug in the harness itself (60s client timeout, too tight
+for at least one real vision call observed exceeding it) was caught and
+fixed by actually running the tool against a live backend, not by
+inspection.
+
+**Files changed this entry**: `apps/backend/assistant/{deep_verification,
+provider_health}.py` (new), `apps/backend/app/routers/diagnostics.py`
+(new endpoint), `apps/backend/app/routers/assistant.py` (background task
+wiring), `apps/backend/scripts/chart_latency_benchmark.py` (new),
+`apps/backend/tests/test_{deep_verification,provider_health,
+chart_latency_benchmark}.py` (new), `test_analyze_chart_fast_path.py` /
+`test_diagnostics_router.py` (added cases).
+
+**Tests run**: 13 `deep_verification` cases, 7 `provider_health` cases, 8
+`chart_latency_benchmark` pure-logic cases, plus router-level integration
+tests for background-task scheduling and the new diagnostics endpoint.
+Full backend suite: **628 passed** on the final clean run (an earlier run
+this session showed one flaky, pre-existing `test_skill_desktop_control.py`
+failure -- confirmed passing 20/20 in isolation and on the next full run,
+consistent with this repo's own documented `SetForegroundWindow`/UIA
+flakiness history, not a regression). `ruff check` and `mypy` clean
+throughout (same 7 pre-existing, untouched errors in provider adapters and
+`skill_registry/db.py`).
+
+**Known limitations, stated plainly for whoever picks this up next**:
+- No WebSocket "state updated" push exists yet (Phase C deferred it, Phase
+  E's corrections currently only affect the *next* request, not an
+  in-flight conversation).
+- Fast path only serves `Freshness.HOT` state, not `WARM` (a documented,
+  deliberate scope decision from Phase D -- `WARM` needs an "as of Ns ago"
+  honesty caveat that doesn't exist yet).
+- Symbol/timeframe-change detection relies entirely on the vision call
+  itself plus the perceptual-hash content check -- the originally
+  discussed cheap OCR pre-check (`Windows.Media.Ocr`) was never built;
+  the perceptual-hash approach closes the correctness gap it would have
+  addressed, but OCR would let the *watcher* detect a symbol switch
+  without waiting for its own vision-call cooldown to elapse.
+- Provider health tracking exists but isn't wired into a live routing
+  decision (Phase G, above) -- no second vision-capable provider exists to
+  route between yet.
+- No multi-hour resource/CPU/RAM profile of the watcher running
+  continuously (Part 21) -- only interactive capture cycles were exercised
+  this session.
+- HASH_DIFF_THRESHOLD (14/256 bits, both Rust and Python sides) is a
+  reasoned starting constant, not empirically tuned against a large
+  real-world sample.
+
+**Exact dependencies required from other agents**: same as every prior
+entry in this arc -- `apps/web/src-tauri/` was touched across Phases C/D
+(new files + two additive `ScreenCaptureResult`/`Cargo.toml` changes,
+nothing existing modified); flagged for Antigravity/coordinator review
+before any merge. `apps/web/src/types/actions.ts` also touched (additive
+field only).
+
+**Next recommended action**: a coordinator decides whether to merge this
+branch (not attempted automatically, per the task's own instruction).
+Before merging: install `apps/web` node_modules and do a real Tauri build
++ manual capture test in an environment with a GPU/real display (this
+session's `cargo check`/`cargo test`/live captures all ran directly on the
+target machine already, but a full packaged-app smoke test is still
+worth doing before shipping). If pursued further: real OCR-based
+symbol/timeframe detection for the watcher, WARM-tier fast responses with
+an honesty caveat, the WebSocket state-update push once Phase D/E have a
+real UI consumer to notify, and streaming STT as a prerequisite for any
+real partial-transcript prefetch.
+
+---
+
 ## Latest handoff — Alexa-speed hot-state, Phase D: real fast-path proof (2026-08-21)
 
 **Branch**: `feature/realtime-hot-state`
