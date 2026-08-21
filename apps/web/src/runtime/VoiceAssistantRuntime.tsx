@@ -163,8 +163,15 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({
             setStreamedAnswer((prev) => prev + chunk);
             accumulateStreamingSpeech(chunk);
           },
-          onComplete: () => {
-            flushPendingSentence();
+          onComplete: (payload) => {
+            if (payload?.display_text) {
+              setStreamedAnswer(payload.display_text);
+            }
+            if (payload?.speech_text && ttsQueueRef.current.length === 0 && !pendingSentenceRef.current.trim()) {
+              enqueueSentence(payload.speech_text);
+            } else {
+              flushPendingSentence();
+            }
             void drainTtsQueue().then(finishTurn);
           },
           onError: (detail) => {

@@ -28,6 +28,7 @@ import { nativeBridge } from './services/native-bridge';
 import { ChartAnalysisData } from './components/hud/ChartAnalysisCard';
 import { VoiceAssistantRuntime } from './runtime/VoiceAssistantRuntime';
 import { assistantClient } from './runtime/AssistantClient';
+import { composeSpeech } from './services/speech';
 
 import { AppShell } from './components/shell/AppShell';
 import { ConversationView } from './components/assistant/ConversationView';
@@ -294,14 +295,15 @@ export const App: React.FC = () => {
       if (msg.role === 'assistant') {
         setCompanionState('SPEAKING');
 
-        if (settings.audioEnabled && msg.content) {
+        const speechContent = msg.speech_text || (msg.content ? composeSpeech(msg.display_text || msg.content) : '');
+        if (settings.audioEnabled && speechContent) {
           audioService
-            .synthesizeAndPlay(msg.content, settings.apiEndpoint, (vol) => {
+            .synthesizeAndPlay(speechContent, settings.apiEndpoint, (vol) => {
               setAudioVolume(vol);
             })
             .catch((ttsErr) => {
               console.warn('[TARS TTS] Backend synthesis error, fallback to browser synthesis:', ttsErr);
-              return audioService.speakText(msg.content, settings.speechRate, settings.speechVolume, (vol) => {
+              return audioService.speakText(speechContent, settings.speechRate, settings.speechVolume, (vol) => {
                 setAudioVolume(vol);
               });
             })
@@ -517,17 +519,19 @@ export const App: React.FC = () => {
           return;
         }
 
-        const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: transcript, conversation_id: convId }),
-        });
-
-        if (response.ok) {
-          const assistantReply: TARSAssistantMessage = await response.json();
-          handleIncomingAssistantMessage(assistantReply);
-          return;
-        }
+        const result = await assistantClient.query(
+          transcript,
+          convId,
+          settings.apiEndpoint
+        );
+        const assistantReply: TARSAssistantMessage = {
+          ...result.message,
+          content: result.display_text || result.message.content,
+          display_text: result.display_text,
+          speech_text: result.speech_text,
+        };
+        handleIncomingAssistantMessage(assistantReply);
+        return;
       } catch (err) {
         console.warn('[TARS Voice] Voice processing error:', err);
       }
@@ -753,11 +757,19 @@ export const App: React.FC = () => {
         }
         setStreamingAnswer((prev) => prev + chunk);
       },
-      onComplete: (message) => {
+      onComplete: (payload) => {
         console.info('[CHAT] complete');
         setStreamingAnswer('');
-        if (message) {
-          handleIncomingAssistantMessage(message as unknown as TARSAssistantMessage);
+        if (payload?.message) {
+          const assistantReply: TARSAssistantMessage = {
+            ...(payload.message as TARSAssistantMessage),
+            content: payload.display_text || (payload.message as TARSAssistantMessage).content,
+            display_text: payload.display_text,
+            speech_text: payload.speech_text,
+          };
+          handleIncomingAssistantMessage(assistantReply);
+        } else if (payload) {
+          handleIncomingAssistantMessage(payload as unknown as TARSAssistantMessage);
         } else {
           setCompanionState('IDLE');
           scheduleAutoHide(2500);

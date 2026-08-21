@@ -27,6 +27,7 @@ export interface WakeTimingTelemetry {
   command_ready_at?: number | null;
   duration_ms?: number | null;
   transcript?: string | null;
+  telemetry_id?: string | null;
 }
 
 export interface WakeClientCallbacks {

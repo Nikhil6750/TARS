@@ -25,7 +25,7 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
 
   const handleSpeak = () => {
     if (onSpeak) {
-      const speechText = composeSpeech(message.content);
+      const speechText = message.speech_text || composeSpeech(message.display_text || message.content);
       if (speechText) {
         onSpeak(speechText);
       }

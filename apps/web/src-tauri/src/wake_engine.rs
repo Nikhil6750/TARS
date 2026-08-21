@@ -52,6 +52,8 @@ pub struct WakeTimingTelemetry {
     pub command_ready_at: Option<u64>,
     pub duration_ms: Option<f32>,
     pub transcript: Option<String>,
+    #[serde(default)]
+    pub telemetry_id: Option<String>,
 }
 
 struct SharedState {
@@ -165,6 +167,7 @@ pub fn force_command_capture(app: Option<&AppHandle>) {
                 command_ready_at: None,
                 duration_ms: None,
                 transcript: None,
+                telemetry_id: None,
             },
         );
     }
@@ -190,6 +193,7 @@ pub fn set_playback_speaking(speaking: bool, app: &AppHandle) {
             command_ready_at: None,
             duration_ms: None,
             transcript: None,
+            telemetry_id: None,
         },
     );
 }
@@ -298,6 +302,7 @@ fn check_command_timeout(app: &AppHandle, state: &SharedState) {
                     command_ready_at: None,
                     duration_ms: None,
                     transcript: None,
+                    telemetry_id: None,
                 },
             );
         }
@@ -390,6 +395,7 @@ impl VadState {
                         command_ready_at: None,
                         duration_ms: None,
                         transcript: None,
+                        telemetry_id: None,
                     },
                 );
                 self.speech_frames = self.pre_roll.concat();
@@ -442,6 +448,7 @@ impl VadState {
                     command_ready_at: None,
                     duration_ms: Some(duration_ms),
                     transcript: None,
+                    telemetry_id: None,
                 },
             );
             return;
@@ -466,6 +473,7 @@ impl VadState {
                 command_ready_at: None,
                 duration_ms: Some(duration_ms),
                 transcript: None,
+                telemetry_id: None,
             },
         );
 
@@ -510,8 +518,8 @@ fn handle_utterance(
         .collect();
     let wav = encode_wav_i16(&pcm, sample_rate);
 
-    let transcript = match transcribe(&base_url, &wav) {
-        Ok(text) => text.trim().to_string(),
+    let (transcript, telemetry_id) = match transcribe(&base_url, &wav) {
+        Ok((text, trace_id)) => (text.trim().to_string(), trace_id),
         Err(err) => {
             eprintln!("[wake_engine] transcription failed: {err}");
             *state.state.lock().unwrap() = WakeState::Idle;
@@ -527,6 +535,7 @@ fn handle_utterance(
                     command_ready_at: None,
                     duration_ms: Some(duration_ms),
                     transcript: None,
+                    telemetry_id: None,
                 },
             );
             return;
@@ -549,6 +558,7 @@ fn handle_utterance(
                 command_ready_at: None,
                 duration_ms: Some(duration_ms),
                 transcript: None,
+                telemetry_id: telemetry_id.clone(),
             },
         );
         return;
@@ -579,6 +589,7 @@ fn handle_utterance(
                 command_ready_at: Some(now_ms),
                 duration_ms: Some(duration_ms),
                 transcript: Some(transcript.clone()),
+                telemetry_id: telemetry_id.clone(),
             },
         );
 
@@ -630,6 +641,7 @@ fn handle_utterance(
                     command_ready_at: Some(command_ready_at),
                     duration_ms: Some(duration_ms),
                     transcript: Some(clean_tail.clone()),
+                    telemetry_id: telemetry_id.clone(),
                 },
             );
 
@@ -664,6 +676,7 @@ fn handle_utterance(
                 command_ready_at: None,
                 duration_ms: Some(duration_ms),
                 transcript: Some(transcript.clone()),
+                telemetry_id: telemetry_id.clone(),
             },
         );
 
@@ -697,6 +710,7 @@ fn handle_utterance(
                     command_ready_at: Some(now_ms),
                     duration_ms: Some(duration_ms),
                     transcript: Some(transcript.clone()),
+                    telemetry_id: telemetry_id.clone(),
                 },
             );
 
@@ -718,6 +732,7 @@ fn handle_utterance(
                     command_ready_at: None,
                     duration_ms: Some(duration_ms),
                     transcript: Some(transcript),
+                    telemetry_id: telemetry_id.clone(),
                 },
             );
         }
@@ -738,6 +753,7 @@ fn handle_utterance(
             command_ready_at: None,
             duration_ms: Some(duration_ms),
             transcript: Some(transcript),
+            telemetry_id,
         },
     );
 }
@@ -768,7 +784,7 @@ fn encode_wav_i16(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     buf
 }
 
-fn transcribe(base_url: &str, wav_bytes: &[u8]) -> Result<String, String> {
+fn transcribe(base_url: &str, wav_bytes: &[u8]) -> Result<(String, Option<String>), String> {
     let boundary = "----tarswakeboundary7d8f3a";
     let mut body = Vec::with_capacity(wav_bytes.len() + 256);
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
@@ -792,9 +808,14 @@ fn transcribe(base_url: &str, wav_bytes: &[u8]) -> Result<String, String> {
     let text_body = response.into_string().map_err(|e| e.to_string())?;
     let json: serde_json::Value =
         serde_json::from_str(&text_body).map_err(|e| e.to_string())?;
-    Ok(json
+    let text = json
         .get("text")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .to_string())
+        .to_string();
+    let telemetry_id = json
+        .get("telemetry_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Ok((text, telemetry_id))
 }
