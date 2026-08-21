@@ -33,6 +33,7 @@ from app.routers import (
     action_plans,
     actions,
     assistant,
+    chart_watch,
     diagnostics,
     events,
     health,
@@ -163,6 +164,22 @@ async def lifespan(app: FastAPI):
         build_chart_assistant_provider(settings), trace_store=latency_trace_store
     )
     app.state.chart_analysis_service = chart_analysis_service
+
+    from assistant.chart_watch import ChartWatchService
+    from assistant.hot_chart_state_store import HotChartStateStore
+
+    app.state.chart_watch_service = ChartWatchService(
+        # A separate ChartAnalysisService instance (same provider factory,
+        # no trace_store) rather than reusing chart_analysis_service above:
+        # background-watcher vision calls are a distinct traffic class from
+        # user-triggered ones, and Phase A's request_traces table only
+        # tracks the kind="chart_analysis" latency the user is waiting on --
+        # conflating watcher-driven calls into the same trace stream would
+        # skew that baseline. Revisit if Phase G's provider routing wants
+        # watcher-call telemetry too.
+        ChartAnalysisService(build_chart_assistant_provider(settings)),
+        HotChartStateStore(db.conn),
+    )
 
     strategy_provider = build_strategy_provider(settings.quant_brain_base_url)
     app.state.strategy_provider = strategy_provider
@@ -306,6 +323,7 @@ def create_app() -> FastAPI:
     app.include_router(diagnostics.router)
     app.include_router(events.router)
     app.include_router(assistant.router)
+    app.include_router(chart_watch.router)
     app.include_router(memory.router)
     app.include_router(voice.router)
     app.include_router(ws.router)

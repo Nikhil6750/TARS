@@ -91,6 +91,28 @@ class HotChartStateStore:
             return None
         return _row_to_state(row)
 
+    async def get_latest_for_window(self, chart_window_id: str) -> HotChartState | None:
+        """Most-recently-analyzed row for this window, regardless of
+        symbol/timeframe -- used only for the watcher's own "do we already
+        have something fresh enough for this window" pre-check before
+        spending a vision call (assistant/chart_watch.py). Never used to
+        answer a user's chart-analysis request directly; that path (Phase
+        D) always requires the caller to supply the exact identity it
+        needs via `get()`, per Part 19's cache-correctness rule."""
+        cursor = await self._conn.execute(
+            """
+            SELECT * FROM hot_chart_state
+            WHERE chart_window_id = ?
+            ORDER BY analyzed_at DESC
+            LIMIT 1
+            """,
+            (chart_window_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_state(row)
+
     async def delete(self, identity: ChartIdentity) -> None:
         await self._conn.execute(
             """

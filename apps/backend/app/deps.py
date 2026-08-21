@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from agents.base import Agent, AgentRuntime
     from app.voice_state import VoiceProviders
     from assistant.chart_analysis import ChartAnalysisService
+    from assistant.chart_watch import ChartWatchService
     from assistant.provider import AssistantProvider
     from assistant.router import AssistantRouter
     from memory.service import MemoryService
@@ -93,6 +94,10 @@ def get_chart_analysis_service(request: Request) -> ChartAnalysisService:
 
 def get_latency_trace_store(request: Request) -> LatencyTraceStore:
     return request.app.state.latency_trace_store
+
+
+def get_chart_watch_service(request: Request) -> ChartWatchService:
+    return request.app.state.chart_watch_service
 
 
 def get_strategy_provider(request: Request) -> StrategyProvider:

@@ -8,6 +8,10 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 mod wake_engine;
+#[cfg(target_os = "windows")]
+mod capture_wgc;
+#[cfg(target_os = "windows")]
+mod chart_watcher;
 
 static CAPTURE_COUNTER: AtomicUsize = AtomicUsize::new(1);
 static LAST_EXTERNAL_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -1325,6 +1329,13 @@ pub fn run() {
             // run as a true background/tray app rather than a dashboard
             // that happens to also listen.
             wake_engine::start(app.handle().clone());
+
+            // Non-intrusive background chart observation (TARS Alexa-Speed
+            // Phase C): polls a discovered chart window via
+            // Windows.Graphics.Capture -- never hides/focuses TARS's own
+            // window, unlike the user-triggered capture_chart_window path.
+            #[cfg(target_os = "windows")]
+            chart_watcher::start(app.handle().clone());
 
             Ok(())
         })

@@ -34,6 +34,28 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_ProcessStatus",
     "Win32_Graphics_Gdi",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_SystemInformation",
 ] }
 winreg = "0.52"
+# WinRT Windows.Graphics.Capture bindings for the non-intrusive background
+# chart watcher (capture_wgc.rs) -- distinct from windows-sys above, which
+# only covers raw Win32 (used by the existing hide/BitBlt capture path).
+# Already present transitively via tauri's own dependency tree; pinned here
+# as a direct dependency with the specific feature set this crate needs.
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Com",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+] }
 
