@@ -7,7 +7,7 @@ import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from starlette.responses import StreamingResponse
@@ -17,16 +17,17 @@ from app.deps import (
     get_chart_analysis_service,
     get_hot_chart_state_store,
     get_latency_trace_store,
-    get_orchestrator,
+    get_turn_controller,
 )
 from app.latency_store import LatencyTraceStore, RequestTrace
+from app.schemas import AssistantMessage, InputMode, MessageProviders, MessageRole
 from assistant.chart_analysis import ChartAnalysisError, ChartAnalysisService
 from assistant.deep_verification import run_deep_verification
 from assistant.errors import AssistantProviderError
 from assistant.fast_chart_response import try_fast_response
 from assistant.hot_chart_state_store import HotChartStateStore
 from assistant.response_quality import public_error_message
-from orchestrator.orchestrator import TarsOrchestrator
+from assistant.turn_controller import AssistantTurnController, DuplicateTurnConflict
 
 router = APIRouter(tags=["assistant"])
 logger = logging.getLogger("tars.assistant_api")
@@ -35,86 +36,108 @@ _MAX_IMAGE_BYTES = 15 * 1_048_576
 
 
 @router.post("/api/v1/assistant/query")
-@router.post("/api/assistant/messages")
-@router.post("/api/v1/assistant/messages")
-@router.post("/api/v2/assistant/query")
 async def assistant_query(
     request: Request,
-    orchestrator: TarsOrchestrator = Depends(get_orchestrator),
+    controller: AssistantTurnController = Depends(get_turn_controller),
 ) -> dict:
+    raw, text, conversation_id = await _parse_query(request)
+    turn_id = str(raw.get("turn_id") or request.headers.get("X-TARS-Turn-ID") or uuid4().hex)
     try:
-        raw: Any = await request.json()
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid JSON payload: {exc}") from exc
+        response = await controller.execute_text(
+            text,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+        )
+    except DuplicateTurnConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return response.model_dump(mode="json")
 
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=422, detail="Request payload must be a JSON object")
 
-    # If payload presents as a canonical message or has schema fields, validate strictly
-    if "schema_version" in raw or "role" in raw or "input_mode" in raw or "message_id" in raw:
-        try:
-            validate_assistant_message(raw)
-        except ContractValidationError as exc:
-            # Generic error detail to prevent any secret reflection
-            raise HTTPException(
-                status_code=422,
-                detail=f"Schema validation failed: {exc}",
-            ) from exc
+@router.post("/api/assistant/messages", deprecated=True)
+@router.post("/api/v1/assistant/messages", deprecated=True)
+async def assistant_message_compatibility(
+    request: Request,
+    controller: AssistantTurnController = Depends(get_turn_controller),
+) -> dict:
+    """Frozen assistant-message adapter. It delegates to the controller and
+    only projects the final response; it cannot execute independently."""
 
-        if raw.get("role") != "user":
-            raise HTTPException(status_code=422, detail="Message role must be 'user'")
-
-        text = raw.get("content", "")
-        conversation_id = raw.get("conversation_id")
-    else:
-        text = raw.get("text", "")
-        conversation_id = raw.get("conversation_id")
-
-    if not isinstance(text, str) or not text.strip():
-        raise HTTPException(status_code=422, detail="Query text must be a non-empty string")
-
-    reply = await orchestrator.handle_text(
-        text=text,
-        conversation_id=str(conversation_id) if conversation_id else str(uuid4()),
+    raw, text, conversation_id = await _parse_query(request)
+    try:
+        response = await controller.execute_text(
+            text,
+            conversation_id=conversation_id,
+            turn_id=str(
+                raw.get("turn_id") or request.headers.get("X-TARS-Turn-ID") or uuid4().hex
+            ),
+        )
+    except DuplicateTurnConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    message = AssistantMessage(
+        conversation_id=UUID(response.conversation_id),
+        role=MessageRole.assistant,
+        content=response.display_text,
+        input_mode=InputMode.text,
+        intent=response.intent.value,
+        providers=MessageProviders(assistant=response.provider),
+        error=response.display_text if response.status.value == "failed" else None,
     )
-    if request.url.path.startswith("/api/v2/"):
-        return reply.to_response_dict()
-    return reply.assistant_message.to_contract_dict()
+    return message.to_contract_dict()
 
 
 @router.post("/api/v1/assistant/query/stream")
 async def assistant_query_stream(
     request: Request,
-    orchestrator: TarsOrchestrator = Depends(get_orchestrator),
+    controller: AssistantTurnController = Depends(get_turn_controller),
 ) -> StreamingResponse:
     """Streaming twin of /api/v1/assistant/query: the UI gets the first
     token as soon as the provider produces it instead of waiting for the
     full reply, matching the chart-analysis stream's SSE shape (`delta` /
     `complete` events)."""
-    try:
-        raw: Any = await request.json()
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid JSON payload: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=422, detail="Request payload must be a JSON object")
-
-    text = raw.get("text", "")
-    conversation_id = raw.get("conversation_id")
-    if not isinstance(text, str) or not text.strip():
-        raise HTTPException(status_code=422, detail="Query text must be a non-empty string")
+    raw, text, conversation_id = await _parse_query(request)
+    turn_id = str(raw.get("turn_id") or request.headers.get("X-TARS-Turn-ID") or uuid4().hex)
 
     async def event_generator():
         try:
-            async for item in orchestrator.handle_text_stream(
-                text=text,
-                conversation_id=str(conversation_id) if conversation_id else str(uuid4()),
+            async for event in controller.stream_text(
+                text,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
             ):
+                item = event.model_dump(mode="json", exclude_none=True)
+                response = item.pop("response", None)
+                if response is not None:
+                    item.update(response)
                 yield f"data: {json.dumps(item)}\n\n"
         except Exception:
             logger.exception("assistant stream failed")
             yield f"data: {json.dumps({'type': 'error', 'detail': public_error_message()})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+async def _parse_query(request: Request) -> tuple[dict[str, Any], str, str | None]:
+    try:
+        raw: Any = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON payload: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="Request payload must be a JSON object")
+
+    if "schema_version" in raw or "role" in raw or "input_mode" in raw or "message_id" in raw:
+        try:
+            validate_assistant_message(raw)
+        except ContractValidationError as exc:
+            raise HTTPException(status_code=422, detail=f"Schema validation failed: {exc}") from exc
+        if raw.get("role") != "user":
+            raise HTTPException(status_code=422, detail="Message role must be 'user'")
+        text = raw.get("content", "")
+    else:
+        text = raw.get("text", "")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=422, detail="Query text must be a non-empty string")
+    conversation_id = raw.get("conversation_id")
+    return raw, text, str(conversation_id) if conversation_id else None
 
 
 @router.post("/api/v1/assistant/analyze-chart")

@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from actions.runtime import ActionRuntime
 from app.action_contracts import ActionResult, ActionSource, ActionStatus
 from app.config import Settings
+from app.latency_store import LatencyTraceStore, RequestTrace
 from app.schemas import AssistantMessage, InputMode, MessageProviders, MessageRole
 from app.voice_telemetry import VoiceTraceStore, VoiceTurnRecorder
 from assistant.conversation_store import ConversationStore
@@ -44,6 +45,7 @@ from voice.errors import VoiceProviderError
 
 if TYPE_CHECKING:
     from app.voice_state import VoiceProviders
+    from memory.service import MemoryService
 
 logger = logging.getLogger("tars.turn_controller")
 
@@ -160,6 +162,14 @@ _TOOL = re.compile(
     r"run\s+command|execute|terminal)\b",
     re.IGNORECASE,
 )
+_ADVANCED_COMMAND = re.compile(
+    r"\b(?:remember\s+that|what(?:'s|\s+is)\s+my\s+trading\s+context|"
+    r"explain\s+the\s+setup|save\s+this\s+trading\s+observation|"
+    r"search\s+trading\s+memory|set\s+up\s+my\s+trading\s+workspace|"
+    r"run\s+(?:the\s+)?[a-z0-9_-]+\s+agent|"
+    r"(?:install|uninstall|update|search|use|list).*\bskills?\b)\b",
+    re.IGNORECASE,
+)
 _ACTION = re.compile(
     r"^\s*(?:open|launch|start|focus|search\s+(?:the\s+web\s+)?for)\b",
     re.IGNORECASE,
@@ -173,7 +183,7 @@ _DATE = re.compile(
     re.IGNORECASE,
 )
 _DETERMINISTIC_STATE = re.compile(
-    r"\b(?:active\s+setups?|needs?\s+(?:my\s+)?attention|last\s+invalidation|"
+    r"\b(?:active\s+setups?|(?:needs?|requires?)\s+(?:my\s+)?attention|last\s+invalidation|"
     r"why\s+(?:was\s+)?(?:the\s+)?(?:last\s+)?setup\s+invalidated|"
     r"position\s+size|risk\s+reward|\br:r\b|should\s+i\s+enter)\b",
     re.IGNORECASE,
@@ -195,7 +205,7 @@ class TurnIntentRouter:
             return TurnIntent.DETERMINISTIC
         if _DETERMINISTIC_STATE.search(value):
             return TurnIntent.DETERMINISTIC
-        if _TOOL.match(value):
+        if _TOOL.match(value) or _ADVANCED_COMMAND.search(value):
             return TurnIntent.TOOL_TASK
         return TurnIntent.NORMAL_CONVERSATION
 
@@ -213,6 +223,8 @@ class AssistantTurnController:
         action_runtime: ActionRuntime,
         conversation_store: ConversationStore,
         hot_chart_state_store: HotChartStateStore,
+        trace_store: LatencyTraceStore | None = None,
+        memory_service: MemoryService | None = None,
         voice_providers: VoiceProviders | None = None,
         voice_trace_store: VoiceTraceStore | None = None,
         cache_size: int = 256,
@@ -224,6 +236,8 @@ class AssistantTurnController:
         self._actions = action_runtime
         self._conversations = conversation_store
         self._hot_charts = hot_chart_state_store
+        self._trace_store = trace_store
+        self._memory = memory_service
         self._voice = voice_providers
         self._voice_trace_store = voice_trace_store
         self._router = TurnIntentRouter()
@@ -720,7 +734,7 @@ class AssistantTurnController:
             content=text,
             input_mode=input_mode,
         )
-        await self._conversations.save(user_message)
+        await self._persist_message(user_message)
         history_rows = await self._conversations.get_recent(conversation_id, limit=10)
         history = [
             {"role": row["role"], "content": row["content"]}
@@ -738,6 +752,8 @@ class AssistantTurnController:
         )
         accumulated = ""
         provider_name = self._provider.name
+        provider_started = time.monotonic()
+        trace_started_at = datetime.now(UTC).isoformat()
         stream = getattr(self._provider, "respond_stream", None)
         try:
             if callable(stream):
@@ -759,7 +775,15 @@ class AssistantTurnController:
                 await self._publish(
                     TurnEvent(turn_id=turn_id, type="delta", text=accumulated)
                 )
-        except AssistantProviderError:
+        except AssistantProviderError as exc:
+            await self._record_normal_trace(
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                started_at=trace_started_at,
+                started=provider_started,
+                provider=provider_name,
+                error=type(exc).__name__,
+            )
             raise
         if not accumulated.strip():
             raise AssistantProviderError("provider returned an empty normal-conversation response")
@@ -773,8 +797,49 @@ class AssistantTurnController:
             intent=TurnIntent.NORMAL_CONVERSATION.value,
             providers=MessageProviders(assistant=provider_name),
         )
-        await self._conversations.save(assistant_message)
+        await self._persist_message(assistant_message)
+        await self._record_normal_trace(
+            turn_id=turn_id,
+            conversation_id=conversation_id,
+            started_at=trace_started_at,
+            started=provider_started,
+            provider=provider_name,
+        )
         return presentation.display_text, provider_name
+
+    async def _persist_message(self, message: AssistantMessage) -> None:
+        """Persist synchronously, then let memory observe without gating the turn."""
+
+        await self._conversations.save(message)
+        if self._memory is None:
+            return
+        task = asyncio.create_task(self._memory.index_conversation_message(message))
+        task.add_done_callback(_log_memory_observer_failure)
+
+    async def _record_normal_trace(
+        self,
+        *,
+        turn_id: str,
+        conversation_id: str,
+        started_at: str,
+        started: float,
+        provider: str,
+        error: str | None = None,
+    ) -> None:
+        if self._trace_store is None:
+            return
+        await self._trace_store.record(
+            RequestTrace(
+                request_id=turn_id,
+                kind="assistant_text",
+                conversation_id=conversation_id,
+                provider_id=provider,
+                started_at=started_at,
+                provider_latency_ms=round((time.monotonic() - started) * 1000, 2),
+                total_ms=round((time.monotonic() - started) * 1000, 2),
+                error=error,
+            )
+        )
 
     async def _deterministic(
         self, text: str, conversation_id: str, input_mode: InputMode
@@ -867,8 +932,8 @@ class AssistantTurnController:
             intent=TurnIntent.DETERMINISTIC.value,
             providers=MessageProviders(assistant=provider),
         )
-        await self._conversations.save(user)
-        await self._conversations.save(assistant)
+        await self._persist_message(user)
+        await self._persist_message(assistant)
         return RouterReply(
             conversation_id=conversation_id,
             user_message=user,
@@ -898,6 +963,14 @@ def _conversation_uuid(value: str) -> UUID:
         return UUID(value)
     except ValueError:
         return uuid5(NAMESPACE_URL, f"tars-conversation:{value}")
+
+
+def _log_memory_observer_failure(task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning("non-blocking memory observer failed: %s", error)
 
 
 def _fingerprint(text: str, conversation_id: str, input_mode: InputMode, speak: bool) -> str:

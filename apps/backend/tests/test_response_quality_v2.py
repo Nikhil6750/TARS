@@ -44,25 +44,16 @@ def test_quality_contract_flags_missing_uncertainty_and_internal_leakage():
     assert "user_mode_cleanliness" in result.issues
 
 
-def test_v1_query_stays_canonical_and_v2_exposes_explicit_presentation(client):
+def test_v1_query_is_the_only_canonical_presentation_endpoint(client):
     v1 = client.post("/api/v1/assistant/query", json={"text": "hello"}).json()
-    validate_assistant_message(v1)
-    assert "display_text" not in v1
-    assert "speech_text" not in v1
+    assert v1["display_text"]
+    assert v1["speech_text"]
+    assert v1["intent"] == "NORMAL_CONVERSATION"
 
-    v2 = client.post("/api/v2/assistant/query", json={"text": "hello"}).json()
-    validate_assistant_message(v2["message"])
-    assert v2["display_text"] == v2["message"]["content"]
-    assert v2["speech_text"]
-    assert set(v2["quality"]) >= {
-        "directness",
-        "completeness",
-        "grounding",
-        "uncertainty",
-        "structure",
-        "user_mode_cleanliness",
-        "speech_suitability",
-    }
+    assert client.post("/api/v2/assistant/query", json={"text": "hello"}).status_code == 404
+
+    legacy = client.post("/api/v1/assistant/messages", json={"text": "hello"}).json()
+    validate_assistant_message(legacy)
 
 
 class _FailingProvider(AssistantProvider):

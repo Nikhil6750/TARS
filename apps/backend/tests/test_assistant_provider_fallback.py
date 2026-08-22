@@ -37,4 +37,4 @@ def test_misconfigured_provider_falls_back_to_mock(misconfigured_client):
     reply = misconfigured_client.post(
         "/api/v1/assistant/query", json={"text": "hello"}
     ).json()
-    assert reply["providers"]["assistant"] == "mock"
+    assert reply["provider"] == "mock"

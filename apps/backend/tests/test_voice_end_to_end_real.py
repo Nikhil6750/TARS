@@ -104,9 +104,9 @@ def test_real_voice_round_trip_reaches_assistant_router_and_local_tts(client, re
 
     # Deterministic routing proves AssistantRouter matched on the real
     # transcribed text (never a hardcoded intent unrelated to the audio).
-    assert body["intent"] == "attention_summary"
-    assert body["providers"]["assistant"] == "deterministic"
-    assistant_text = body["content"]
+    assert body["intent"] == "DETERMINISTIC"
+    assert body["provider"] == "deterministic"
+    assistant_text = body["speech_text"]
     assert assistant_text.strip() != ""
 
     spoken_reply = asyncio.run(real_tts.synthesize(assistant_text))

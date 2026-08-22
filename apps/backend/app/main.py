@@ -328,6 +328,8 @@ async def lifespan(app: FastAPI):
         action_runtime=action_runtime,
         conversation_store=conversation_store,
         hot_chart_state_store=HotChartStateStore(db.conn),
+        trace_store=latency_trace_store,
+        memory_service=memory_service,
         voice_providers=voice_providers,
         voice_trace_store=app.state.voice_trace_store,
     )

@@ -58,4 +58,4 @@ def test_orchestrator_setup_workspace_intent_triggers_the_agent(client, monkeypa
         "/api/v1/assistant/query", json={"text": "please set up my trading workspace"}
     )
     body = resp.json()
-    assert body["intent"] == "trading_workspace"
+    assert body["intent"] == "TOOL_TASK"
