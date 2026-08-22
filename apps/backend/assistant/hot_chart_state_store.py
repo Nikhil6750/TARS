@@ -113,6 +113,26 @@ class HotChartStateStore:
             return None
         return _row_to_state(row)
 
+    async def get_latest(self) -> HotChartState | None:
+        """Return the newest observed active-chart state.
+
+        This is reserved for the natural-language command "analyze the chart",
+        where the native background watcher itself defines which chart is active.
+        Explicit identity lookups must continue to use :meth:`get`.
+        """
+
+        cursor = await self._conn.execute(
+            """
+            SELECT * FROM hot_chart_state
+            ORDER BY analyzed_at DESC
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return _row_to_state(row)
+
     async def delete(self, identity: ChartIdentity) -> None:
         await self._conn.execute(
             """
