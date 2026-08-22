@@ -174,14 +174,24 @@ if (-not $healthy) {
 Write-Ok "  Backend healthy (PID $($backendProc.Id))."
 
 $readiness = $null
-try {
-    $readiness = Invoke-RestMethod -Uri $ReadinessUrl -TimeoutSec 5 -ErrorAction Stop
+for ($r = 0; $r -lt 60; $r++) {
+    try {
+        $readiness = Invoke-RestMethod -Uri $ReadinessUrl -TimeoutSec 5 -ErrorAction Stop
+        if ($readiness.ready -eq $true) {
+            break
+        }
+    } catch {
+        $readiness = $null
+    }
+    Start-Sleep -Seconds 1
+}
+if ($readiness) {
     Write-Host "  Readiness: assistant=$($readiness.assistant.ready) stt=$($readiness.stt.ready) tts=$($readiness.tts.ready) wake=$($readiness.wake.ready) claude_cli=$($readiness.claude_cli.ready) database=$($readiness.database.ready) -> ready=$($readiness.ready)"
     if ($readiness.ready -eq $false -and $readiness.message) {
         Write-Warn "  $($readiness.message)"
     }
-} catch {
-    Write-Warn "  Could not fetch readiness snapshot from $ReadinessUrl`: $_"
+} else {
+    Write-Warn "  Could not fetch readiness snapshot from $ReadinessUrl"
 }
 
 # ---- 6. Launch native TARS --------------------------------------------------

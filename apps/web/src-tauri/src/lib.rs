@@ -1270,6 +1270,13 @@ pub fn run() {
             wake_engine_status,
             set_wake_playback_state,
         ])
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+            {
+                let _ = webview.window().set_title("TARS Ready");
+            }
+        })
         .on_window_event(|window, event| {
             // M2A/M2B Background persistence (Close-to-tray)
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
