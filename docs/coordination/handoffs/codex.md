@@ -6,6 +6,122 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Latest handoff — minimal golden voice loop awaiting physical certification (2026-08-22)
+
+**Branch**: `feature/tars-minimal-golden-loop`
+
+**Implementation commit SHA**: `2c383377d0f1550bb57c8653a8f5e10a0ce98b11`
+
+**Base SHA / worktree**:
+`eeb117a4c8474f7da82c6229b0dcf8f453525225` /
+`C:\TARS-worktrees\tars-minimal-golden-loop`. The hot-state tip
+`f7a7310c861c2fdddde357cf67b42519a2c927f0` is an ancestor of this base.
+
+**Work completed**:
+
+- Studied `Avinashb722/jarvis-ai-assistant` and `open-jarvis/OpenJarvis`, then
+  reduced the production turn to one backend owner without copying either
+  implementation.
+- Added `AssistantTurnController` with one utterance/turn ID/execution/final
+  response/TTS invariant, in-flight joining, completed replay, and conflicting
+  turn-ID rejection.
+- Made `POST /api/v1/voice/utterance` the only production audio entry. Native
+  Rust now owns microphone capture, segmentation, WAV transport, and playback
+  state only. React observes backend state and plays backend-produced audio.
+- Added configurable normalized transcript wake aliases, one-shot commands,
+  and a seven-second two-stage `Hey TARS` / `Yeah?` command window.
+- Added the explicit deterministic/normal/chart/tool/research/trading router.
+  Normal conversation directly calls one configured primary and uses strict
+  sequential fallback only after a provider error.
+- Unified the response as `AssistantResponse` with separate Markdown-capable
+  `display_text` and backend-sanitized natural `speech_text`; Kokoro synthesis
+  chunks only complete sentences.
+- Preserved hot chart state, WGC watcher/capture, asynchronous deep
+  verification, action/permission, skill, memory, research fail-closed, and
+  quant-brain boundaries behind the controller.
+- Hardened `scripts/start_tars.ps1` to discover the primary worktree `.env`,
+  reject a foreign port owner, wait for real provider readiness, build from the
+  current source into a worktree-local target, and verify the finished native
+  page-load marker.
+- Built and launched the actual app. Runtime probe reports zero findings;
+  backend PID `22940` points to this worktree's `run.py`, and native PID `17576`
+  points to this worktree's release EXE with a responsive `TARS Ready` window.
+
+**Files changed**:
+
+- Backend: `.env.example`, `apps/backend/app/{config,deps,main,readiness,voice_state,voice_telemetry}.py`,
+  `apps/backend/app/routers/{assistant,health,voice}.py`,
+  `apps/backend/assistant/{factory,hot_chart_state_store,provider_router,turn_controller}.py`,
+  migration `0008_golden_voice_trace.sql`, and the associated backend tests.
+- Native/web: `apps/web/src-tauri/{Cargo.lock,Cargo.toml}`, native
+  `src/{lib,wake_engine}.rs`, `App.tsx`, assistant/HUD/voice components,
+  `runtime/{AssistantClient,VoiceAssistantRuntime,WakeClient}.ts(x)`,
+  `services/{audio,native-bridge}.ts`, new response/runtime types, and associated
+  frontend tests.
+- Removed active duplicate frontend paths:
+  `apps/web/src/services/{speech,wake-word}.ts` and tests
+  `{single-utterance-wake,speech}.test.ts`.
+- Quality/operations: `docs/runtime/GOLDEN_LOOP_INVENTORY.md`,
+  `scripts/start_tars.ps1`, golden acceptance/integration tests,
+  `tools/{README,core_experience_checks,generate_voice_comparison}.py`, and
+  `artifacts/voice-samples/{manifest.json,voice_A.wav,voice_B.wav,voice_C.wav}`.
+
+**Interfaces exposed**:
+
+- `POST /api/v1/voice/utterance` — canonical multipart native utterance entry.
+- `POST /api/v1/assistant/query` and its stream — canonical text entry through
+  the same controller.
+- `AssistantResponse` — `turn_id`, `display_text`, `speech_text`, `intent`,
+  `status`, `provider`, `latency_ms`, plus correlation/audio fields.
+- `GET /api/v1/diagnostics/voice-latency` — per-turn requested timing markers
+  and exact failure stage.
+- `scripts\start_tars.ps1` — one-command production launch.
+
+**Tests run**:
+
+- Backend full suite: **670 passed**, one third-party deprecation warning.
+- Root contract/integration suite: **66 passed, 24 expected external/hardware
+  skipped**, one third-party deprecation warning.
+- Frontend Vitest: **134 passed**; TypeScript, ESLint, and production Vite/PWA
+  build passed.
+- Rust: **8 passed, 1 real-WGC hardware test ignored**; `cargo check` passed.
+- Source diagnostics and live runtime diagnostics: **zero findings**.
+- Tauri release + NSIS build passed. The launcher itself returned exit 0 and
+  printed `TARS READY` only after provider and native page-load verification.
+
+**Measured evidence (not fabricated)**:
+
+- Kokoro samples: A `am_michael` 3.984 s / 10.057 s audio (RTF 0.396), B
+  `am_onyx` 3.360 s / 9.459 s (RTF 0.355), C `bm_george` 3.731 s / 9.907 s
+  (RTF 0.377). Human naturalness choice is pending.
+- Current native background/noise captures show STT completion around 1.3–4.1
+  seconds and are correctly classified at `wake_match`; these are not physical
+  wake attempts and are not evidence of wake success.
+- No physical wake, normal-provider, or hot-chart latency is claimed yet.
+
+**Known limitations**:
+
+- Required 20-attempt physical microphone test is pending; 19/20 reliability
+  and absence of duplicated spoken responses are not yet certified.
+- Early sentence TTS is prepared as complete-sentence chunks, but the multipart
+  voice endpoint currently returns its final response before native playback;
+  it does not yet overlap provider generation with first-sentence playback.
+- The existing Claude/Codex benchmark was inconclusive. Runtime therefore keeps
+  the explicitly configured `claude_code` primary and strict Codex fallback; no
+  unsupported quality winner is claimed.
+- Hot chart capability is preserved and regression-tested, but physical
+  sub-two-second latency was not remeasured in this session.
+
+**Exact dependencies required from other agents/users**:
+
+- User/hardware: perform the prescribed 20 deliberate microphone attempts and
+  two-stage follow-up, report any duplicate audible response, and physically
+  choose A/B/C. No other agent dependency blocks this milestone.
+
+**Next recommended action**: perform the physical test against the running
+native app, then inspect `GET /api/v1/diagnostics/voice-latency` for every miss
+and publish the final measured acceptance report. Do not merge this branch.
+
 ## Latest handoff — core-experience recovery evidence
 
 **Branch**: `feature/tars-core-experience-v2`
