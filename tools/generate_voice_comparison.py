@@ -9,10 +9,11 @@ import wave
 from pathlib import Path
 
 LINES = (
-    "Good morning. I've got the chart open. What would you like me to look at?",
-    "XAUUSD is still near the upper side of the visible range. I don't have a validated trade trigger yet.",
-    "Got it. Give me a second — I'm checking that now.",
-    "I wouldn't treat that as confirmed yet. The evidence is still incomplete.",
+    "Good morning. I'm ready. What are we working on today?",
+    (
+        "I've checked the chart. Price is approaching the previous high, but I "
+        "wouldn't call this a valid trade yet."
+    ),
 )
 DEFAULT_CANDIDATES = ("am_michael", "am_onyx", "bm_george")
 CURRENT_REFERENCE = "af_heart"
@@ -101,11 +102,11 @@ def main() -> None:
             label = "reference-current"
         else:
             candidate_number += 1
-            label = f"candidate-{chr(64 + candidate_number)}"
+            label = f"voice_{chr(64 + candidate_number)}"
         samples, sample_rate, generation_seconds = generate_candidate(
             kokoro, voice, args.speed
         )
-        filename = f"{label}-{voice}.wav"
+        filename = f"{label}.wav"
         audio_seconds = write_wav(args.output_dir / filename, samples, sample_rate)
         manifest["candidates"].append(  # type: ignore[union-attr]
             {

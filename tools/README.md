@@ -132,10 +132,11 @@ Generate local Kokoro listening candidates from already-installed model files:
 
 ```powershell
 python tools/generate_voice_comparison.py `
-  --include-current-reference `
-  --output-dir .\scratch\voice-comparison
+  --output-dir .\artifacts\voice-samples
 ```
 
-The manifest records synthesis latency and duration only. Voice naturalness,
-warmth, clarity, authority, and conversational quality require user listening
-before any permanent candidate is selected.
+This writes `voice_A.wav`, `voice_B.wav`, and `voice_C.wav`, each containing
+the same two golden-loop listening lines. The manifest records synthesis
+latency and duration only. Voice naturalness, warmth, clarity, authority, and
+conversational quality require user listening before any permanent candidate
+is selected.

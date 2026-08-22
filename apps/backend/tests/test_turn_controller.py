@@ -17,6 +17,7 @@ from assistant.turn_controller import (
     TurnStatus,
     WakePhraseMatcher,
     normalize_transcript,
+    sentence_chunks,
 )
 from storage.migrator import run_migrations
 
@@ -108,6 +109,17 @@ def test_wake_normalization_does_not_match_unrelated_words():
     assert normalize_transcript("  HEY,   TAR'S!!! ") == "hey tars"
     matcher = WakePhraseMatcher(["tars"])
     assert matcher.match("The stars are bright") is None
+
+
+def test_speech_is_chunked_only_on_complete_sentence_boundaries():
+    assert sentence_chunks("First sentence. Second question? Final statement!") == [
+        "First sentence.",
+        "Second question?",
+        "Final statement!",
+    ]
+    assert sentence_chunks("One final fragment without punctuation") == [
+        "One final fragment without punctuation"
+    ]
 
 
 async def test_normal_conversation_fast_path_has_one_execution(controller):

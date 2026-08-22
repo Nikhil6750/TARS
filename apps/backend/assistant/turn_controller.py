@@ -573,17 +573,16 @@ class AssistantTurnController:
             TurnEvent(turn_id=response.turn_id, type="state", state=TurnState.SPEAKING)
         )
         await recorder.mark("tts_started")
+        audio_chunks: list[str] = []
         try:
-            result = await self._voice.tts.synthesize(response.speech_text)
+            for chunk in sentence_chunks(response.speech_text):
+                result = await self._voice.tts.synthesize(chunk)
+                audio_chunks.append(base64.b64encode(result.audio).decode("ascii"))
         except VoiceProviderError:
             await recorder.fail("tts")
             return response.model_copy(update={"status": TurnStatus.FAILED})
         await recorder.mark("tts_completed")
-        return response.model_copy(
-            update={
-                "audio_chunks_base64": [base64.b64encode(result.audio).decode("ascii")]
-            }
-        )
+        return response.model_copy(update={"audio_chunks_base64": audio_chunks})
 
     async def _take_pending_command(self, session_id: str) -> _PendingCommand | None:
         async with self._lock:
@@ -1011,3 +1010,16 @@ def normalize_transcript(transcript: str) -> str:
     text = re.sub(r"[^a-z0-9]+", " ", text)
     text = re.sub(r"\bhey\s+tar\s+s\b", "hey tars", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def sentence_chunks(speech_text: str) -> list[str]:
+    """Return only complete, natural TTS units from final backend speech."""
+
+    normalized = re.sub(r"[ \t]+", " ", speech_text).strip()
+    if not normalized:
+        return []
+    return [
+        chunk.strip()
+        for chunk in re.split(r"(?<=[.!?])\s+|\n+", normalized)
+        if chunk.strip()
+    ]

@@ -164,7 +164,7 @@ def test_two_stage_wake_acknowledges_then_executes_next_utterance(client):
     body = command.json()
     assert body["intent"] == "NORMAL_CONVERSATION"
     assert body["status"] == "completed"
-    assert len(body["audio_chunks_base64"]) == 1
+    assert len(body["audio_chunks_base64"]) == 2
     assert client.app.state.turn_controller.execution_count("wake-only-turn") == 0
     assert client.app.state.turn_controller.execution_count("two-stage-command-turn") == 1
 
