@@ -9,6 +9,7 @@ dependencies; none may independently receive a second copy of the same turn.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ import re
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -98,6 +100,44 @@ class TurnEvent(BaseModel):
 
 class DuplicateTurnConflict(ValueError):
     """The caller reused a turn ID for different human input."""
+
+
+@dataclass(frozen=True)
+class WakeMatch:
+    alias: str
+    normalized_transcript: str
+    command: str
+
+
+class WakePhraseMatcher:
+    """Configurable normalized transcript matcher; no wake ML is implied."""
+
+    def __init__(self, aliases: list[str]) -> None:
+        normalized = [normalize_transcript(alias) for alias in aliases]
+        self._aliases = tuple(
+            sorted({alias for alias in normalized if alias}, key=lambda item: (-len(item), item))
+        )
+
+    def match(self, transcript: str) -> WakeMatch | None:
+        normalized = normalize_transcript(transcript)
+        for alias in self._aliases:
+            match = re.search(rf"(?:^|\s){re.escape(alias)}(?:\s|$)", normalized)
+            if match is None:
+                continue
+            return WakeMatch(
+                alias=alias,
+                normalized_transcript=normalized,
+                command=normalized[match.end() :].strip(),
+            )
+        return None
+
+
+@dataclass
+class _PendingCommand:
+    conversation_id: str
+    expires_at: float
+    recorder: VoiceTurnRecorder
+    timeout_task: asyncio.Task[None] | None = None
 
 
 _CHART = re.compile(
@@ -187,6 +227,7 @@ class AssistantTurnController:
         self._voice = voice_providers
         self._voice_trace_store = voice_trace_store
         self._router = TurnIntentRouter()
+        self._wake_matcher = WakePhraseMatcher(settings.wake_alias_list)
         self._composer = ResponseComposer()
         self._cache_size = max(16, cache_size)
         self._lock = asyncio.Lock()
@@ -197,6 +238,9 @@ class AssistantTurnController:
         self._execution_counts: dict[str, int] = {}
         self._utterance_inflight: dict[str, asyncio.Task[AssistantResponse]] = {}
         self._utterance_fingerprints: dict[str, str] = {}
+        self._pending_commands: dict[str, _PendingCommand] = {}
+        self._voice_recorders: dict[str, VoiceTurnRecorder] = {}
+        self._first_token_marked: set[str] = set()
 
     def execution_count(self, turn_id: str) -> int:
         """Test/diagnostic evidence for the exactly-once invariant."""
@@ -337,6 +381,7 @@ class AssistantTurnController:
                         pcm_audio,
                         turn_id=actual_turn_id,
                         conversation_id=actual_conversation_id,
+                        session_id=session_id,
                         audio_detected_at_ms=audio_detected_at_ms,
                         speech_end_at_ms=speech_end_at_ms,
                     )
@@ -355,12 +400,16 @@ class AssistantTurnController:
         *,
         turn_id: str,
         conversation_id: str,
+        session_id: str,
         audio_detected_at_ms: int | None,
         speech_end_at_ms: int | None,
     ) -> AssistantResponse:
         assert self._voice is not None
         assert self._voice_trace_store is not None
         started = time.monotonic()
+        pending = await self._take_pending_command(session_id)
+        if pending is not None:
+            conversation_id = pending.conversation_id
         recorder = VoiceTurnRecorder(self._voice_trace_store, conversation_id)
         await recorder.start_turn(
             turn_id=turn_id,
@@ -398,7 +447,17 @@ class AssistantTurnController:
         await recorder.mark("stt_completed")
         transcript = transcription.text.strip()
         await recorder.annotate(transcript=transcript)
-        wake_match, command = _match_primary_wake(transcript, self._settings.wake_word_phrase)
+        match = None if pending is not None else self._wake_matcher.match(transcript)
+        if pending is not None:
+            wake_match = "two_stage_command"
+            command = normalize_transcript(transcript)
+        elif match is not None:
+            wake_match = match.alias
+            command = match.command
+        else:
+            wake_match = None
+            command = ""
+
         if wake_match is None:
             await recorder.fail("wake_match")
             return await self._complete_without_execution(
@@ -415,45 +474,150 @@ class AssistantTurnController:
             )
 
         await recorder.annotate(wake_match=wake_match)
-        await recorder.mark("wake_detected")
-        await self._publish(
-            TurnEvent(turn_id=turn_id, type="state", state=TurnState.WAKE_DETECTED)
-        )
-        if not command:
-            await recorder.finish("awaiting_command")
+        if pending is None:
+            await recorder.mark("wake_detected")
+            await self._publish(
+                TurnEvent(turn_id=turn_id, type="state", state=TurnState.WAKE_DETECTED)
+            )
+        elif not command:
+            await recorder.fail("stt")
             return await self._complete_without_execution(
                 AssistantResponse(
                     turn_id=turn_id,
-                    display_text="",
-                    speech_text="",
+                    display_text=public_error_message("stt"),
+                    speech_text=public_error_message("stt"),
                     intent=TurnIntent.DETERMINISTIC,
-                    status=TurnStatus.AWAITING_COMMAND,
-                    provider="wake_matcher",
+                    status=TurnStatus.FAILED,
+                    provider=self._voice.stt.name,
                     latency_ms=round((time.monotonic() - started) * 1000, 2),
                     conversation_id=conversation_id,
                 )
             )
+        if not command:
+            acknowledgement = self._settings.wake_acknowledgement.strip() or "Yeah?"
+            response = AssistantResponse(
+                turn_id=turn_id,
+                display_text=acknowledgement,
+                speech_text=acknowledgement,
+                intent=TurnIntent.DETERMINISTIC,
+                status=TurnStatus.AWAITING_COMMAND,
+                provider="wake_matcher",
+                latency_ms=round((time.monotonic() - started) * 1000, 2),
+                conversation_id=conversation_id,
+            )
+            response = await self._synthesize_response(response, recorder)
+            if response.status is TurnStatus.FAILED:
+                return await self._complete_without_execution(response)
+            await recorder.finish("awaiting_command")
+            await self._set_pending_command(
+                session_id,
+                conversation_id=conversation_id,
+                recorder=recorder,
+                turn_id=turn_id,
+            )
+            await self._publish(
+                TurnEvent(
+                    turn_id=turn_id,
+                    type="state",
+                    state=TurnState.LISTENING_FOR_COMMAND,
+                )
+            )
+            return await self._complete_without_execution(response)
 
         await recorder.mark("command_ready")
         await recorder.mark("processing_started")
-        response = await self.execute_text(
-            command,
-            conversation_id=conversation_id,
-            turn_id=turn_id,
-            input_mode=InputMode.voice,
-            speak=True,
-        )
+        self._voice_recorders[turn_id] = recorder
+        try:
+            response = await self.execute_text(
+                command,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                input_mode=InputMode.voice,
+                speak=True,
+            )
+        finally:
+            self._voice_recorders.pop(turn_id, None)
+            self._first_token_marked.discard(turn_id)
         response = response.model_copy(
             update={"latency_ms": round((time.monotonic() - started) * 1000, 2)}
         )
         await recorder.annotate(provider=response.provider)
-        if response.status is TurnStatus.FAILED:
+        if response.status is TurnStatus.FAILED and recorder.error_stage is None:
             await recorder.fail("provider")
-        else:
+        elif response.status is TurnStatus.COMPLETED:
             await recorder.finish("completed")
         async with self._lock:
             self._completed[turn_id] = response
         return response
+
+    async def _synthesize_response(
+        self, response: AssistantResponse, recorder: VoiceTurnRecorder
+    ) -> AssistantResponse:
+        if self._voice is None or not response.speech_text.strip():
+            return response
+        await self._publish(
+            TurnEvent(turn_id=response.turn_id, type="state", state=TurnState.SPEAKING)
+        )
+        await recorder.mark("tts_started")
+        try:
+            result = await self._voice.tts.synthesize(response.speech_text)
+        except VoiceProviderError:
+            await recorder.fail("tts")
+            return response.model_copy(update={"status": TurnStatus.FAILED})
+        await recorder.mark("tts_completed")
+        return response.model_copy(
+            update={
+                "audio_chunks_base64": [base64.b64encode(result.audio).decode("ascii")]
+            }
+        )
+
+    async def _take_pending_command(self, session_id: str) -> _PendingCommand | None:
+        async with self._lock:
+            pending = self._pending_commands.pop(session_id, None)
+        if pending is None:
+            return None
+        if pending.timeout_task is not None:
+            pending.timeout_task.cancel()
+        if time.monotonic() > pending.expires_at:
+            await pending.recorder.fail("command_timeout")
+            return None
+        return pending
+
+    async def _set_pending_command(
+        self,
+        session_id: str,
+        *,
+        conversation_id: str,
+        recorder: VoiceTurnRecorder,
+        turn_id: str,
+    ) -> None:
+        timeout_seconds = min(8.0, max(0.01, self._settings.wake_command_timeout_seconds))
+        pending = _PendingCommand(
+            conversation_id=conversation_id,
+            expires_at=time.monotonic() + timeout_seconds,
+            recorder=recorder,
+        )
+
+        async def expire() -> None:
+            try:
+                await asyncio.sleep(timeout_seconds)
+                async with self._lock:
+                    if self._pending_commands.get(session_id) is not pending:
+                        return
+                    self._pending_commands.pop(session_id, None)
+                await recorder.fail("command_timeout")
+                await self._publish(
+                    TurnEvent(turn_id=turn_id, type="state", state=TurnState.IDLE)
+                )
+            except asyncio.CancelledError:
+                return
+
+        pending.timeout_task = asyncio.create_task(expire())
+        async with self._lock:
+            previous = self._pending_commands.get(session_id)
+            self._pending_commands[session_id] = pending
+        if previous is not None and previous.timeout_task is not None:
+            previous.timeout_task.cancel()
 
     async def _complete_without_execution(
         self, response: AssistantResponse
@@ -511,6 +675,9 @@ class AssistantTurnController:
             )
         except Exception:
             logger.exception("turn %s failed during %s", turn_id, intent.value)
+            recorder = self._voice_recorders.get(turn_id)
+            if recorder is not None:
+                await recorder.fail("provider")
             response = AssistantResponse(
                 turn_id=turn_id,
                 display_text=public_error_message(),
@@ -522,10 +689,11 @@ class AssistantTurnController:
                 conversation_id=conversation_id,
             )
 
-        # TTS is attached in the voice-ingestion phase.  `speak` is already
-        # part of the fingerprint so a text replay can never become a voice
-        # execution (or vice versa) under the same turn ID.
-        _ = speak
+        if speak and response.status is TurnStatus.COMPLETED:
+            recorder = self._voice_recorders.get(turn_id)
+            if recorder is None:
+                raise RuntimeError("voice turn lost its telemetry recorder before TTS")
+            response = await self._synthesize_response(response, recorder)
         async with self._lock:
             self._completed[turn_id] = response
             self._completed.move_to_end(turn_id)
@@ -710,6 +878,14 @@ class AssistantTurnController:
 
     async def _publish(self, event: TurnEvent) -> None:
         # Observation is deliberately best-effort and non-blocking.
+        if event.type == "delta" and event.turn_id not in self._first_token_marked:
+            recorder = self._voice_recorders.get(event.turn_id)
+            if recorder is not None:
+                self._first_token_marked.add(event.turn_id)
+                try:
+                    await recorder.mark("first_response_token")
+                except Exception:
+                    logger.debug("voice first-token telemetry failed", exc_info=True)
         for queue in tuple(self._subscribers.get(event.turn_id, ())):
             try:
                 queue.put_nowait(event)
@@ -752,12 +928,10 @@ def _iso_from_epoch_ms(value: int | None) -> str | None:
     return datetime.fromtimestamp(value / 1000, tz=UTC).isoformat()
 
 
-def _match_primary_wake(transcript: str, phrase: str) -> tuple[str | None, str]:
-    normalized = re.sub(r"[^a-z0-9]+", " ", transcript.lower()).strip()
-    phrase_normalized = re.sub(r"[^a-z0-9]+", " ", phrase.lower()).strip() or "tars"
-    for candidate in (f"hey {phrase_normalized}", phrase_normalized):
-        match = re.search(rf"(?:^|\s){re.escape(candidate)}(?:\s|$)", normalized)
-        if match is None:
-            continue
-        return candidate, normalized[match.end() :].strip()
-    return None, ""
+def normalize_transcript(transcript: str) -> str:
+    text = transcript.casefold().replace("’", "'")
+    # Whisper occasionally inserts an apostrophe or separates the final s.
+    text = re.sub(r"(?<=\w)'(?=\w)", "", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(r"\bhey\s+tar\s+s\b", "hey tars", text)
+    return re.sub(r"\s+", " ", text).strip()

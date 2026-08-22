@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # ---- Wake word ----
     wake_word_provider: str = "mock"
     wake_word_phrase: str = "TARS"
+    wake_word_aliases: str = "hey tars,hey tarz,hey stars,tars,jarvis,hey jarvis"
+    wake_acknowledgement: str = "Yeah?"
+    wake_command_timeout_seconds: float = 7.0
     wake_word_model_path: str | None = None
     wake_word_threshold: float = 0.5
 
@@ -164,6 +167,12 @@ class Settings(BaseSettings):
         if raw == "*":
             return ["*"]
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+    @property
+    def wake_alias_list(self) -> list[str]:
+        aliases = [alias.strip() for alias in self.wake_word_aliases.split(",") if alias.strip()]
+        primary = f"hey {self.wake_word_phrase.strip()}".strip()
+        return list(dict.fromkeys((primary, *aliases)))
 
 
 @lru_cache

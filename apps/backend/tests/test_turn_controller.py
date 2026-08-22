@@ -15,6 +15,8 @@ from assistant.turn_controller import (
     TurnIntent,
     TurnIntentRouter,
     TurnStatus,
+    WakePhraseMatcher,
+    normalize_transcript,
 )
 from storage.migrator import run_migrations
 
@@ -78,6 +80,34 @@ async def controller(tmp_path):
 )
 def test_small_router_is_deterministic(text, expected):
     assert TurnIntentRouter().classify(text) is expected
+
+
+@pytest.mark.parametrize(
+    ("transcript", "command"),
+    [
+        ("Hey TARS", ""),
+        ("Hey TARS, analyze the chart", "analyze the chart"),
+        ("hey tarz explain Docker", "explain docker"),
+        ("Hey stars! What time is it?", "what time is it"),
+        ("TARS: explain inheritance", "explain inheritance"),
+        ("Jarvis, open calculator", "open calculator"),
+        ("Hey Jarvis explain polymorphism", "explain polymorphism"),
+        ("Hey Tar's, are you there?", "are you there"),
+    ],
+)
+def test_configurable_wake_aliases_preserve_one_shot_command_tail(transcript, command):
+    matcher = WakePhraseMatcher(
+        ["hey tars", "hey tarz", "hey stars", "tars", "jarvis", "hey jarvis"]
+    )
+    match = matcher.match(transcript)
+    assert match is not None
+    assert match.command == command
+
+
+def test_wake_normalization_does_not_match_unrelated_words():
+    assert normalize_transcript("  HEY,   TAR'S!!! ") == "hey tars"
+    matcher = WakePhraseMatcher(["tars"])
+    assert matcher.match("The stars are bright") is None
 
 
 async def test_normal_conversation_fast_path_has_one_execution(controller):

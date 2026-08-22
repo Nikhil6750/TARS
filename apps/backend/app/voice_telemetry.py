@@ -157,6 +157,10 @@ class VoiceTurnRecorder:
     def turn_id(self) -> str | None:
         return self._current.turn_id if self._current is not None else None
 
+    @property
+    def error_stage(self) -> str | None:
+        return self._current.error_stage if self._current is not None else None
+
     async def start_turn(
         self,
         *,

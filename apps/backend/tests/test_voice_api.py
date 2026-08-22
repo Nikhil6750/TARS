@@ -127,3 +127,74 @@ def test_canonical_utterance_records_wake_match_failure_stage(client):
     assert trace["transcript"] == "ordinary room noise"
     assert trace["wake_match"] is None
     assert trace["error_stage"] == "wake_match"
+
+
+def test_two_stage_wake_acknowledges_then_executes_next_utterance(client):
+    _wait_for_voice_ready(client)
+    stt = _WakeSentenceSTT("Hey TARS")
+    client.app.state.voice_providers.stt = stt
+    wav_bytes = pcm16_to_wav(b"\x01\x00" * 800, sample_rate=16000)
+    conversation_id = "5756628d-5b38-4eb2-8640-e2c03912a702"
+
+    wake = client.post(
+        "/api/v1/voice/utterance",
+        files={"file": ("wake.wav", wav_bytes, "audio/wav")},
+        data={
+            "turn_id": "wake-only-turn",
+            "conversation_id": conversation_id,
+            "session_id": "two-stage-test",
+        },
+    )
+    assert wake.status_code == 200
+    assert wake.json()["status"] == "awaiting_command"
+    assert wake.json()["speech_text"] == "Yeah?"
+    assert len(wake.json()["audio_chunks_base64"]) == 1
+
+    stt.text = "Explain Docker containers"
+    command = client.post(
+        "/api/v1/voice/utterance",
+        files={"file": ("command.wav", wav_bytes, "audio/wav")},
+        data={
+            "turn_id": "two-stage-command-turn",
+            "conversation_id": conversation_id,
+            "session_id": "two-stage-test",
+        },
+    )
+    assert command.status_code == 200
+    body = command.json()
+    assert body["intent"] == "NORMAL_CONVERSATION"
+    assert body["status"] == "completed"
+    assert len(body["audio_chunks_base64"]) == 1
+    assert client.app.state.turn_controller.execution_count("wake-only-turn") == 0
+    assert client.app.state.turn_controller.execution_count("two-stage-command-turn") == 1
+
+    traces = client.get("/api/v1/diagnostics/voice-latency").json()["traces"]
+    command_trace = next(
+        item for item in traces if item["turn_id"] == "two-stage-command-turn"
+    )
+    assert command_trace["wake_match"] == "two_stage_command"
+    assert command_trace["wake_detected_at"] is None
+    assert command_trace["command_ready_at"]
+    assert command_trace["tts_started_at"]
+    assert command_trace["tts_completed_at"]
+
+
+def test_two_stage_command_timeout_is_recorded_at_exact_stage(client):
+    _wait_for_voice_ready(client)
+    client.app.state.turn_controller._settings.wake_command_timeout_seconds = 0.01
+    client.app.state.voice_providers.stt = _WakeSentenceSTT("Hey TARS")
+    wav_bytes = pcm16_to_wav(b"\x01\x00" * 400, sample_rate=16000)
+
+    wake = client.post(
+        "/api/v1/voice/utterance",
+        files={"file": ("wake.wav", wav_bytes, "audio/wav")},
+        data={"turn_id": "timeout-turn", "session_id": "timeout-session"},
+    )
+    assert wake.status_code == 200
+    assert wake.json()["status"] == "awaiting_command"
+    time.sleep(0.05)
+
+    traces = client.get("/api/v1/diagnostics/voice-latency").json()["traces"]
+    trace = next(item for item in traces if item["turn_id"] == "timeout-turn")
+    assert trace["error_stage"] == "command_timeout"
+    assert trace["status"] == "failed"
