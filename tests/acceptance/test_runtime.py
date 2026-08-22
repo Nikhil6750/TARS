@@ -218,10 +218,10 @@ def test_assistant_refuses_to_invent_missing_trading_data(
 
 
 def test_voice_reports_real_local_provider_path(client: TarsTestClient) -> None:
-    path = os.getenv("TARS_VOICE_STATUS_PATH", "/api/voice/status")
+    path = os.getenv("TARS_VOICE_STATUS_PATH", "/api/v1/voice/status")
     payload = client._json(client.http.get(client._url(path)))
     normalized = json.dumps(payload, sort_keys=True).casefold().replace("-", "_")
-    for provider in ("openwakeword", "silero", "faster_whisper"):
+    for provider in ("transcript_matcher", "silero", "faster_whisper"):
         assert provider in normalized
     assert "fish_speech" in normalized or "kokoro" in normalized
 

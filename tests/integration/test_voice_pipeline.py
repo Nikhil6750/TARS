@@ -24,16 +24,9 @@ def wav_bytes(pcm: bytes, sample_rate: int = 16_000) -> bytes:
     return buffer.getvalue()
 
 
-def test_audio_transcript_assistant_and_tts_use_actual_backend_routes(
+def test_minimal_golden_loop_owns_every_required_voice_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Controlled providers make the real backend voice plumbing deterministic."""
-
-    transcript = "What setups require my attention?"
-    conversation_id = "64dd4f95-76a1-4ca8-af48-c89d956a7ba4"
-    recorded_pcm = b"\x01\x00\x02\x00\x03\x00\x04\x00"
-    synthesized_wav = wav_bytes(b"\x05\x00\x06\x00")
-
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'voice.db'}")
     monkeypatch.setenv("USE_MOCK_TRADING_EVENTS", "false")
     monkeypatch.setenv("ASSISTANT_PROVIDER", "mock")
@@ -57,11 +50,12 @@ def test_audio_transcript_assistant_and_tts_use_actual_backend_routes(
         sample_rate = 16_000
 
         def __init__(self) -> None:
+            self.text = ""
             self.received: list[bytes] = []
 
         async def transcribe(self, pcm_audio: bytes) -> TranscriptionResult:
             self.received.append(pcm_audio)
-            return TranscriptionResult(text=transcript, language="en")
+            return TranscriptionResult(text=self.text, language="en")
 
     class RecordingTTS(TextToSpeechProvider):
         name = "certification_tts"
@@ -72,47 +66,100 @@ def test_audio_transcript_assistant_and_tts_use_actual_backend_routes(
 
         async def synthesize(self, text: str) -> SynthesisResult:
             self.received.append(text)
-            return SynthesisResult(audio=synthesized_wav, sample_rate=self.sample_rate)
+            return SynthesisResult(
+                audio=wav_bytes(b"\x05\x00\x06\x00"),
+                sample_rate=self.sample_rate,
+            )
 
     get_settings.cache_clear()
     app = create_app()
     stt = RecordingSTT()
     tts = RecordingTTS()
+    pcm = b"\x01\x00\x02\x00\x03\x00\x04\x00"
+    wav = wav_bytes(pcm)
+    conversation_id = "64dd4f95-76a1-4ca8-af48-c89d956a7ba4"
+
     try:
         with TestClient(app) as api:
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 5
             while not api.get("/api/v1/voice/status").json()["ready"]:
-                assert time.monotonic() < deadline, "voice providers did not become ready"
+                assert time.monotonic() < deadline
                 threading.Event().wait(0.01)
             app.state.voice_providers.stt = stt
             app.state.voice_providers.tts = tts
 
-            transcription = api.post(
-                "/api/v1/voice/transcribe",
-                files={"file": ("recording.wav", wav_bytes(recorded_pcm), "audio/wav")},
-            )
-            transcription.raise_for_status()
-            assert transcription.json()["text"] == transcript
-            assert stt.received == [recorded_pcm]
+            def utterance(transcript: str, turn_id: str, session_id: str = "golden") -> dict:
+                stt.text = transcript
+                response = api.post(
+                    "/api/v1/voice/utterance",
+                    files={"file": ("utterance.wav", wav, "audio/wav")},
+                    data={
+                        "turn_id": turn_id,
+                        "conversation_id": conversation_id,
+                        "session_id": session_id,
+                        "audio_detected_at_ms": "1787382000000",
+                        "speech_end_at_ms": "1787382000500",
+                    },
+                )
+                response.raise_for_status()
+                return response.json()
 
-            assistant = api.post(
-                "/api/v1/assistant/query",
-                json={
-                    "text": transcription.json()["text"],
-                    "conversation_id": conversation_id,
-                },
-            )
-            assistant.raise_for_status()
-            assistant_text = assistant.json()["content"]
-            assert assistant.json()["intent"] == "attention_summary"
-            assert "nothing currently requires your attention" in assistant_text.casefold()
+            wake = utterance("Hey TARS", "required-wake", "two-stage")
+            assert wake["status"] == "awaiting_command"
+            assert wake["speech_text"] == "Yeah?"
+            assert wake["transcript"] == "Hey TARS"
+            assert app.state.turn_controller.execution_count("required-wake") == 0
 
-            synthesis = api.post(
-                "/api/v1/voice/synthesize", json={"text": assistant_text}
+            continuation = utterance(
+                "Explain Docker containers.", "required-two-stage-command", "two-stage"
             )
-            synthesis.raise_for_status()
-            assert synthesis.content == synthesized_wav
-            assert synthesis.headers["content-type"].startswith("audio/wav")
-            assert tts.received == [assistant_text]
+            assert continuation["intent"] == "NORMAL_CONVERSATION"
+            assert continuation["status"] == "completed"
+            assert continuation["audio_chunks_base64"]
+
+            required = (
+                ("Hey TARS what time is it", "required-time", "DETERMINISTIC"),
+                ("Hey TARS explain polymorphism", "required-normal", "NORMAL_CONVERSATION"),
+                ("Hey TARS analyze the chart", "required-chart", "CHART_ANALYSIS"),
+            )
+            for transcript, turn_id, expected_intent in required:
+                result = utterance(transcript, turn_id)
+                assert result["intent"] == expected_intent
+                assert result["status"] == "completed"
+                assert result["transcript"] == transcript
+                assert result["speech_text"]
+                assert result["audio_chunks_base64"]
+                assert app.state.turn_controller.execution_count(turn_id) == 1
+
+            for index, alias in enumerate(
+                ("hey tarz", "hey stars", "tars", "jarvis", "hey jarvis")
+            ):
+                result = utterance(f"{alias} what time is it", f"alias-{index}")
+                assert result["intent"] == "DETERMINISTIC"
+                assert result["status"] == "completed"
+
+            stt_before_replay = len(stt.received)
+            replay = utterance("Hey TARS explain polymorphism", "required-normal")
+            assert replay["replayed"] is True
+            assert len(stt.received) == stt_before_replay
+            assert app.state.turn_controller.execution_count("required-normal") == 1
+
+            traces = api.get("/api/v1/diagnostics/voice-latency").json()["traces"]
+            trace = next(item for item in traces if item["turn_id"] == "required-normal")
+            for marker in (
+                "audio_detected_at",
+                "speech_end_at",
+                "stt_started_at",
+                "stt_completed_at",
+                "wake_detected_at",
+                "command_ready_at",
+                "processing_started_at",
+                "first_response_token_at",
+                "tts_started_at",
+                "tts_completed_at",
+            ):
+                assert trace[marker], marker
+            assert trace["transcript"] == "Hey TARS explain polymorphism"
+            assert trace["wake_match"] == "hey tars"
     finally:
         get_settings.cache_clear()
