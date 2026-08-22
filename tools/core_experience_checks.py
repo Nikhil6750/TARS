@@ -220,12 +220,13 @@ def inspect_runtime(base_url: str, process_name: str) -> list[Finding]:
                             f"PID {newest.pid} has no usable visible native main window",
                         )
                     )
-                elif window.width < 800 or window.height < 500:
+                elif window.width < 360 or window.height < 160:
                     findings.append(
                         Finding(
                             "runtime.native_window_clipped",
                             "blocker",
-                            f"native main window is only {window.width}x{window.height}",
+                            f"native window is below the minimum voice HUD size: "
+                            f"{window.width}x{window.height}",
                         )
                     )
         except Exception as exc:  # noqa: BLE001 - probe failures are findings

@@ -7,6 +7,7 @@ def test_health(client):
     body = resp.json()
     assert body["status"] == "ok"
     assert body["database"] == "ok"
+    assert body["wake_word_provider"] == "transcript_matcher"
 
 
 def test_mock_event_persists_and_lists(client):

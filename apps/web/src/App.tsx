@@ -86,6 +86,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     document.title = 'TARS Ready';
+    void nativeBridge.markFrontendReady();
   }, []);
 
   const cancelAutoHide = useCallback(() => {

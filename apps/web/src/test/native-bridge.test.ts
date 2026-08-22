@@ -32,6 +32,7 @@ describe('Wave 2A NativeBridgeService', () => {
   });
 
   it('supports HUD summon, hide, toggle, and exit operations without exceptions', async () => {
+    await expect(bridge.markFrontendReady()).resolves.not.toThrow();
     await expect(bridge.summonHUD('compact')).resolves.not.toThrow();
     await expect(bridge.hideHUD()).resolves.not.toThrow();
     await expect(bridge.toggleHUD()).resolves.not.toThrow();

@@ -259,6 +259,15 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
+fn mark_frontend_ready(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_title("TARS Ready").map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    Err("Main window not found".into())
+}
+
+#[tauri::command]
 fn is_always_on_top(app: tauri::AppHandle) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window("main") {
         return window.is_always_on_top().map_err(|e| e.to_string());
@@ -1241,6 +1250,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             greet,
+            mark_frontend_ready,
             toggle_compact_mode,
             set_window_size,
             is_always_on_top,

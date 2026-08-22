@@ -19,6 +19,17 @@ export interface AutostartInfo {
 }
 
 export class NativeBridgeService {
+  /** Marks the mounted production webview for source-matched launch verification. */
+  public async markFrontendReady(): Promise<void> {
+    if (!isTauri()) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('mark_frontend_ready');
+    } catch (err) {
+      console.warn('[NativeBridge] Failed to mark frontend ready:', err);
+    }
+  }
+
   /**
    * Retrieves the current foreground window context using Win32 API.
    * Grounded fallback provided when running in Web/PWA or mock mode.
