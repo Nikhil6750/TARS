@@ -33,7 +33,7 @@ def _wait_for_voice_ready(client, attempts: int = 40) -> dict:
 def test_voice_status_reports_configured_mock_providers(client):
     body = _wait_for_voice_ready(client)
     assert body["ready"] is True
-    assert body["wake_word_provider"] == "mock"
+    assert body["wake_word_provider"] == "transcript_matcher"
     assert body["stt_provider"] == "mock"
     assert body["tts_provider"] == "mock"
 

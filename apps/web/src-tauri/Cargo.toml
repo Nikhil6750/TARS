@@ -20,10 +20,9 @@ tauri-plugin-global-shortcut = "2.3.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-# Native background wake-word runtime (mic capture + VAD + wake-phrase
-# detection independent of the React panel's lifecycle -- see wake_engine.rs).
+# Native microphone capture + VAD transport. Wake recognition and all
+# assistant business logic remain in the backend TurnController.
 cpal = "0.18"
-regex = "1"
 ureq = { version = "2", default-features = false }
 
 [target.'cfg(windows)'.dependencies]

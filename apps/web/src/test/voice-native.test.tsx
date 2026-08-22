@@ -2,7 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { FloatingVoicePanel } from '../components/voice/FloatingVoicePanel';
 import { audioService } from '../services/audio';
-import { wakeWordService } from '../services/wake-word';
 import { nativeBridge } from '../services/native-bridge';
 
 describe('Overnight Voice-Native Experience & FloatingVoicePanel', () => {
@@ -162,22 +161,4 @@ describe('Overnight Voice-Native Experience & FloatingVoicePanel', () => {
     });
   });
 
-  describe('Wake Word Matching & Local VAD Regex', () => {
-    const WAKE_REGEX = /\b(hey\s+tars|tars|hey\s+tar|ok\s+tars|hey\s+torres|hi\s+tars)\b/i;
-
-    it('matches natural variations of the wake phrase', () => {
-      expect(WAKE_REGEX.test('hey tars')).toBe(true);
-      expect(WAKE_REGEX.test('Hey TARS, what are my active setups?')).toBe(true);
-      expect(WAKE_REGEX.test('ok tars')).toBe(true);
-      expect(WAKE_REGEX.test('hi tars')).toBe(true);
-      expect(WAKE_REGEX.test('tars what is my risk')).toBe(true);
-      expect(WAKE_REGEX.test('random conversation without phrase')).toBe(false);
-    });
-
-    it('wakeWordService is configured for local background VAD', () => {
-      const status = wakeWordService.getStatus();
-      expect(status.targetPhrase).toBe('Hey TARS');
-      expect(status.engine).toBe('vad_whisper_local');
-    });
-  });
 });

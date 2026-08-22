@@ -1,155 +1,137 @@
-/**
- * Client for /api/v2/assistant/query and /api/v1/assistant/query/stream --
- * the voice-first runtime's conversation paths. Consumes presentation-aware
- * contracts (display_text for rich markdown UI, speech_text for conversational TTS).
- */
+/** Client for the one canonical backend-owned assistant turn API. */
+import { TARSAssistantMessage } from '../types/assistant-message';
 import { consumeSSE, StreamEvent } from './sse';
-import { AssistantResponseQuality, TARSAssistantMessage } from '../types/assistant-message';
 
-export interface AssistantStreamCompletePayload {
-  message?: TARSAssistantMessage | Record<string, unknown>;
-  display_text?: string;
-  speech_text?: string;
-  quality?: AssistantResponseQuality;
-  [key: string]: unknown;
+export interface AssistantResponsePayload {
+  turn_id: string;
+  display_text: string;
+  speech_text: string;
+  intent: string;
+  status: string;
+  provider: string;
+  latency_ms: number;
+  conversation_id: string;
+  message?: TARSAssistantMessage;
 }
 
 export interface AssistantStreamCallbacks {
   onDelta?: (text: string) => void;
-  onComplete?: (payload: AssistantStreamCompletePayload | undefined) => void;
+  onComplete?: (payload: AssistantResponsePayload) => void;
   onError?: (detail: string) => void;
 }
 
-export interface AssistantQueryResult {
+export interface AssistantQueryResult extends AssistantResponsePayload {
   message: TARSAssistantMessage;
-  display_text: string;
-  speech_text: string;
-  quality?: AssistantResponseQuality;
+}
+
+function projectMessage(payload: AssistantResponsePayload): TARSAssistantMessage {
+  return {
+    schema_version: '1.0.0',
+    message_id: payload.turn_id,
+    conversation_id: payload.conversation_id,
+    timestamp: new Date().toISOString(),
+    role: 'assistant',
+    content: payload.display_text,
+    input_mode: 'text',
+    intent: payload.intent,
+    providers: { assistant: payload.provider },
+    error: payload.status === 'failed' ? payload.display_text : null,
+    display_text: payload.display_text,
+    speech_text: payload.speech_text,
+  };
+}
+
+function parseCompleteEvent(event: StreamEvent): AssistantResponsePayload {
+  const payload: AssistantResponsePayload = {
+    turn_id: String(event.turn_id ?? ''),
+    display_text: String(event.display_text ?? ''),
+    speech_text: String(event.speech_text ?? ''),
+    intent: String(event.intent ?? 'NORMAL_CONVERSATION'),
+    status: String(event.status ?? 'completed'),
+    provider: String(event.provider ?? 'unknown'),
+    latency_ms: Number(event.latency_ms ?? 0),
+    conversation_id: String(event.conversation_id ?? crypto.randomUUID()),
+  };
+  payload.message = projectMessage(payload);
+  return payload;
 }
 
 export class AssistantClient {
-  /**
-   * Non-streaming assistant query targeting /api/v2/assistant/query
-   * with fallback to legacy /api/v1/assistant/query.
-   */
   public async query(
     text: string,
     conversationId: string | undefined,
     apiEndpoint: string,
-    telemetryIdOrSignal?: string | AbortSignal,
+    turnIdOrSignal?: string | AbortSignal,
     signal?: AbortSignal
   ): Promise<AssistantQueryResult> {
-    let telemetryId: string | undefined;
-    let actualSignal = signal;
-    if (telemetryIdOrSignal instanceof AbortSignal) {
-      actualSignal = telemetryIdOrSignal;
-    } else if (typeof telemetryIdOrSignal === 'string') {
-      telemetryId = telemetryIdOrSignal;
-    }
-
-    const endpoint = `${apiEndpoint.replace(/\/$/, '')}/api/v2/assistant/query`;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (telemetryId) {
-      headers['X-TARS-Voice-Turn-ID'] = telemetryId;
-    }
-
-    let res = await fetch(endpoint, {
+    const turnId = typeof turnIdOrSignal === 'string' ? turnIdOrSignal : crypto.randomUUID();
+    const actualSignal = turnIdOrSignal instanceof AbortSignal ? turnIdOrSignal : signal;
+    const response = await fetch(`${apiEndpoint.replace(/\/$/, '')}/api/v1/assistant/query`, {
       method: 'POST',
-      headers,
-      body: JSON.stringify({ text, conversation_id: conversationId }),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-TARS-Turn-ID': turnId,
+      },
+      body: JSON.stringify({ text, conversation_id: conversationId, turn_id: turnId }),
       signal: actualSignal,
     });
-
-    if (res.status === 404) {
-      // Fallback to v1 endpoint
-      res = await fetch(`${apiEndpoint.replace(/\/$/, '')}/api/v1/assistant/query`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ text, conversation_id: conversationId }),
-        signal: actualSignal,
-      });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => response.statusText);
+      throw new Error(`Assistant query failed (${response.status}): ${detail}`);
     }
-
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => '');
-      throw new Error(`Assistant query failed (${res.status}): ${errorText || res.statusText}`);
-    }
-
-    const data = await res.json();
-    const message: TARSAssistantMessage = data.message || data;
-    const display_text = data.display_text || message.content || data.content || '';
-    const speech_text = data.speech_text || message.speech_text || display_text;
-
-    return {
-      message,
-      display_text,
-      speech_text,
-      quality: data.quality,
-    };
+    const payload = (await response.json()) as AssistantResponsePayload;
+    return { ...payload, message: projectMessage(payload) };
   }
 
-  /**
-   * Streaming twin of query -- consumes Server-Sent Events from
-   * /api/v1/assistant/query/stream.
-   */
   public async streamQuery(
     text: string,
     conversationId: string | undefined,
     apiEndpoint: string,
     callbacks: AssistantStreamCallbacks,
-    telemetryIdOrSignal?: string | AbortSignal,
+    turnIdOrSignal?: string | AbortSignal,
     signal?: AbortSignal
   ): Promise<void> {
-    let telemetryId: string | undefined;
-    let actualSignal = signal;
-    if (telemetryIdOrSignal instanceof AbortSignal) {
-      actualSignal = telemetryIdOrSignal;
-    } else if (typeof telemetryIdOrSignal === 'string') {
-      telemetryId = telemetryIdOrSignal;
-    }
-
-    let res: Response;
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (telemetryId) {
-      headers['X-TARS-Voice-Turn-ID'] = telemetryId;
-    }
-
+    const turnId = typeof turnIdOrSignal === 'string' ? turnIdOrSignal : crypto.randomUUID();
+    const actualSignal = turnIdOrSignal instanceof AbortSignal ? turnIdOrSignal : signal;
+    let response: Response;
     try {
-      res = await fetch(`${apiEndpoint.replace(/\/$/, '')}/api/v1/assistant/query/stream`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ text, conversation_id: conversationId }),
-        signal: actualSignal,
-      });
-    } catch (err) {
-      if (actualSignal?.aborted) return;
-      callbacks.onError?.(err instanceof Error ? err.message : String(err));
+      response = await fetch(
+        `${apiEndpoint.replace(/\/$/, '')}/api/v1/assistant/query/stream`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-TARS-Turn-ID': turnId,
+          },
+          body: JSON.stringify({ text, conversation_id: conversationId, turn_id: turnId }),
+          signal: actualSignal,
+        }
+      );
+    } catch (error) {
+      if (!actualSignal?.aborted) {
+        callbacks.onError?.(error instanceof Error ? error.message : String(error));
+      }
       return;
     }
-
-    if (!res.ok || !res.body) {
-      callbacks.onError?.(`Assistant stream request failed with status ${res.status}`);
+    if (!response.ok || !response.body) {
+      callbacks.onError?.(`Assistant stream request failed with status ${response.status}`);
       return;
     }
 
     try {
-      await consumeSSE(res.body, (event: StreamEvent) => {
+      await consumeSSE(response.body, (event: StreamEvent) => {
         if (event.type === 'delta' && event.text) {
           callbacks.onDelta?.(event.text);
         } else if (event.type === 'complete') {
-          callbacks.onComplete?.({
-            message: event.message as TARSAssistantMessage | Record<string, unknown> | undefined,
-            display_text: event.display_text as string | undefined,
-            speech_text: event.speech_text as string | undefined,
-            quality: event.quality as AssistantResponseQuality | undefined,
-          });
+          callbacks.onComplete?.(parseCompleteEvent(event));
         } else if (event.type === 'error') {
           callbacks.onError?.(event.detail || 'Assistant stream reported an error');
         }
       });
-    } catch (err) {
-      if (actualSignal?.aborted) return;
-      callbacks.onError?.(err instanceof Error ? err.message : String(err));
+    } catch (error) {
+      if (!actualSignal?.aborted) {
+        callbacks.onError?.(error instanceof Error ? error.message : String(error));
+      }
     }
   }
 }

@@ -62,7 +62,8 @@ if ($existing) {
                 Stop-Process -Id $proc.Id -Force -Confirm:$false
                 Start-Sleep -Seconds 1
             } else {
-                Write-Warn "  Port $BackendPort is held by PID $($proc.Id) ($($proc.ProcessName)), which is not this repo's backend. Not killing it -- free the port manually if this is unexpected."
+                Write-Error "Port $BackendPort is held by PID $($proc.Id) ($($proc.ProcessName)), not this worktree. Stop it first; refusing to launch against a wrong-worktree backend."
+                exit 1
             }
         } catch {
             Write-Warn "  Could not inspect the process holding port $BackendPort`: $_"
@@ -132,7 +133,7 @@ if (-not $pythonCmd) {
     exit 1
 }
 $runPyPath = Join-Path $BackendDir 'run.py'
-$backendProc = Start-Process -FilePath $pythonCmd.Source -ArgumentList $runPyPath -PassThru -WindowStyle Hidden
+$backendProc = Start-Process -FilePath $pythonCmd.Source -ArgumentList $runPyPath -WorkingDirectory $BackendDir -PassThru -WindowStyle Hidden
 Write-Host "  Backend process started (PID $($backendProc.Id))."
 
 # ---- 5. Wait for /health ----------------------------------------------------
@@ -165,19 +166,40 @@ try {
 }
 
 # ---- 6. Launch native TARS --------------------------------------------------
-Write-Step "[6/7] Launching native TARS..."
-$candidates = @(
-    (Join-Path $WebDir 'src-tauri\target\release\tars-companion.exe'),
-    (Join-Path $WebDir 'src-tauri\target\debug\tars-companion.exe')
-)
-if ($env:CARGO_TARGET_DIR) {
-    $candidates += (Join-Path $env:CARGO_TARGET_DIR 'release\tars-companion.exe')
-    $candidates += (Join-Path $env:CARGO_TARGET_DIR 'debug\tars-companion.exe')
+Write-Step "[6/7] Building and launching source-matched native TARS..."
+$npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+if (-not $npmCmd) {
+    Write-Error "npm not found on PATH. Install Node.js before launching TARS."
+    exit 1
 }
-$exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if ($exe) {
-    $nativeProc = Start-Process -FilePath $exe -PassThru
-    Write-Ok "  Launched $exe (PID $($nativeProc.Id))"
+$cargoCmd = Get-Command cargo -ErrorAction SilentlyContinue
+if (-not $cargoCmd) {
+    $rustBin = Join-Path $env:USERPROFILE '.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin'
+    $directCargo = Join-Path $rustBin 'cargo.exe'
+    if (-not (Test-Path $directCargo)) {
+        Write-Error "cargo not found on PATH and no stable Rust toolchain was found at $directCargo"
+        exit 1
+    }
+    $env:PATH = "$rustBin;$env:PATH"
+}
+$env:CARGO_TARGET_DIR = Join-Path $WebDir 'src-tauri\target'
+$env:TARS_BACKEND_URL = "http://127.0.0.1:$BackendPort"
+Push-Location $WebDir
+try {
+    if (-not (Test-Path (Join-Path $WebDir 'node_modules'))) {
+        & $npmCmd.Source ci
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
+    }
+    & $npmCmd.Source run tauri build
+    if ($LASTEXITCODE -ne 0) { throw "native build failed with exit code $LASTEXITCODE" }
+} finally {
+    Pop-Location
+}
+
+$exe = Join-Path $WebDir 'src-tauri\target\release\tars-companion.exe'
+if (Test-Path $exe) {
+    $nativeProc = Start-Process -FilePath $exe -WorkingDirectory $WebDir -PassThru
+    Write-Ok "  Launched source-matched $exe (PID $($nativeProc.Id))"
 
     # Verify native window creation and frontend loaded
     $windowVerified = $false
@@ -185,9 +207,9 @@ if ($exe) {
         Start-Sleep -Milliseconds 500
         try {
             $procRefreshed = Get-Process -Id $nativeProc.Id -ErrorAction Stop
-            if ($procRefreshed.MainWindowHandle -ne 0) {
+            if ($procRefreshed.MainWindowHandle -ne 0 -and $procRefreshed.MainWindowTitle -eq 'TARS Ready') {
                 $windowVerified = $true
-                Write-Ok "  Native main window verified (MainWindowHandle: $($procRefreshed.MainWindowHandle), frontend loaded)."
+                Write-Ok "  Native webview verified (title: '$($procRefreshed.MainWindowTitle)', handle: $($procRefreshed.MainWindowHandle))."
                 break
             }
         } catch {
@@ -195,12 +217,12 @@ if ($exe) {
         }
     }
     if (-not $windowVerified) {
-        Write-Warn "  Native window handle not yet visible -- process running with PID $($nativeProc.Id)."
+        Write-Error "Native process started but the TARS Ready webview marker did not appear."
+        exit 1
     }
 } else {
-    Write-Warn "  No built TARS executable found. Checked:"
-    foreach ($c in $candidates) { Write-Warn "    $c" }
-    Write-Warn "  Build it first: cd apps\web; npm run tauri build   (or 'npm run tauri dev' for a dev run)."
+    Write-Error "Source-matched native build completed without producing $exe"
+    exit 1
 }
 
 # ---- 7. Ready ----------------------------------------------------------------

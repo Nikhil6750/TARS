@@ -12,7 +12,7 @@ import {
   Volume2,
 } from 'lucide-react';
 import { CompanionVisualState } from '../../types/companion';
-import { WakeWordStatusInfo } from '../../services/wake-word';
+import { WakeWordStatusInfo } from '../../types/voice-runtime';
 
 interface FloatingVoicePanelProps {
   companionState: CompanionVisualState;

@@ -330,12 +330,6 @@ fn wake_engine_status() -> WakeEngineStatus {
 }
 
 #[tauri::command]
-fn force_wake_command_capture(app: tauri::AppHandle) -> Result<(), String> {
-    wake_engine::force_command_capture(Some(&app));
-    Ok(())
-}
-
-#[tauri::command]
 fn set_wake_playback_state(app: tauri::AppHandle, speaking: bool) -> Result<(), String> {
     wake_engine::set_playback_speaking(speaking, &app);
     Ok(())
@@ -359,11 +353,16 @@ fn summon_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<(), Str
     if let Some(window) = app.get_webview_window("main") {
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
-        let m = mode.unwrap_or("voice");
-        window.set_size(tauri::LogicalSize::new(1100.0, 780.0)).map_err(|e| e.to_string())?;
-        window.set_always_on_top(false).map_err(|e| e.to_string())?;
+        let requested_mode = mode.unwrap_or("voice");
+        let (width, height, always_on_top) = if requested_mode == "voice" {
+            (420.0, 260.0, true)
+        } else {
+            (1100.0, 780.0, false)
+        };
+        window.set_size(tauri::LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
+        window.set_always_on_top(always_on_top).map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
-        let _ = app.emit("tars://summon-hud", "workstation");
+        let _ = app.emit("tars://summon-hud", requested_mode);
         return Ok(());
     }
     Err("Main window not found".into())
@@ -1259,7 +1258,6 @@ pub fn run() {
             get_autostart_status,
             set_autostart,
             wake_engine_status,
-            force_wake_command_capture,
             set_wake_playback_state,
         ])
         .on_window_event(|window, event| {

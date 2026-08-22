@@ -32,7 +32,7 @@ import { browserControlService } from '../../services/browser-control';
 import { actionPlannerService } from '../../services/action-planner';
 import { frontendCommandBridge } from '../../services/frontend-command-bridge';
 import { visualTargetingService } from '../../services/visual-targeting';
-import { WakeWordStatusInfo } from '../../services/wake-word';
+import { WakeWordStatusInfo } from '../../types/voice-runtime';
 import { ActiveContextBar } from './ActiveContextBar';
 import { ActionConfirmationCard } from './ActionConfirmationCard';
 import { ActionResultView } from './ActionResultView';

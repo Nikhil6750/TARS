@@ -1,43 +1,28 @@
-/**
- * Thin frontend listener for the native background wake engine
- * (src-tauri/src/wake_engine.rs). Owns no microphone or VAD logic itself --
- * it only subscribes to Tauri events the native runtime already emits, so
- * the panel can render state without ever taking mic ownership. Stopping
- * this listener (e.g. component unmount) does NOT stop wake detection --
- * the native engine keeps listening independently, by design.
- */
+/** Thin observer for the native audio transport. It never recognizes wake
+ * phrases, routes commands, chooses providers, or creates speech text. */
 import { isTauri } from '../services/tauri';
+import { AssistantResponse } from '../types/assistant-response';
 
 export type NativeWakeState =
   | 'IDLE'
-  | 'AUDIO'
+  | 'SPEECH_DETECTED'
   | 'TRANSCRIBING'
   | 'WAKE_DETECTED'
-  | 'COMMAND_LISTENING'
+  | 'LISTENING_FOR_COMMAND'
   | 'PROCESSING'
   | 'SPEAKING';
 
 export interface WakeTimingTelemetry {
   state: NativeWakeState;
+  turn_id?: string | null;
   audio_detected_at?: number | null;
   speech_end_at?: number | null;
-  transcription_start?: number | null;
-  transcription_complete?: number | null;
-  wake_detected_at?: number | null;
-  command_ready_at?: number | null;
-  duration_ms?: number | null;
-  transcript?: string | null;
-  telemetry_id?: string | null;
 }
 
 export interface WakeClientCallbacks {
-  onWakeDetected?: (phrase: string) => void;
-  onAnalyzeChartDetected?: (phrase: string) => void;
-  onCommandTranscript?: (text: string) => void;
-  onCommandTimeout?: () => void;
-  onSpeechStart?: () => void;
   onAudioLevel?: (level: number) => void;
   onWakeStateChanged?: (telemetry: WakeTimingTelemetry) => void;
+  onTurnComplete?: (response: AssistantResponse) => void;
 }
 
 type UnlistenFn = () => void;
@@ -46,93 +31,48 @@ export class WakeClient {
   private unlisten: UnlistenFn[] = [];
 
   public async start(callbacks: WakeClientCallbacks): Promise<boolean> {
-    if (!isTauri()) {
-      console.info('[WakeClient] Native wake engine unavailable outside Tauri (web preview) -- push-to-talk only.');
-      return false;
-    }
+    if (!isTauri()) return false;
 
     const { listen } = await import('@tauri-apps/api/event');
-    const subs: Array<Promise<UnlistenFn>> = [];
-
-    if (callbacks.onWakeDetected) {
-      subs.push(
-        listen<{ text: string }>('tars://wake-detected', (e) => callbacks.onWakeDetected!(e.payload.text))
+    const subscriptions: Array<Promise<UnlistenFn>> = [];
+    if (callbacks.onAudioLevel) {
+      subscriptions.push(
+        listen<number>('tars://wake-audio-level', (event) => callbacks.onAudioLevel?.(event.payload))
       );
     }
-    if (callbacks.onAnalyzeChartDetected) {
-      subs.push(
-        listen<{ text: string }>('tars://analyze-chart-detected', (e) =>
-          callbacks.onAnalyzeChartDetected!(e.payload.text)
+    if (callbacks.onWakeStateChanged) {
+      subscriptions.push(
+        listen<WakeTimingTelemetry>('tars://wake-state-changed', (event) =>
+          callbacks.onWakeStateChanged?.(event.payload)
         )
       );
     }
-    if (callbacks.onCommandTranscript) {
-      subs.push(
-        listen<{ text: string }>('tars://command-transcript', (e) => callbacks.onCommandTranscript!(e.payload.text))
+    if (callbacks.onTurnComplete) {
+      subscriptions.push(
+        listen<AssistantResponse>('tars://assistant-turn-complete', (event) =>
+          callbacks.onTurnComplete?.(event.payload)
+        )
       );
     }
-    if (callbacks.onCommandTimeout) {
-      subs.push(listen('tars://command-timeout', () => callbacks.onCommandTimeout!()));
-    }
-    if (callbacks.onSpeechStart) {
-      subs.push(listen('tars://speech-start', () => callbacks.onSpeechStart!()));
-    }
-    if (callbacks.onAudioLevel) {
-      subs.push(listen<number>('tars://wake-audio-level', (e) => callbacks.onAudioLevel!(e.payload)));
-    }
-    if (callbacks.onWakeStateChanged) {
-      subs.push(
-        listen<WakeTimingTelemetry>('tars://wake-state-changed', (e) => callbacks.onWakeStateChanged!(e.payload))
-      );
-    }
-
-    this.unlisten = await Promise.all(subs);
+    this.unlisten = await Promise.all(subscriptions);
     return true;
   }
 
   public stop(): void {
-    this.unlisten.forEach((fn) => fn());
+    this.unlisten.forEach((unlisten) => unlisten());
     this.unlisten = [];
   }
 
-  /**
-   * Forces the native engine into one-shot command-capture mode right now
-   * -- used for barge-in: the instant `speech-start` fires while TARS is
-   * speaking, call this so the utterance already forming is captured as
-   * the next command instead of being wake-phrase-filtered.
-   */
-  public async forceCommandCapture(): Promise<void> {
-    if (!isTauri()) return;
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('force_wake_command_capture');
-    } catch (err) {
-      console.warn('[WakeClient] force_wake_command_capture failed:', err);
-    }
-  }
-
-  /**
-   * Informs the native wake runtime whether frontend audio playback is actively speaking,
-   * transitioning native state machine between PROCESSING -> SPEAKING -> IDLE.
-   */
   public async setPlaybackSpeaking(speaking: boolean): Promise<void> {
     if (!isTauri()) return;
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('set_wake_playback_state', { speaking });
-    } catch (err) {
-      console.warn('[WakeClient] set_wake_playback_state failed:', err);
-    }
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('set_wake_playback_state', { speaking });
   }
 
   public async status(): Promise<{ running: boolean; last_error: string | null } | null> {
     if (!isTauri()) return null;
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      return await invoke('wake_engine_status');
-    } catch {
-      return null;
-    }
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke('wake_engine_status');
   }
 }
 

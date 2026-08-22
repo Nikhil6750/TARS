@@ -55,11 +55,12 @@ export const AskTARSView: React.FC<AskTARSViewProps> = ({
       return;
     }
 
+    if (!msg.speech_text) return;
     setSpeakingId(msg.message_id);
     try {
-      await audioService.synthesizeAndPlay(msg.content, apiEndpoint);
+      await audioService.synthesizeAndPlay(msg.speech_text, apiEndpoint);
     } catch {
-      await audioService.speakText(msg.content);
+      await audioService.speakText(msg.speech_text);
     } finally {
       setSpeakingId(null);
     }

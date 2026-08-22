@@ -28,7 +28,7 @@ describe('AssistantClient presentation contracts & streaming', () => {
       expect.objectContaining({
         signal: controller.signal,
         headers: expect.objectContaining({
-          'X-TARS-Voice-Turn-ID': 'voice-trace-123',
+          'X-TARS-Turn-ID': 'voice-trace-123',
         }),
       })
     );
@@ -39,7 +39,7 @@ describe('AssistantClient presentation contracts & streaming', () => {
       sseResponse([
         'data: {"type":"delta","text":"### Market"}\n\n',
         'data: {"type":"delta","text":" Overview"}\n\n',
-        'data: {"type":"complete","display_text":"### Market Overview\\n- Support holding","speech_text":"Market Overview. Support holding.","message":{"content":"### Market Overview"}}\n\n',
+        'data: {"type":"complete","turn_id":"turn-1","conversation_id":"conv1","display_text":"### Market Overview\\n- Support holding","speech_text":"Market Overview. Support holding.","intent":"NORMAL_CONVERSATION","status":"completed","provider":"mock","latency_ms":12}\n\n',
       ])
     );
     const onDelta = vi.fn();
@@ -52,27 +52,23 @@ describe('AssistantClient presentation contracts & streaming', () => {
       expect.objectContaining({
         display_text: '### Market Overview\n- Support holding',
         speech_text: 'Market Overview. Support holding.',
-        message: expect.objectContaining({ content: '### Market Overview' }),
+        message: expect.objectContaining({ content: '### Market Overview\n- Support holding' }),
       })
     );
   });
 
-  it('assistantClient.query consumes /api/v2/assistant/query presentation envelope', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+  it('assistantClient.query consumes the canonical v1 AssistantResponse', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({
-          message: {
-            schema_version: '1.0.0',
-            message_id: 'msg-1',
-            conversation_id: 'conv-1',
-            timestamp: new Date().toISOString(),
-            role: 'assistant',
-            content: 'Formatted **bold** answer',
-            input_mode: 'text',
-          },
+          turn_id: 'turn-1',
+          conversation_id: 'conv-1',
           display_text: 'Formatted **bold** answer',
           speech_text: 'Formatted bold answer',
-          quality: { directness: true, speech_suitability: true },
+          intent: 'NORMAL_CONVERSATION',
+          status: 'completed',
+          provider: 'mock',
+          latency_ms: 10,
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       )
@@ -82,7 +78,8 @@ describe('AssistantClient presentation contracts & streaming', () => {
 
     expect(result.display_text).toBe('Formatted **bold** answer');
     expect(result.speech_text).toBe('Formatted bold answer');
-    expect(result.quality?.speech_suitability).toBe(true);
+    expect(result.message.content).toBe('Formatted **bold** answer');
+    expect(fetchSpy.mock.calls[0][0]).toBe('http://api/api/v1/assistant/query');
   });
 
   it('does not report an error when the request is aborted mid-stream', async () => {

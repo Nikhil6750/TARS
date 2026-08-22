@@ -101,15 +101,13 @@ async def build_readiness_report(
         ready=tts_ready,
         detail=None if voice.ready.is_set() else "voice providers still loading",
     )
-    # No trained "Hey TARS" wake-word model exists (see
-    # requirements-voice.txt) -- wake detection runs as native background
-    # VAD + this same STT transcription (see src-tauri/src/wake_engine.rs),
-    # not a separate wake_word_provider, so its readiness tracks STT's.
+    # No trained "Hey TARS" wake-word model is claimed. The controller
+    # matches configurable aliases after the same faster-whisper pass.
     wake = ComponentStatus(
-        configured="native_vad_whisper",
-        expected="native_vad_whisper",
+        configured="transcript_matcher",
+        expected="transcript_matcher",
         ready=stt_ready,
-        detail="wake detection runs in the native Tauri runtime and depends on STT readiness",
+        detail="backend normalized transcript matching; readiness follows STT",
     )
     database = ComponentStatus(
         configured="sqlite",

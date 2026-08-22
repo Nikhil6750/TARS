@@ -3,7 +3,6 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { TARSOrb } from '../components/character/TARSOrb';
 import { ChartAnalysisCard, ChartAnalysisData } from '../components/hud/ChartAnalysisCard';
 import { HUDOverlay } from '../components/hud/HUDOverlay';
-import { wakeWordService } from '../services/wake-word';
 
 describe('LinkedIn Demo UI & Wake Experience Tests', () => {
   describe('TARSOrb Component State Visuals', () => {
@@ -153,10 +152,5 @@ describe('LinkedIn Demo UI & Wake Experience Tests', () => {
       expect(CHART_REGEX.test('what is the weather today')).toBe(false);
     });
 
-    it('wakeWordService reports local status truthfully without claiming external cloud', () => {
-      const status = wakeWordService.getStatus();
-      expect(status.targetPhrase).toBe('Hey TARS');
-      expect(status.engine).toMatch(/web_speech_local|vad_whisper_local|manual_only/);
-    });
   });
 });

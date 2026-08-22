@@ -1,8 +1,6 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import logging
-from uuid import uuid4
 
 from fastapi import (
     APIRouter,
@@ -11,8 +9,6 @@ from fastapi import (
     HTTPException,
     Request,
     UploadFile,
-    WebSocket,
-    WebSocketDisconnect,
 )
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -21,7 +17,6 @@ from app.deps import get_turn_controller, get_voice_providers
 from app.voice_state import VoiceProviders
 from app.voice_telemetry import VoiceTurnRecorder
 from assistant.response_quality import prepare_speech_text, public_error_message
-from assistant.router import AssistantRouter
 from assistant.turn_controller import (
     AssistantResponse,
     AssistantTurnController,
@@ -29,8 +24,6 @@ from assistant.turn_controller import (
 )
 from voice.audio_utils import wav_to_pcm16
 from voice.errors import VoiceProviderError
-
-logger = logging.getLogger("tars.voice_api")
 
 router = APIRouter(tags=["voice"])
 
@@ -55,6 +48,7 @@ class VoiceStatusResponse(BaseModel):
     vad_provider: str = "silero"
     supported_providers: list[str] = [
         "openwakeword",
+        "transcript_matcher",
         "silero",
         "faster_whisper",
         "kokoro",
@@ -64,16 +58,16 @@ class VoiceStatusResponse(BaseModel):
 
 
 @router.get("/api/v1/voice/status", response_model=VoiceStatusResponse)
-@router.get("/api/voice/status", response_model=VoiceStatusResponse)
 async def status(voice: VoiceProviders = Depends(get_voice_providers)) -> VoiceStatusResponse:
     return VoiceStatusResponse(
         ready=voice.ready.is_set(),
-        wake_word_provider=voice.wake_word.name,
+        wake_word_provider="transcript_matcher",
         stt_provider=voice.stt.name,
         tts_provider=voice.tts.name,
         vad_provider="silero",
         supported_providers=[
             "openwakeword",
+            "transcript_matcher",
             "silero",
             "faster_whisper",
             "kokoro",
@@ -128,8 +122,7 @@ async def utterance(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/api/v1/voice/transcribe", response_model=TranscribeResponse)
-@router.post("/api/voice/transcribe", response_model=TranscribeResponse)
+@router.post("/api/v1/voice/transcribe", response_model=TranscribeResponse, deprecated=True)
 async def transcribe(
     request: Request,
     file: UploadFile,
@@ -165,8 +158,7 @@ async def transcribe(
     )
 
 
-@router.post("/api/v1/voice/synthesize")
-@router.post("/api/voice/synthesize")
+@router.post("/api/v1/voice/synthesize", deprecated=True)
 async def synthesize(
     request: Request,
     body: SynthesizeRequest,
@@ -187,50 +179,3 @@ async def synthesize(
         media_type="audio/wav",
         headers={"X-TARS-Voice-Turn-ID": telemetry.turn_id or ""},
     )
-
-
-@router.websocket("/api/v1/voice/session")
-@router.websocket("/api/voice/session")
-async def voice_session(
-    websocket: WebSocket,
-    conversation_id: str | None = None,
-) -> None:
-    voice_providers: VoiceProviders = websocket.app.state.voice_providers
-    try:
-        await asyncio.wait_for(voice_providers.ready.wait(), timeout=VOICE_READY_TIMEOUT_SECONDS)
-    except TimeoutError:
-        await websocket.close(code=1013, reason="voice providers still loading")
-        return
-
-    await websocket.accept()
-
-    db = websocket.app.state.db
-    from assistant.conversation_store import ConversationStore
-    from events.service import EventService
-
-    assistant_router: AssistantRouter = AssistantRouter(
-        event_service=EventService(db.conn),
-        conversation_store=ConversationStore(db.conn),
-        provider=websocket.app.state.assistant_provider,
-        memory_service=websocket.app.state.memory_service,
-        trace_store=websocket.app.state.latency_trace_store,
-    )
-
-    conversation_id = conversation_id or str(uuid4())
-
-    from voice.pipeline import run_voice_session
-
-    try:
-        await run_voice_session(
-            websocket=websocket,
-            stt_provider=voice_providers.stt,
-            tts_provider=voice_providers.tts,
-            assistant_router=assistant_router,
-            conversation_id=conversation_id,
-            action_runtime=websocket.app.state.action_runtime,
-            voice_trace_store=websocket.app.state.voice_trace_store,
-        )
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        logger.exception("voice session %s ended with an error", conversation_id)

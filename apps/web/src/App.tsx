@@ -22,20 +22,14 @@ import { audioService } from './services/audio';
 import { sendNotification } from './services/notifications';
 import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut, isTauri } from './services/tauri';
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
-import { actionRuntimeClient } from './services/actions';
-import { tryDeterministicAnswer } from './services/deterministic-fast-path';
 import { nativeBridge } from './services/native-bridge';
-import { ChartAnalysisData } from './components/hud/ChartAnalysisCard';
 import { VoiceAssistantRuntime } from './runtime/VoiceAssistantRuntime';
 import { assistantClient } from './runtime/AssistantClient';
-import { composeSpeech } from './services/speech';
 
 import { AppShell } from './components/shell/AppShell';
 import { ConversationView } from './components/assistant/ConversationView';
 import { WorkspaceView } from './components/workspace/WorkspaceView';
 import { SettingsView } from './components/settings/SettingsView';
-
-const ANALYZE_CHART_PATTERN = /\b(analy[sz]e)\s+(this|the|my)?\s*chart\b/i;
 
 export const App: React.FC = () => {
   // App Settings
@@ -89,6 +83,10 @@ export const App: React.FC = () => {
 
   const wsClientRef = useRef<TARSWebSocketClient | null>(null);
   const autoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    document.title = 'TARS Ready';
+  }, []);
 
   const cancelAutoHide = useCallback(() => {
     if (autoHideTimerRef.current !== null) {
@@ -293,45 +291,22 @@ export const App: React.FC = () => {
       appendMessageToActiveSession(msg);
 
       if (msg.role === 'assistant') {
-        setCompanionState('SPEAKING');
-
-        const speechContent = msg.speech_text || (msg.content ? composeSpeech(msg.display_text || msg.content) : '');
-        if (settings.audioEnabled && speechContent) {
-          audioService
-            .synthesizeAndPlay(speechContent, settings.apiEndpoint, (vol) => {
-              setAudioVolume(vol);
-            })
-            .catch((ttsErr) => {
-              console.warn('[TARS TTS] Backend synthesis error, fallback to browser synthesis:', ttsErr);
-              return audioService.speakText(speechContent, settings.speechRate, settings.speechVolume, (vol) => {
-                setAudioVolume(vol);
-              });
-            })
-            .finally(() => {
-              setCompanionState('IDLE');
-              setAudioVolume(0);
-              scheduleAutoHide(3000);
-            });
-        } else {
-          setTimeout(() => {
-            setCompanionState('IDLE');
-            setAudioVolume(0);
-            scheduleAutoHide(3000);
-          }, 2000);
-        }
+        setCompanionState('IDLE');
+        setAudioVolume(0);
+        scheduleAutoHide(3000);
       }
     },
     [
-      settings.audioEnabled,
-      settings.apiEndpoint,
-      settings.speechRate,
-      settings.speechVolume,
       cancelAutoHide,
       scheduleAutoHide,
       appendMessageToActiveSession,
     ]
   );
 
+  /* Deprecated duplicate execution path (inactive): chart capture, intent
+   * selection, and voice-command execution now belong to the backend
+   * AssistantTurnController. Retained in this commit only as migration
+   * history while workstation chart rendering remains intact.
   // "Analyze this chart": captures active window and runs analysis
   const isAnalyzingChartRef = useRef(false);
 
@@ -557,6 +532,7 @@ export const App: React.FC = () => {
       scheduleAutoHide,
     ]
   );
+  */
 
   // Fetch initial state from HTTP backend on mount
   useEffect(() => {
@@ -678,18 +654,51 @@ export const App: React.FC = () => {
         return;
       }
 
-      let transcript = '';
       try {
-        transcript = await audioService.transcribeAudio(audioBlob, settings.apiEndpoint);
+        const response = await audioService.submitUtterance(
+          audioBlob,
+          settings.apiEndpoint,
+          activeSessionId,
+          `ptt-${activeSessionId}`
+        );
+        if (response.status === 'ignored') {
+          setCompanionState('IDLE');
+          return;
+        }
+        if (response.transcript) {
+          handleIncomingAssistantMessage({
+            schema_version: '1.0.0',
+            message_id: `${response.turn_id}-user`,
+            conversation_id: response.conversation_id,
+            timestamp: new Date().toISOString(),
+            role: 'user',
+            content: response.transcript,
+            input_mode: 'voice',
+            providers: { stt: 'backend' },
+          });
+        }
+        handleIncomingAssistantMessage({
+          schema_version: '1.0.0',
+          message_id: response.turn_id,
+          conversation_id: response.conversation_id,
+          timestamp: new Date().toISOString(),
+          role: 'assistant',
+          content: response.display_text,
+          display_text: response.display_text,
+          speech_text: response.speech_text,
+          input_mode: 'voice',
+          intent: response.intent,
+          providers: { assistant: response.provider, tts: 'backend' },
+        });
+        if (response.audio_chunks_base64.length > 0) {
+          setCompanionState('SPEAKING');
+          await audioService.playBase64Chunks(response.audio_chunks_base64, setAudioVolume);
+        }
+        setCompanionState(response.status === 'awaiting_command' ? 'LISTENING' : 'IDLE');
       } catch (err) {
-        console.warn('[TARS Voice PTT] Transcription error:', err);
-      }
-      if (!transcript || !transcript.trim()) {
+        console.warn('[TARS Voice PTT] Golden-loop error:', err);
         setCompanionState('IDLE');
-        scheduleAutoHide(2000);
-        return;
       }
-      await processVoiceTranscript(transcript.trim());
     } else {
       if (companionState === 'SPEAKING') {
         audioService.stopSpeaking();
@@ -721,29 +730,6 @@ export const App: React.FC = () => {
     console.info('[CHAT] submitted:', text);
     handleIncomingAssistantMessage(userMsg);
 
-    // Fast-path deterministic arithmetic
-    const deterministicAnswer = tryDeterministicAnswer(text);
-    if (deterministicAnswer !== null) {
-      console.info('[CHAT] route selected: deterministic local');
-      handleIncomingAssistantMessage({
-        schema_version: '1.0.0',
-        message_id: crypto.randomUUID(),
-        conversation_id: convId,
-        timestamp: new Date().toISOString(),
-        role: 'assistant',
-        content: deterministicAnswer,
-        input_mode: 'text',
-        providers: { assistant: 'deterministic' },
-      });
-      return;
-    }
-
-    if (ANALYZE_CHART_PATTERN.test(text)) {
-      console.info('[CHAT] route selected: chart analysis');
-      await handleAnalyzeChart(text);
-      return;
-    }
-
     console.info('[CHAT] route selected: assistant query stream');
     setCompanionState('THINKING');
     setStreamingAnswer('');
@@ -760,20 +746,7 @@ export const App: React.FC = () => {
       onComplete: (payload) => {
         console.info('[CHAT] complete');
         setStreamingAnswer('');
-        if (payload?.message) {
-          const assistantReply: TARSAssistantMessage = {
-            ...(payload.message as TARSAssistantMessage),
-            content: payload.display_text || (payload.message as TARSAssistantMessage).content,
-            display_text: payload.display_text,
-            speech_text: payload.speech_text,
-          };
-          handleIncomingAssistantMessage(assistantReply);
-        } else if (payload) {
-          handleIncomingAssistantMessage(payload as unknown as TARSAssistantMessage);
-        } else {
-          setCompanionState('IDLE');
-          scheduleAutoHide(2500);
-        }
+        handleIncomingAssistantMessage(payload.message!);
       },
       onError: (detail) => {
         console.warn('[TARS Chat API] streaming query error:', detail);
@@ -833,7 +806,6 @@ export const App: React.FC = () => {
       unregisterGlobalShortcut('CommandOrControl+Shift+T');
       if (cleanupPtt) cleanupPtt();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const sessionMetas = sessions.map((s) => ({
@@ -847,7 +819,6 @@ export const App: React.FC = () => {
     <>
       {/* Background Voice Assistant Runtime */}
       <VoiceAssistantRuntime
-        apiEndpoint={settings.apiEndpoint}
         visible={appMode === 'voice'}
         onModeChange={setAppMode}
       />

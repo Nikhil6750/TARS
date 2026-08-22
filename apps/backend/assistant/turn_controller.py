@@ -87,6 +87,7 @@ class AssistantResponse(BaseModel):
     provider: str
     latency_ms: float = Field(ge=0)
     conversation_id: str
+    transcript: str | None = None
     replayed: bool = False
     audio_chunks_base64: list[str] = Field(default_factory=list)
 
@@ -484,6 +485,7 @@ class AssistantTurnController:
                     provider=self._voice.stt.name,
                     latency_ms=round((time.monotonic() - started) * 1000, 2),
                     conversation_id=conversation_id,
+                    transcript=transcript,
                 )
             )
 
@@ -505,6 +507,7 @@ class AssistantTurnController:
                     provider=self._voice.stt.name,
                     latency_ms=round((time.monotonic() - started) * 1000, 2),
                     conversation_id=conversation_id,
+                    transcript=transcript,
                 )
             )
         if not command:
@@ -518,6 +521,7 @@ class AssistantTurnController:
                 provider="wake_matcher",
                 latency_ms=round((time.monotonic() - started) * 1000, 2),
                 conversation_id=conversation_id,
+                transcript=transcript,
             )
             response = await self._synthesize_response(response, recorder)
             if response.status is TurnStatus.FAILED:
@@ -553,7 +557,10 @@ class AssistantTurnController:
             self._voice_recorders.pop(turn_id, None)
             self._first_token_marked.discard(turn_id)
         response = response.model_copy(
-            update={"latency_ms": round((time.monotonic() - started) * 1000, 2)}
+            update={
+                "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                "transcript": transcript,
+            }
         )
         await recorder.annotate(provider=response.provider)
         if response.status is TurnStatus.FAILED and recorder.error_stage is None:
