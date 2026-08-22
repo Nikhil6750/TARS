@@ -664,19 +664,32 @@ class AssistantTurnController:
                 display, provider = await self._normal_conversation(
                     text, turn_id=turn_id, conversation_id=conversation_id, input_mode=input_mode
                 )
+                presentation = self._composer.compose(user_text=text, display_text=display)
+                await self._persist_message(
+                    AssistantMessage(
+                        conversation_id=_conversation_uuid(conversation_id),
+                        role=MessageRole.assistant,
+                        content=presentation.display_text,
+                        input_mode=input_mode,
+                        intent=TurnIntent.NORMAL_CONVERSATION.value,
+                        providers=MessageProviders(assistant=provider),
+                    )
+                )
             elif intent is TurnIntent.CHART_ANALYSIS:
                 display, provider = await self._chart_analysis(turn_id=turn_id)
+                presentation = self._composer.compose(user_text=text, display_text=display)
             elif intent is TurnIntent.DETERMINISTIC:
                 reply = await self._deterministic(text, conversation_id, input_mode)
-                display, provider = reply.display_text, (
+                provider = (
                     reply.assistant_message.providers.assistant or "deterministic"
                 )
+                presentation = reply.presentation
             else:
                 display, provider = await self._advanced(
                     text, turn_id=turn_id, conversation_id=conversation_id
                 )
+                presentation = self._composer.compose(user_text=text, display_text=display)
 
-            presentation = self._composer.compose(user_text=text, display_text=display)
             response = AssistantResponse(
                 turn_id=turn_id,
                 display_text=presentation.display_text,
@@ -788,16 +801,6 @@ class AssistantTurnController:
         if not accumulated.strip():
             raise AssistantProviderError("provider returned an empty normal-conversation response")
 
-        presentation = self._composer.compose(user_text=text, display_text=accumulated)
-        assistant_message = AssistantMessage(
-            conversation_id=_conversation_uuid(conversation_id),
-            role=MessageRole.assistant,
-            content=presentation.display_text,
-            input_mode=input_mode,
-            intent=TurnIntent.NORMAL_CONVERSATION.value,
-            providers=MessageProviders(assistant=provider_name),
-        )
-        await self._persist_message(assistant_message)
         await self._record_normal_trace(
             turn_id=turn_id,
             conversation_id=conversation_id,
@@ -805,7 +808,7 @@ class AssistantTurnController:
             started=provider_started,
             provider=provider_name,
         )
-        return presentation.display_text, provider_name
+        return accumulated, provider_name
 
     async def _persist_message(self, message: AssistantMessage) -> None:
         """Persist synchronously, then let memory observe without gating the turn."""

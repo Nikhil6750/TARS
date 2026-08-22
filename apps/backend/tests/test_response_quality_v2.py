@@ -5,7 +5,7 @@ from uuid import uuid4
 from app.contracts import validate_assistant_message
 from assistant.conversation_store import ConversationStore
 from assistant.errors import AssistantProviderError
-from assistant.provider import AssistantProvider, AssistantRequest
+from assistant.provider import AssistantProvider, AssistantReply, AssistantRequest
 from assistant.response_quality import ResponseComposer, ResponseQualityContract
 from assistant.router import AssistantRouter
 from events.service import EventService
@@ -54,6 +54,27 @@ def test_v1_query_is_the_only_canonical_presentation_endpoint(client):
 
     legacy = client.post("/api/v1/assistant/messages", json={"text": "hello"}).json()
     validate_assistant_message(legacy)
+
+
+class _MarkdownProvider(AssistantProvider):
+    name = "markdown"
+
+    async def respond(self, request: AssistantRequest) -> AssistantReply:
+        return AssistantReply(
+            text="### Result\nUse **composition**. See https://example.com/docs and `code`.",
+            provider=self.name,
+        )
+
+
+def test_backend_alone_derives_plain_speech_from_markdown(client):
+    client.app.state.turn_controller._provider = _MarkdownProvider()
+
+    body = client.post("/api/v1/assistant/query", json={"text": "Explain composition"}).json()
+
+    assert "### Result" in body["display_text"]
+    assert "composition" in body["speech_text"]
+    for marker in ("**", "###", "`", "https://"):
+        assert marker not in body["speech_text"]
 
 
 class _FailingProvider(AssistantProvider):

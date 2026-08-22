@@ -27,7 +27,11 @@ from assistant.errors import AssistantProviderError
 from assistant.fast_chart_response import try_fast_response
 from assistant.hot_chart_state_store import HotChartStateStore
 from assistant.response_quality import public_error_message
-from assistant.turn_controller import AssistantTurnController, DuplicateTurnConflict
+from assistant.turn_controller import (
+    AssistantResponse,
+    AssistantTurnController,
+    DuplicateTurnConflict,
+)
 
 router = APIRouter(tags=["assistant"])
 logger = logging.getLogger("tars.assistant_api")
@@ -35,7 +39,7 @@ logger = logging.getLogger("tars.assistant_api")
 _MAX_IMAGE_BYTES = 15 * 1_048_576
 
 
-@router.post("/api/v1/assistant/query")
+@router.post("/api/v1/assistant/query", response_model=AssistantResponse)
 async def assistant_query(
     request: Request,
     controller: AssistantTurnController = Depends(get_turn_controller),
