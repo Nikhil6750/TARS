@@ -40,20 +40,8 @@ def test_navigation_evidence_requires_four_distinct_captures() -> None:
     assert navigation_captures_are_distinct(distinct) is False
 
 
-def test_source_diagnostics_reproduce_core_experience_blockers() -> None:
-    finding_ids = {finding.finding_id for finding in inspect_source(ROOT)}
-    assert {
-        "launcher.false_ready",
-        "launcher.shared_stale_binary",
-        "launcher.no_native_window_verification",
-        "native.default_compact_clips_workstation",
-        "voice.ui_hardcoded_provider_status",
-        "wake.incomplete_state_machine",
-        "wake.single_utterance_command_dropped",
-        "speech.raw_stream_markdown_to_tts",
-        "speech.display_markdown_to_tts",
-        "answers.no_response_quality_contract",
-    } <= finding_ids
+def test_source_diagnostics_confirm_core_experience_blockers_are_resolved() -> None:
+    assert inspect_source(ROOT) == []
 
 
 def test_quality_corpus_has_thirty_unique_cases_and_required_categories() -> None:

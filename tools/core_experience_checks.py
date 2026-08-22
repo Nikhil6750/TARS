@@ -39,6 +39,7 @@ def inspect_source(root: Path = ROOT) -> list[Finding]:
     storage = _text("apps/web/src/services/storage.ts", root)
     voice_view = _text("apps/web/src/components/voice/VoiceControlView.tsx", root)
     wake = _text("apps/web/src-tauri/src/wake_engine.rs", root)
+    voice_telemetry = _text("apps/backend/app/voice_telemetry.py", root)
     voice_runtime = _text("apps/web/src/runtime/VoiceAssistantRuntime.tsx", root)
     assistant_message = _text(
         "apps/web/src/components/assistant/AssistantMessage.tsx", root
@@ -103,18 +104,25 @@ def inspect_source(root: Path = ROOT) -> list[Finding]:
     required_timing_names = {
         "audio_detected_at",
         "speech_end_at",
-        "transcription_start",
-        "transcription_complete",
+        "stt_started_at",
+        "stt_completed_at",
         "wake_detected_at",
         "command_ready_at",
+        "processing_started_at",
+        "first_response_token_at",
+        "tts_started_at",
+        "tts_completed_at",
     }
-    missing_timing = sorted(name for name in required_timing_names if name not in wake)
+    missing_timing = sorted(
+        name for name in required_timing_names if name not in voice_telemetry
+    )
     if missing_timing:
         findings.append(
             Finding(
                 "wake.missing_latency_instrumentation",
                 "high",
-                f"native wake engine does not emit: {', '.join(missing_timing)}",
+                "authoritative backend telemetry does not record: "
+                f"{', '.join(missing_timing)}",
             )
         )
     wake_branch = wake.split("wake_regex().is_match(&transcript)", 1)
