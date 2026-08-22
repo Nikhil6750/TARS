@@ -121,3 +121,17 @@ async def test_router_fails_over_and_marks_diagnostics():
     assert reply.diagnostics.fallback_used is True
     assert codex.calls == 1
     assert claude.calls == 1
+
+
+async def test_fixed_order_keeps_explicit_primary_then_falls_back():
+    claude = _Provider("claude_code", fail=True)
+    codex = _Provider("codex")
+    router = RoutedAssistantProvider([claude, codex], fixed_order=True)
+
+    reply = await router.respond(_request("Write Python code"))
+
+    assert reply.provider == "codex"
+    assert router.last_decision is not None
+    assert router.last_decision.ordered_provider_ids == ("claude_code", "codex")
+    assert claude.calls == 1
+    assert codex.calls == 1

@@ -110,7 +110,7 @@ def _route_cli_pool(
         candidates.append(alternate)
     if settings.ollama_model:
         candidates.append(OllamaProvider(settings.ollama_base_url, settings.ollama_model))
-    return RoutedAssistantProvider(candidates, trace_store=trace_store)
+    return RoutedAssistantProvider(candidates, trace_store=trace_store, fixed_order=True)
 
 
 def build_chart_assistant_provider(settings: Settings) -> AssistantProvider:

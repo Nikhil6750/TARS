@@ -77,10 +77,26 @@ if ($existing) {
 Write-Step "[2/7] Loading .env..."
 if (-not (Test-Path $EnvFile)) {
     $parentEnv = Join-Path (Split-Path -Parent $RepoRoot) '.env'
+    $primaryEnv = $null
+    try {
+        $gitCommonDir = (& git -C $RepoRoot rev-parse --git-common-dir 2>$null).Trim()
+        if ($gitCommonDir) {
+            if (-not [System.IO.Path]::IsPathRooted($gitCommonDir)) {
+                $gitCommonDir = Join-Path $RepoRoot $gitCommonDir
+            }
+            $gitCommonDir = [System.IO.Path]::GetFullPath($gitCommonDir)
+            $primaryEnv = Join-Path (Split-Path -Parent $gitCommonDir) '.env'
+        }
+    } catch {
+        $primaryEnv = $null
+    }
     $exampleEnv = Join-Path $RepoRoot '.env.example'
     if (Test-Path $parentEnv) {
         Copy-Item $parentEnv $EnvFile
         Write-Host "  Discovered and copied parent .env to $EnvFile"
+    } elseif ($primaryEnv -and (Test-Path $primaryEnv)) {
+        Copy-Item $primaryEnv $EnvFile
+        Write-Host "  Discovered and copied primary-checkout .env to this worktree."
     } elseif (Test-Path $exampleEnv) {
         Copy-Item $exampleEnv $EnvFile
         Write-Host "  Initialized $EnvFile from .env.example"

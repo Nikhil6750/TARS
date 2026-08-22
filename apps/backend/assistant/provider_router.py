@@ -116,16 +116,33 @@ class RoutedAssistantProvider(AssistantProvider):
         providers: list[AssistantProvider],
         *,
         trace_store: LatencyTraceStore | None = None,
+        fixed_order: bool = False,
     ) -> None:
         if not providers:
             raise ValueError("at least one assistant provider is required")
         self._providers = {provider.name: provider for provider in providers}
         self._trace_store = trace_store
         self._health = ProviderHealthTracker(trace_store) if trace_store is not None else None
+        self._fixed_order = fixed_order
         self.last_decision: ProviderRouteDecision | None = None
 
     async def _ordered_candidates(self, request: AssistantRequest) -> list[AssistantProvider]:
         task_type = classify_provider_task(request)
+        if self._fixed_order:
+            candidates = [
+                provider
+                for provider in self._providers.values()
+                if bool(getattr(provider, "is_available", True))
+            ]
+            if not candidates:
+                candidates = list(self._providers.values())
+            self.last_decision = ProviderRouteDecision(
+                task_type=task_type,
+                ordered_provider_ids=tuple(provider.name for provider in candidates),
+                reason="explicit primary order; fallback only after provider failure",
+            )
+            return candidates
+
         capable = [
             provider
             for provider in self._providers.values()
