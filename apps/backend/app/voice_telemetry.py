@@ -11,12 +11,20 @@ import aiosqlite
 
 VOICE_STAGES = (
     "audio_received",
+    "audio_detected",
+    "speech_end",
     "stt_started",
     "stt_completed",
     "command_available",
+    "wake_detected",
+    "command_ready",
+    "processing_started",
     "assistant_first_text",
+    "first_response_token",
     "tts_synthesis_started",
+    "tts_started",
     "tts_ready",
+    "tts_completed",
 )
 
 
@@ -30,12 +38,23 @@ class VoiceTurnTrace:
     conversation_id: str | None
     created_at: str
     audio_received_at: str | None = None
+    audio_detected_at: str | None = None
+    speech_end_at: str | None = None
     stt_started_at: str | None = None
     stt_completed_at: str | None = None
+    transcript: str | None = None
+    wake_match: str | None = None
+    wake_detected_at: str | None = None
     command_available_at: str | None = None
+    command_ready_at: str | None = None
+    processing_started_at: str | None = None
     assistant_first_text_at: str | None = None
+    first_response_token_at: str | None = None
     tts_synthesis_started_at: str | None = None
+    tts_started_at: str | None = None
     tts_ready_at: str | None = None
+    tts_completed_at: str | None = None
+    provider: str | None = None
     status: str = "in_progress"
     error_stage: str | None = None
 
@@ -45,7 +64,7 @@ class VoiceTurnTrace:
         field_name = f"{stage}_at"
         if getattr(self, field_name) is None:
             setattr(self, field_name, timestamp or utc_timestamp())
-        if stage == "tts_ready":
+        if stage in ("tts_ready", "tts_completed"):
             self.status = "completed"
 
     def to_dict(self) -> dict[str, Any]:
@@ -62,8 +81,11 @@ class VoiceTraceStore:
             INSERT INTO voice_turn_traces (
                 turn_id, conversation_id, audio_received_at, stt_started_at,
                 stt_completed_at, command_available_at, assistant_first_text_at,
-                tts_synthesis_started_at, tts_ready_at, status, error_stage, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tts_synthesis_started_at, tts_ready_at, status, error_stage, created_at,
+                audio_detected_at, speech_end_at, transcript, wake_match,
+                wake_detected_at, command_ready_at, processing_started_at,
+                first_response_token_at, tts_started_at, tts_completed_at, provider
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(turn_id) DO UPDATE SET
                 audio_received_at=excluded.audio_received_at,
                 stt_started_at=excluded.stt_started_at,
@@ -72,6 +94,17 @@ class VoiceTraceStore:
                 assistant_first_text_at=excluded.assistant_first_text_at,
                 tts_synthesis_started_at=excluded.tts_synthesis_started_at,
                 tts_ready_at=excluded.tts_ready_at,
+                audio_detected_at=excluded.audio_detected_at,
+                speech_end_at=excluded.speech_end_at,
+                transcript=excluded.transcript,
+                wake_match=excluded.wake_match,
+                wake_detected_at=excluded.wake_detected_at,
+                command_ready_at=excluded.command_ready_at,
+                processing_started_at=excluded.processing_started_at,
+                first_response_token_at=excluded.first_response_token_at,
+                tts_started_at=excluded.tts_started_at,
+                tts_completed_at=excluded.tts_completed_at,
+                provider=excluded.provider,
                 status=excluded.status,
                 error_stage=excluded.error_stage
             """,
@@ -88,6 +121,17 @@ class VoiceTraceStore:
                 trace.status,
                 trace.error_stage,
                 trace.created_at,
+                trace.audio_detected_at,
+                trace.speech_end_at,
+                trace.transcript,
+                trace.wake_match,
+                trace.wake_detected_at,
+                trace.command_ready_at,
+                trace.processing_started_at,
+                trace.first_response_token_at,
+                trace.tts_started_at,
+                trace.tts_completed_at,
+                trace.provider,
             ),
         )
         await self._conn.commit()
@@ -113,17 +157,51 @@ class VoiceTurnRecorder:
     def turn_id(self) -> str | None:
         return self._current.turn_id if self._current is not None else None
 
-    async def start_turn(self, *, audio_received: bool = False) -> VoiceTurnTrace:
+    async def start_turn(
+        self,
+        *,
+        turn_id: str | None = None,
+        audio_received: bool = False,
+        audio_detected_at: str | None = None,
+        speech_end_at: str | None = None,
+    ) -> VoiceTurnTrace:
         async with self._lock:
             self._current = VoiceTurnTrace(
-                turn_id=uuid4().hex,
+                turn_id=turn_id or uuid4().hex,
                 conversation_id=self._conversation_id,
                 created_at=utc_timestamp(),
+                audio_detected_at=audio_detected_at,
+                speech_end_at=speech_end_at,
             )
             if audio_received:
                 self._current.mark("audio_received")
             await self._store.record(self._current)
             return self._current
+
+    async def annotate(
+        self,
+        *,
+        transcript: str | None = None,
+        wake_match: str | None = None,
+        provider: str | None = None,
+    ) -> None:
+        async with self._lock:
+            if self._current is None:
+                raise RuntimeError("voice turn must be started before annotation")
+            if transcript is not None:
+                self._current.transcript = transcript
+            if wake_match is not None:
+                self._current.wake_match = wake_match
+            if provider is not None:
+                self._current.provider = provider
+            await self._store.record(self._current)
+
+    async def finish(self, status: str = "completed") -> None:
+        async with self._lock:
+            if self._current is None:
+                raise RuntimeError("voice turn must be started before completion")
+            self._current.status = status
+            await self._store.record(self._current)
 
     async def mark(self, stage: str) -> str:
         async with self._lock:

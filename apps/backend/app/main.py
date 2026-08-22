@@ -294,6 +294,44 @@ async def lifespan(app: FastAPI):
     voice_load_task = asyncio.create_task(voice_providers.load(settings))
     logger.info("voice provider loading started in background")
 
+    # One long-lived turn owner is required for in-flight duplicate joining
+    # and completed-turn replay.  Request-scoped construction would silently
+    # defeat that invariant.
+    from assistant.conversation_store import ConversationStore
+    from assistant.router import AssistantRouter
+    from assistant.turn_controller import AssistantTurnController
+    from orchestrator.orchestrator import TarsOrchestrator
+
+    conversation_store = ConversationStore(db.conn)
+    assistant_router = AssistantRouter(
+        event_service=EventService(db.conn),
+        conversation_store=conversation_store,
+        provider=app.state.assistant_provider,
+        memory_service=memory_service,
+        trace_store=latency_trace_store,
+    )
+    orchestrator = TarsOrchestrator(
+        assistant_router=assistant_router,
+        action_runtime=action_runtime,
+        memory_service=memory_service,
+        conversation_store=conversation_store,
+        agent_runtime=agent_runtime,
+        agents=app.state.agents,
+        skill_manager=skill_manager,
+        pending_skill_confirmations=app.state.pending_skill_confirmations,
+    )
+    app.state.turn_controller = AssistantTurnController(
+        settings=settings,
+        provider=app.state.assistant_provider,
+        assistant_router=assistant_router,
+        orchestrator=orchestrator,
+        action_runtime=action_runtime,
+        conversation_store=conversation_store,
+        hot_chart_state_store=HotChartStateStore(db.conn),
+        voice_providers=voice_providers,
+        voice_trace_store=app.state.voice_trace_store,
+    )
+
     try:
         yield
     finally:

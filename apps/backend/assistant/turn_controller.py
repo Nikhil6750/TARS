@@ -16,8 +16,9 @@ import re
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
+from typing import TYPE_CHECKING
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,7 @@ from actions.runtime import ActionRuntime
 from app.action_contracts import ActionResult, ActionSource, ActionStatus
 from app.config import Settings
 from app.schemas import AssistantMessage, InputMode, MessageProviders, MessageRole
+from app.voice_telemetry import VoiceTraceStore, VoiceTurnRecorder
 from assistant.conversation_store import ConversationStore
 from assistant.errors import AssistantProviderError
 from assistant.hot_chart_state import Freshness
@@ -36,6 +38,10 @@ from assistant.response_quality import QUALITY_SYSTEM_PROMPT, ResponseComposer, 
 from assistant.router import AssistantRouter, RouterReply
 from orchestrator.orchestrator import TarsOrchestrator
 from skills.voice_bridge import build_action_request_from_voice
+from voice.errors import VoiceProviderError
+
+if TYPE_CHECKING:
+    from app.voice_state import VoiceProviders
 
 logger = logging.getLogger("tars.turn_controller")
 
@@ -167,6 +173,8 @@ class AssistantTurnController:
         action_runtime: ActionRuntime,
         conversation_store: ConversationStore,
         hot_chart_state_store: HotChartStateStore,
+        voice_providers: VoiceProviders | None = None,
+        voice_trace_store: VoiceTraceStore | None = None,
         cache_size: int = 256,
     ) -> None:
         self._settings = settings
@@ -176,6 +184,8 @@ class AssistantTurnController:
         self._actions = action_runtime
         self._conversations = conversation_store
         self._hot_charts = hot_chart_state_store
+        self._voice = voice_providers
+        self._voice_trace_store = voice_trace_store
         self._router = TurnIntentRouter()
         self._composer = ResponseComposer()
         self._cache_size = max(16, cache_size)
@@ -185,6 +195,8 @@ class AssistantTurnController:
         self._completed: OrderedDict[str, AssistantResponse] = OrderedDict()
         self._subscribers: dict[str, set[asyncio.Queue[TurnEvent]]] = {}
         self._execution_counts: dict[str, int] = {}
+        self._utterance_inflight: dict[str, asyncio.Task[AssistantResponse]] = {}
+        self._utterance_fingerprints: dict[str, str] = {}
 
     def execution_count(self, turn_id: str) -> int:
         """Test/diagnostic evidence for the exactly-once invariant."""
@@ -277,6 +289,182 @@ class AssistantTurnController:
                     subscribers.discard(queue)
                     if not subscribers:
                         self._subscribers.pop(actual_turn_id, None)
+
+    async def execute_utterance(
+        self,
+        pcm_audio: bytes,
+        *,
+        conversation_id: str | None = None,
+        session_id: str = "native",
+        turn_id: str | None = None,
+        audio_detected_at_ms: int | None = None,
+        speech_end_at_ms: int | None = None,
+    ) -> AssistantResponse:
+        """Transcribe and execute one native VAD-complete audio segment.
+
+        The whole upload is idempotent, not only its downstream command: a
+        network retry with the same turn ID cannot trigger a second STT call.
+        """
+
+        if self._voice is None or self._voice_trace_store is None:
+            raise RuntimeError("voice providers and telemetry store are not configured")
+        if not pcm_audio:
+            raise ValueError("utterance audio must be non-empty")
+
+        actual_turn_id = turn_id or uuid4().hex
+        actual_conversation_id = str(_conversation_uuid(conversation_id or str(uuid4())))
+        fingerprint = hashlib.sha256(
+            session_id.encode("utf-8")
+            + b"\0"
+            + actual_conversation_id.encode("utf-8")
+            + b"\0"
+            + pcm_audio
+        ).hexdigest()
+        async with self._lock:
+            known = self._utterance_fingerprints.get(actual_turn_id)
+            if known is not None and known != fingerprint:
+                raise DuplicateTurnConflict(
+                    f"turn_id '{actual_turn_id}' was already assigned to different audio"
+                )
+            cached = self._completed.get(actual_turn_id)
+            if cached is not None:
+                return cached.model_copy(update={"replayed": True})
+            task = self._utterance_inflight.get(actual_turn_id)
+            if task is None:
+                self._utterance_fingerprints[actual_turn_id] = fingerprint
+                task = asyncio.create_task(
+                    self._run_utterance(
+                        pcm_audio,
+                        turn_id=actual_turn_id,
+                        conversation_id=actual_conversation_id,
+                        audio_detected_at_ms=audio_detected_at_ms,
+                        speech_end_at_ms=speech_end_at_ms,
+                    )
+                )
+                self._utterance_inflight[actual_turn_id] = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                async with self._lock:
+                    self._utterance_inflight.pop(actual_turn_id, None)
+
+    async def _run_utterance(
+        self,
+        pcm_audio: bytes,
+        *,
+        turn_id: str,
+        conversation_id: str,
+        audio_detected_at_ms: int | None,
+        speech_end_at_ms: int | None,
+    ) -> AssistantResponse:
+        assert self._voice is not None
+        assert self._voice_trace_store is not None
+        started = time.monotonic()
+        recorder = VoiceTurnRecorder(self._voice_trace_store, conversation_id)
+        await recorder.start_turn(
+            turn_id=turn_id,
+            audio_received=True,
+            audio_detected_at=_iso_from_epoch_ms(audio_detected_at_ms),
+            speech_end_at=_iso_from_epoch_ms(speech_end_at_ms),
+        )
+        if audio_detected_at_ms is None:
+            await recorder.mark("audio_detected")
+        if speech_end_at_ms is None:
+            await recorder.mark("speech_end")
+        await self._publish(
+            TurnEvent(turn_id=turn_id, type="state", state=TurnState.SPEECH_DETECTED)
+        )
+        await recorder.mark("stt_started")
+        await self._publish(
+            TurnEvent(turn_id=turn_id, type="state", state=TurnState.TRANSCRIBING)
+        )
+        try:
+            transcription = await self._voice.stt.transcribe(pcm_audio)
+        except VoiceProviderError:
+            await recorder.fail("stt")
+            return await self._complete_without_execution(
+                AssistantResponse(
+                    turn_id=turn_id,
+                    display_text=public_error_message("stt"),
+                    speech_text=public_error_message("stt"),
+                    intent=TurnIntent.DETERMINISTIC,
+                    status=TurnStatus.FAILED,
+                    provider=self._voice.stt.name,
+                    latency_ms=round((time.monotonic() - started) * 1000, 2),
+                    conversation_id=conversation_id,
+                )
+            )
+        await recorder.mark("stt_completed")
+        transcript = transcription.text.strip()
+        await recorder.annotate(transcript=transcript)
+        wake_match, command = _match_primary_wake(transcript, self._settings.wake_word_phrase)
+        if wake_match is None:
+            await recorder.fail("wake_match")
+            return await self._complete_without_execution(
+                AssistantResponse(
+                    turn_id=turn_id,
+                    display_text="",
+                    speech_text="",
+                    intent=TurnIntent.DETERMINISTIC,
+                    status=TurnStatus.IGNORED,
+                    provider=self._voice.stt.name,
+                    latency_ms=round((time.monotonic() - started) * 1000, 2),
+                    conversation_id=conversation_id,
+                )
+            )
+
+        await recorder.annotate(wake_match=wake_match)
+        await recorder.mark("wake_detected")
+        await self._publish(
+            TurnEvent(turn_id=turn_id, type="state", state=TurnState.WAKE_DETECTED)
+        )
+        if not command:
+            await recorder.finish("awaiting_command")
+            return await self._complete_without_execution(
+                AssistantResponse(
+                    turn_id=turn_id,
+                    display_text="",
+                    speech_text="",
+                    intent=TurnIntent.DETERMINISTIC,
+                    status=TurnStatus.AWAITING_COMMAND,
+                    provider="wake_matcher",
+                    latency_ms=round((time.monotonic() - started) * 1000, 2),
+                    conversation_id=conversation_id,
+                )
+            )
+
+        await recorder.mark("command_ready")
+        await recorder.mark("processing_started")
+        response = await self.execute_text(
+            command,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            input_mode=InputMode.voice,
+            speak=True,
+        )
+        response = response.model_copy(
+            update={"latency_ms": round((time.monotonic() - started) * 1000, 2)}
+        )
+        await recorder.annotate(provider=response.provider)
+        if response.status is TurnStatus.FAILED:
+            await recorder.fail("provider")
+        else:
+            await recorder.finish("completed")
+        async with self._lock:
+            self._completed[turn_id] = response
+        return response
+
+    async def _complete_without_execution(
+        self, response: AssistantResponse
+    ) -> AssistantResponse:
+        async with self._lock:
+            self._completed[response.turn_id] = response
+            self._completed.move_to_end(response.turn_id)
+        await self._publish(
+            TurnEvent(turn_id=response.turn_id, type="complete", response=response)
+        )
+        return response
 
     async def _run_and_cache(
         self,
@@ -556,3 +744,20 @@ def _action_result_text(result: ActionResult) -> str:
     if result.error and result.status is not ActionStatus.SUCCEEDED:
         return f"{result.summary} {result.error}".strip()
     return result.summary
+
+
+def _iso_from_epoch_ms(value: int | None) -> str | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value / 1000, tz=UTC).isoformat()
+
+
+def _match_primary_wake(transcript: str, phrase: str) -> tuple[str | None, str]:
+    normalized = re.sub(r"[^a-z0-9]+", " ", transcript.lower()).strip()
+    phrase_normalized = re.sub(r"[^a-z0-9]+", " ", phrase.lower()).strip() or "tars"
+    for candidate in (f"hey {phrase_normalized}", phrase_normalized):
+        match = re.search(rf"(?:^|\s){re.escape(candidate)}(?:\s|$)", normalized)
+        if match is None:
+            continue
+        return candidate, normalized[match.end() :].strip()
+    return None, ""

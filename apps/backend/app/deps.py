@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from assistant.hot_chart_state_store import HotChartStateStore
     from assistant.provider import AssistantProvider
     from assistant.router import AssistantRouter
+    from assistant.turn_controller import AssistantTurnController
     from memory.service import MemoryService
     from orchestrator.orchestrator import TarsOrchestrator
     from trading.context import TradingContextBuilder
@@ -155,3 +156,7 @@ def get_orchestrator(request: Request) -> TarsOrchestrator:
         skill_manager=getattr(request.app.state, "skill_manager", None),
         pending_skill_confirmations=getattr(request.app.state, "pending_skill_confirmations", None),
     )
+
+
+def get_turn_controller(request: Request) -> AssistantTurnController:
+    return request.app.state.turn_controller

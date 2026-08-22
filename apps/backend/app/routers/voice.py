@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import (
     APIRouter,
     Depends,
+    Form,
     HTTPException,
     Request,
     UploadFile,
@@ -16,11 +17,16 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from app.deps import get_voice_providers
+from app.deps import get_turn_controller, get_voice_providers
 from app.voice_state import VoiceProviders
 from app.voice_telemetry import VoiceTurnRecorder
 from assistant.response_quality import prepare_speech_text, public_error_message
 from assistant.router import AssistantRouter
+from assistant.turn_controller import (
+    AssistantResponse,
+    AssistantTurnController,
+    DuplicateTurnConflict,
+)
 from voice.audio_utils import wav_to_pcm16
 from voice.errors import VoiceProviderError
 
@@ -75,6 +81,51 @@ async def status(voice: VoiceProviders = Depends(get_voice_providers)) -> VoiceS
             "mock",
         ],
     )
+
+
+@router.post("/api/v1/voice/utterance", response_model=AssistantResponse)
+async def utterance(
+    request: Request,
+    file: UploadFile,
+    conversation_id: str | None = Form(default=None),
+    session_id: str = Form(default="native"),
+    turn_id: str | None = Form(default=None),
+    audio_detected_at_ms: int | None = Form(default=None),
+    speech_end_at_ms: int | None = Form(default=None),
+    controller: AssistantTurnController = Depends(get_turn_controller),
+    voice: VoiceProviders = Depends(get_voice_providers),
+) -> AssistantResponse:
+    """Canonical desktop voice entry point: one VAD-complete WAV segment in,
+    one backend-owned turn response out.  Native and React clients must not
+    run wake matching, routing, provider execution, or speech composition
+    after calling this endpoint."""
+
+    try:
+        await asyncio.wait_for(voice.ready.wait(), timeout=VOICE_READY_TIMEOUT_SECONDS)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=503, detail="Voice providers are still loading.") from exc
+
+    wav_bytes = await file.read()
+    try:
+        pcm, _sample_rate = wav_to_pcm16(wav_bytes)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="The audio upload isn't a supported WAV file.",
+        ) from exc
+
+    header_turn_id = request.headers.get("X-TARS-Turn-ID")
+    try:
+        return await controller.execute_utterance(
+            pcm,
+            conversation_id=conversation_id,
+            session_id=session_id,
+            turn_id=turn_id or header_turn_id,
+            audio_detected_at_ms=audio_detected_at_ms,
+            speech_end_at_ms=speech_end_at_ms,
+        )
+    except DuplicateTurnConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/api/v1/voice/transcribe", response_model=TranscribeResponse)
