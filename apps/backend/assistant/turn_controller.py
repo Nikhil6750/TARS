@@ -140,6 +140,7 @@ class _PendingCommand:
     conversation_id: str
     expires_at: float
     recorder: VoiceTurnRecorder
+    wake_alias: str
     timeout_task: asyncio.Task[None] | None = None
 
 
@@ -445,8 +446,8 @@ class AssistantTurnController:
         )
         try:
             transcription = await self._voice.stt.transcribe(pcm_audio)
-        except VoiceProviderError:
-            await recorder.fail("stt")
+        except VoiceProviderError as exc:
+            await recorder.fail("stt", reason=str(exc)[:500])
             return await self._complete_without_execution(
                 AssistantResponse(
                     turn_id=turn_id,
@@ -465,16 +466,26 @@ class AssistantTurnController:
         match = None if pending is not None else self._wake_matcher.match(transcript)
         if pending is not None:
             wake_match = "two_stage_command"
+            wake_alias_matched = pending.wake_alias
             command = normalize_transcript(transcript)
+            normalized_transcript = command
         elif match is not None:
             wake_match = match.alias
+            wake_alias_matched = match.alias
             command = match.command
+            normalized_transcript = match.normalized_transcript
         else:
             wake_match = None
+            wake_alias_matched = None
             command = ""
+            normalized_transcript = normalize_transcript(transcript)
+
+        await recorder.annotate(normalized_transcript=normalized_transcript)
 
         if wake_match is None:
-            await recorder.fail("wake_match")
+            await recorder.fail(
+                "wake_match", reason=f"transcript did not match any wake alias: {transcript!r}"[:500]
+            )
             return await self._complete_without_execution(
                 AssistantResponse(
                     turn_id=turn_id,
@@ -489,14 +500,18 @@ class AssistantTurnController:
                 )
             )
 
-        await recorder.annotate(wake_match=wake_match)
+        await recorder.annotate(
+            wake_match=wake_match,
+            wake_alias_matched=wake_alias_matched,
+            command_extracted=bool(command),
+        )
         if pending is None:
             await recorder.mark("wake_detected")
             await self._publish(
                 TurnEvent(turn_id=turn_id, type="state", state=TurnState.WAKE_DETECTED)
             )
         elif not command:
-            await recorder.fail("stt")
+            await recorder.fail("stt", reason="empty command after wake in two-stage session")
             return await self._complete_without_execution(
                 AssistantResponse(
                     turn_id=turn_id,
@@ -523,6 +538,7 @@ class AssistantTurnController:
                 conversation_id=conversation_id,
                 transcript=transcript,
             )
+            await recorder.mark("response_completed")
             response = await self._synthesize_response(response, recorder)
             if response.status is TurnStatus.FAILED:
                 return await self._complete_without_execution(response)
@@ -532,6 +548,7 @@ class AssistantTurnController:
                 conversation_id=conversation_id,
                 recorder=recorder,
                 turn_id=turn_id,
+                wake_alias=wake_alias_matched or "",
             )
             await self._publish(
                 TurnEvent(
@@ -610,12 +627,14 @@ class AssistantTurnController:
         conversation_id: str,
         recorder: VoiceTurnRecorder,
         turn_id: str,
+        wake_alias: str,
     ) -> None:
         timeout_seconds = min(8.0, max(0.01, self._settings.wake_command_timeout_seconds))
         pending = _PendingCommand(
             conversation_id=conversation_id,
             expires_at=time.monotonic() + timeout_seconds,
             recorder=recorder,
+            wake_alias=wake_alias,
         )
 
         async def expire() -> None:
@@ -662,6 +681,9 @@ class AssistantTurnController:
         started = time.monotonic()
         self._execution_counts[turn_id] = self._execution_counts.get(turn_id, 0) + 1
         intent = self._router.classify(text)
+        voice_recorder = self._voice_recorders.get(turn_id)
+        if voice_recorder is not None:
+            await voice_recorder.annotate(route=intent.value)
         await self._publish(
             TurnEvent(turn_id=turn_id, type="state", state=TurnState.PROCESSING)
         )
@@ -706,11 +728,10 @@ class AssistantTurnController:
                 latency_ms=round((time.monotonic() - started) * 1000, 2),
                 conversation_id=conversation_id,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("turn %s failed during %s", turn_id, intent.value)
-            recorder = self._voice_recorders.get(turn_id)
-            if recorder is not None:
-                await recorder.fail("provider")
+            if voice_recorder is not None:
+                await voice_recorder.fail("provider", reason=str(exc)[:500])
             response = AssistantResponse(
                 turn_id=turn_id,
                 display_text=public_error_message(),
@@ -722,11 +743,13 @@ class AssistantTurnController:
                 conversation_id=conversation_id,
             )
 
+        if voice_recorder is not None:
+            await voice_recorder.mark("response_completed")
+
         if speak and response.status is TurnStatus.COMPLETED:
-            recorder = self._voice_recorders.get(turn_id)
-            if recorder is None:
+            if voice_recorder is None:
                 raise RuntimeError("voice turn lost its telemetry recorder before TTS")
-            response = await self._synthesize_response(response, recorder)
+            response = await self._synthesize_response(response, voice_recorder)
         async with self._lock:
             self._completed[turn_id] = response
             self._completed.move_to_end(turn_id)

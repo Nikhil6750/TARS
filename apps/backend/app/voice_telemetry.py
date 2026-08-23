@@ -21,10 +21,12 @@ VOICE_STAGES = (
     "processing_started",
     "assistant_first_text",
     "first_response_token",
+    "response_completed",
     "tts_synthesis_started",
     "tts_started",
     "tts_ready",
     "tts_completed",
+    "returned_to_idle",
 )
 
 
@@ -43,20 +45,27 @@ class VoiceTurnTrace:
     stt_started_at: str | None = None
     stt_completed_at: str | None = None
     transcript: str | None = None
+    normalized_transcript: str | None = None
     wake_match: str | None = None
+    wake_alias_matched: str | None = None
     wake_detected_at: str | None = None
     command_available_at: str | None = None
+    command_extracted: bool | None = None
     command_ready_at: str | None = None
+    route: str | None = None
     processing_started_at: str | None = None
     assistant_first_text_at: str | None = None
     first_response_token_at: str | None = None
+    response_completed_at: str | None = None
     tts_synthesis_started_at: str | None = None
     tts_started_at: str | None = None
     tts_ready_at: str | None = None
     tts_completed_at: str | None = None
+    returned_to_idle_at: str | None = None
     provider: str | None = None
     status: str = "in_progress"
     error_stage: str | None = None
+    error_reason: str | None = None
 
     def mark(self, stage: str, timestamp: str | None = None) -> None:
         if stage not in VOICE_STAGES:
@@ -84,8 +93,10 @@ class VoiceTraceStore:
                 tts_synthesis_started_at, tts_ready_at, status, error_stage, created_at,
                 audio_detected_at, speech_end_at, transcript, wake_match,
                 wake_detected_at, command_ready_at, processing_started_at,
-                first_response_token_at, tts_started_at, tts_completed_at, provider
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                first_response_token_at, tts_started_at, tts_completed_at, provider,
+                normalized_transcript, wake_alias_matched, command_extracted, route,
+                response_completed_at, returned_to_idle_at, error_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(turn_id) DO UPDATE SET
                 audio_received_at=excluded.audio_received_at,
                 stt_started_at=excluded.stt_started_at,
@@ -106,7 +117,14 @@ class VoiceTraceStore:
                 tts_completed_at=excluded.tts_completed_at,
                 provider=excluded.provider,
                 status=excluded.status,
-                error_stage=excluded.error_stage
+                error_stage=excluded.error_stage,
+                normalized_transcript=excluded.normalized_transcript,
+                wake_alias_matched=excluded.wake_alias_matched,
+                command_extracted=excluded.command_extracted,
+                route=excluded.route,
+                response_completed_at=excluded.response_completed_at,
+                returned_to_idle_at=excluded.returned_to_idle_at,
+                error_reason=excluded.error_reason
             """,
             (
                 trace.turn_id,
@@ -132,6 +150,13 @@ class VoiceTraceStore:
                 trace.tts_started_at,
                 trace.tts_completed_at,
                 trace.provider,
+                trace.normalized_transcript,
+                trace.wake_alias_matched,
+                trace.command_extracted,
+                trace.route,
+                trace.response_completed_at,
+                trace.returned_to_idle_at,
+                trace.error_reason,
             ),
         )
         await self._conn.commit()
@@ -186,7 +211,11 @@ class VoiceTurnRecorder:
         self,
         *,
         transcript: str | None = None,
+        normalized_transcript: str | None = None,
         wake_match: str | None = None,
+        wake_alias_matched: str | None = None,
+        command_extracted: bool | None = None,
+        route: str | None = None,
         provider: str | None = None,
     ) -> None:
         async with self._lock:
@@ -194,8 +223,16 @@ class VoiceTurnRecorder:
                 raise RuntimeError("voice turn must be started before annotation")
             if transcript is not None:
                 self._current.transcript = transcript
+            if normalized_transcript is not None:
+                self._current.normalized_transcript = normalized_transcript
             if wake_match is not None:
                 self._current.wake_match = wake_match
+            if wake_alias_matched is not None:
+                self._current.wake_alias_matched = wake_alias_matched
+            if command_extracted is not None:
+                self._current.command_extracted = command_extracted
+            if route is not None:
+                self._current.route = route
             if provider is not None:
                 self._current.provider = provider
             await self._store.record(self._current)
@@ -205,6 +242,7 @@ class VoiceTurnRecorder:
             if self._current is None:
                 raise RuntimeError("voice turn must be started before completion")
             self._current.status = status
+            self._current.mark("returned_to_idle")
             await self._store.record(self._current)
 
     async def mark(self, stage: str) -> str:
@@ -221,7 +259,7 @@ class VoiceTurnRecorder:
             await self._store.record(self._current)
             return self._current.turn_id
 
-    async def fail(self, stage: str) -> None:
+    async def fail(self, stage: str, *, reason: str | None = None) -> None:
         async with self._lock:
             if self._current is None:
                 self._current = VoiceTurnTrace(
@@ -231,4 +269,6 @@ class VoiceTurnRecorder:
                 )
             self._current.status = "failed"
             self._current.error_stage = stage
+            self._current.error_reason = reason
+            self._current.mark("returned_to_idle")
             await self._store.record(self._current)
