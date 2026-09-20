@@ -117,11 +117,20 @@ def _words(text: str) -> list[str]:
 
 
 def is_echo(candidate: str, reference: str) -> bool:
-    """True when what the mic heard is (mostly) TARS's own current speech."""
-    heard, spoken = _words(candidate), set(_words(reference))
+    """True when what the mic heard is TARS's own current speech: mostly the same words AND,
+    from three words up, mostly the same word *pairs* (a user's interruption often reuses
+    single words the assistant just said, but not its exact phrases)."""
+    heard, spoken = _words(candidate), _words(reference)
     if not heard or not spoken:
         return False
-    return sum(w in spoken for w in heard) / len(heard) >= 0.6
+    vocab = set(spoken)
+    if sum(w in vocab for w in heard) / len(heard) < 0.6:
+        return False
+    if len(heard) < 3:
+        return True
+    pairs = set(zip(spoken, spoken[1:]))
+    heard_pairs = list(zip(heard, heard[1:]))
+    return sum(p in pairs for p in heard_pairs) / len(heard_pairs) >= 0.5
 
 
 class IncrementalWhisperSTT:
@@ -219,11 +228,12 @@ class IncrementalWhisperSTT:
                 self.voiced += 0.032
             if self.active and not self.announced:
                 busy = bool(self.busy and self.busy())
-                needed = 0.8 if not self.partial_engine else (1.2 if busy else 0.7)
+                needed = 0.8 if not self.partial_engine else (0.8 if busy else 0.7)
                 reference = self.echo_reference() if (busy and self.echo_reference) else ""
                 # Sustained voiced audio the streaming engine could not match to TARS's own speech
                 # is a real utterance even if the small engine recognised no words.
-                if self.voiced >= needed and not is_echo(self.last_text, reference):
+                stop_word = busy and bool({"stop", "wait", "cancel"} & set(_words(self.last_text)))
+                if (self.voiced >= needed or stop_word) and not is_echo(self.last_text, reference):
                     self.announced = True
                     await self.on_speech_started({"utterance": self.utterance})
             if self.partial_engine:

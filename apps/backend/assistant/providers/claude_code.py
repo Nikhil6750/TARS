@@ -8,6 +8,8 @@ interactive REPL.
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections import deque
 import json
 import os
 import re
@@ -54,6 +56,9 @@ def sanitize_user_facing_text(text: str) -> str:
     return cleaned
 
 
+logger = logging.getLogger("tars.claude_code")
+
+
 class ClaudeCodeProvider(AssistantProvider):
     name = "claude_code"
 
@@ -98,14 +103,17 @@ class ClaudeCodeProvider(AssistantProvider):
             allowed_tools = ["Read"]
             extra_dir = str(Path(request.image_path).parent)
 
+        # The prompt goes over stdin, never argv: on Windows the claude .cmd shim mangles
+        # newlines/quotes/&|^% in argv, which truncated multi-line prompts to empty.
         base_args = [
             self._command,
             "-p",
-            prompt,
             "--output-format",
             "json",
+            # Not "user": the global CLAUDE.md/memory rules make the model try to consult memory
+            # (tools are disabled here), giving empty/non-JSON output and a failed voice turn.
             "--setting-sources",
-            "user",
+            "project",
         ]
         system_context = request.system_context or ""
         # Instruction to prevent ungrounded tool searching
@@ -121,10 +129,10 @@ class ClaudeCodeProvider(AssistantProvider):
             base_args += ["--no-session-persistence"]
 
         resume_args = self._resume_args(request.conversation_id) if self._persist_sessions else []
-        returncode, stdout, stderr = await self._run_cli(base_args + resume_args)
+        returncode, stdout, stderr = await self._run_cli(base_args + resume_args, stdin_text=prompt)
         if returncode != 0 and resume_args:
             self._sessions.pop(request.conversation_id, None)
-            returncode, stdout, stderr = await self._run_cli(base_args)
+            returncode, stdout, stderr = await self._run_cli(base_args, stdin_text=prompt)
 
         latency_ms = (time.perf_counter() - t0) * 1000.0
         completed_at = datetime.now(UTC).isoformat()
@@ -171,11 +179,11 @@ class ClaudeCodeProvider(AssistantProvider):
         )
         return AssistantReply(text=sanitized_text, provider=self.name, diagnostics=diagnostics)
 
-    async def _run_cli(self, args: list[str]) -> tuple[int, bytes, bytes]:
+    async def _run_cli(self, args: list[str], stdin_text: str = "") -> tuple[int, bytes, bytes]:
         try:
             process = await asyncio.create_subprocess_exec(
                 *args,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._working_directory,
@@ -189,7 +197,7 @@ class ClaudeCodeProvider(AssistantProvider):
 
         try:
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self._timeout
+                process.communicate(stdin_text.encode("utf-8")), timeout=self._timeout
             )
         except TimeoutError as exc:
             process.kill()
@@ -216,13 +224,14 @@ class ClaudeCodeProvider(AssistantProvider):
         args = [
             self._command,
             "-p",
-            prompt,
             "--output-format",
             "stream-json",
             "--include-partial-messages",
             "--verbose",
+            # Not "user": the global CLAUDE.md/memory rules make the model try to consult memory
+            # (tools are disabled here), giving empty/non-JSON output and a failed voice turn.
             "--setting-sources",
-            "user",
+            "project",
         ]
         system_context = request.system_context or ""
         system_context += "\nDo not invoke external search tools or invent current unretrieved facts."
@@ -245,7 +254,7 @@ class ClaudeCodeProvider(AssistantProvider):
         try:
             process = await asyncio.create_subprocess_exec(
                 *args,
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=CLAUDE_STREAM_READER_LIMIT_BYTES,
@@ -260,10 +269,15 @@ class ClaudeCodeProvider(AssistantProvider):
 
         assert process.stdout is not None
         assert process.stderr is not None
+        assert process.stdin is not None
+        process.stdin.write(prompt.encode("utf-8"))
+        await process.stdin.drain()
+        process.stdin.close()
         accumulated_text = ""
         emitted_length = 0
         final_result_text = ""
         image_confirmed_read = False
+        raw_tail: deque[str] = deque(maxlen=6)
 
         try:
             while True:
@@ -276,6 +290,7 @@ class ClaudeCodeProvider(AssistantProvider):
                 if not line:
                     break
                 decoded = line.decode(errors="replace").strip()
+                raw_tail.append(decoded[:400])
                 if not decoded or not decoded.startswith("{"):
                     continue
                 try:
@@ -321,6 +336,10 @@ class ClaudeCodeProvider(AssistantProvider):
                         yield {"type": "delta", "text": new_piece}
 
             await process.wait()
+            if not accumulated_text:
+                stderr_preview = (await process.stderr.read()).decode(errors="replace")[:600]
+                logger.error("claude stream produced no text rc=%s stderr=%r tail=%r", process.returncode,
+                             stderr_preview, list(raw_tail))
             if process.returncode != 0:
                 stderr_bytes = await process.stderr.read()
                 err_text = stderr_bytes.decode(errors="replace")

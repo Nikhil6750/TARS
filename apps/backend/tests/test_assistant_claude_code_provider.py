@@ -17,13 +17,28 @@ class _FakeProcess:
         self._stdout = stdout
         self._stderr = stderr
 
-    async def communicate(self):
+    async def communicate(self, data=None):
+        self.stdin_data = data
         return self._stdout, self._stderr
 
     def kill(self):  # pragma: no cover - not exercised by these tests
         pass
 
     async def wait(self):  # pragma: no cover
+        pass
+
+
+class _FakeStdin:
+    def __init__(self):
+        self.data = b""
+
+    def write(self, data):
+        self.data += data
+
+    async def drain(self):
+        pass
+
+    def close(self):
         pass
 
 
@@ -58,6 +73,7 @@ class _FakeStderr:
 
 class _FakeStreamProcess:
     def __init__(self, lines: list[bytes], returncode: int = 0, hang: bool = False, stderr: bytes = b""):
+        self.stdin = _FakeStdin()
         self.stdout = _FakeStdout(lines, hang=hang)
         self.stderr = _FakeStderr(stderr)
         self.returncode = None if hang else returncode
@@ -327,7 +343,8 @@ async def test_cancel_stream_kills_real_child_process(monkeypatch):
     processes = []
     async def fake_exec(*args, **kwargs):
         process = await real_exec(sys.executable, "-c", "import time; time.sleep(3600)",
-                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                 stderr=asyncio.subprocess.PIPE)
         processes.append(process)
         return process
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
@@ -339,3 +356,19 @@ async def test_cancel_stream_kills_real_child_process(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 2)
     assert processes[0].returncode is not None
+
+
+async def test_prompt_is_sent_over_stdin_not_argv(monkeypatch, provider):
+    captured = {}
+    process = _FakeStreamProcess([b'{"type":"result","result":"ok"}\n'])
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = args
+        return process
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    text = "Line one\n- **bold** | pipe & amp \"quote\" %PATH% ^caret"
+    events = [e async for e in provider.respond_stream(AssistantRequest(text=text, conversation_id="c"))]
+    assert events
+    assert not any("pipe & amp" in str(a) for a in captured["args"])
+    assert b"pipe & amp" in process.stdin.data

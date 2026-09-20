@@ -293,6 +293,8 @@ class VoiceSessionController:
                     elif event.type == "complete" and event.response:
                         response = event.response
                         if response.status.value == "failed":
+                            logger.error("assistant turn failed turn=%s provider=%s display=%r speech=%r",
+                                         turn_id, response.provider, response.display_text[:300], response.speech_text[:200])
                             await self.failure("assistant", "Assistant unavailable")
                         else:
                             self.provider_status["assistant"] = "CONNECTED" if response.provider != "mock" else "DEGRADED"
