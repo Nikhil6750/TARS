@@ -46,7 +46,7 @@ describe('Tauri 2 Configuration & Service Compatibility', () => {
     expect(defaultCap.permissions).toContain('global-shortcut:default');
 
     // Security & CSP
-    expect(tauriConfig.app.security.csp).toContain("connect-src 'self' http://127.0.0.1:8000 http://localhost:8000 ws://127.0.0.1:8000 ws://localhost:8000");
+    expect(tauriConfig.app.security.csp).toContain("connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8000 http://localhost:8000 ws://127.0.0.1:8000 ws://localhost:8000");
     expect(tauriConfig.app.security.csp).not.toContain("unsafe-eval");
   });
 
