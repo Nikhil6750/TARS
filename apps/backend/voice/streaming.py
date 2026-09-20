@@ -217,7 +217,8 @@ class IncrementalWhisperSTT:
             self.silence = 0.0 if speech else self.silence + 0.032
             if speech:
                 self.voiced += 0.032
-            if self.active and not self.announced and not self.partial_engine and self.voiced >= 0.8:
+            if self.active and not self.announced and self.voiced >= (0.8 if not self.partial_engine else 0.7) and not (
+                    self.partial_engine and self.busy and self.busy()):
                 self.announced = True
                 await self.on_speech_started({"utterance": self.utterance})
             if self.partial_engine:

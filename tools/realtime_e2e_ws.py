@@ -39,15 +39,16 @@ async def main():
     t0 = time.perf_counter()
     marks: dict[str, float] = {}
     log: list[tuple[float, str, str]] = []
-    queue: list[bytes] = [silence] * 16 + [first[i:i + FRAME * 2].ljust(FRAME * 2, b"\0") for i in range(0, len(first), FRAME * 2)]
+    LEAD = 160  # ~5 s of silence: let the session finish warming (sherpa/whisper) like a live mic would
+    queue: list[bytes] = [silence] * LEAD + [first[i:i + FRAME * 2].ljust(FRAME * 2, b"\0") for i in range(0, len(first), FRAME * 2)]
     first_end = len(queue)
-    queue += [silence] * 400
+    queue += [silence] * 800
     second_frames = [second[i:i + FRAME * 2].ljust(FRAME * 2, b"\0") for i in range(0, len(second), FRAME * 2)]
     state = {"barged": False, "barge_index": None, "sent": 0}
     async with websockets.connect(URL, max_size=None) as ws:
         async def sender():
             i = 0
-            while i < len(queue) and time.perf_counter() - t0 < 80:
+            while i < len(queue) and time.perf_counter() - t0 < 100:
                 await asyncio.sleep(max(0, t0 + i * 0.032 - time.perf_counter()))
                 if i == first_end:
                     marks["speech1_end"] = time.perf_counter() - t0
@@ -70,8 +71,10 @@ async def main():
                 ev = json.loads(raw)
                 t = ev["type"]
                 detail = ev.get("state") or (ev.get("text") or "")[:60]
-                if t not in ("delta", "metrics", "provider_status"):
-                    log.append((round(now, 2), t, detail))
+                if t == "delta" and sum(1 for x in log if x[1] == "delta") < 12:
+                    log.append((round(now, 2), "delta", (ev.get("text") or "")[:50]))
+                if t not in ("delta", "metrics"):
+                    log.append((round(now, 2), t, detail or str(ev.get("providers", "")) or ev.get("detail", "")))
                 marks.setdefault(t, now)
                 if t == "final_transcript":
                     marks.setdefault(f"final{sum(1 for x in log if x[1] == 'final_transcript')}", now)
@@ -91,7 +94,7 @@ async def main():
                 if t == "first_token" or (t == "delta" and "first_delta" not in marks):
                     marks.setdefault("first_delta", now)
         tasks = [asyncio.create_task(sender()), asyncio.create_task(receiver())]
-        await asyncio.wait([tasks[0]], timeout=85)
+        await asyncio.wait([tasks[0]], timeout=105)
         await asyncio.sleep(2)
         for t in tasks:
             t.cancel()
@@ -103,7 +106,7 @@ async def main():
     def d(a, b):
         return round((s[b] - s[a]) * 1000) if a in s and b in s else None
     print("\nMEASURED (ms, client clock):")
-    print(" speech start -> first partial:", round((s["partial_transcript"] - 16 * 0.032) * 1000) if "partial_transcript" in s else None)
+    print(" speech start -> first partial:", round((s["partial_transcript"] - LEAD * 0.032) * 1000) if "partial_transcript" in s else None)
     print(" speech end -> final transcript:", d("speech1_end", "final_transcript"))
     print(" speech end -> first delta (Claude first token):", d("speech1_end", "first_delta"))
     print(" speech end -> first audio chunk sent:", d("speech1_end", "first_audio_at"))

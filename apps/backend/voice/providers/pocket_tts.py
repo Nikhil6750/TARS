@@ -24,6 +24,13 @@ class PocketTTSProvider(TextToSpeechProvider):
         self._model = TTSModel.load_model()
         self._state = self._model.get_state_for_audio_prompt(voice)
         self._lock = threading.Lock()
+        # First synthesis in a process pays a one-off warm-up (measured ~10 s). Pay it at startup,
+        # not on the user's first spoken answer.
+        try:
+            for _ in self._model.generate_audio_stream(self._state, "Ready."):
+                pass
+        except Exception:
+            pass
 
     async def synthesize_stream(self, text: str):
         queue: asyncio.Queue = asyncio.Queue(maxsize=2)
