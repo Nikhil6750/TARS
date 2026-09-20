@@ -46,6 +46,10 @@ def build_tts_provider(settings: Settings) -> TextToSpeechProvider:
     provider = settings.tts_provider.lower()
     if provider == "mock":
         return MockTextToSpeechProvider()
+    if provider == "pocket":
+        from voice.providers.pocket_tts import PocketTTSProvider
+
+        return PocketTTSProvider(voice=settings.pocket_tts_voice)
     if provider == "kokoro":
         from voice.providers.kokoro_tts import KokoroTTSProvider
 

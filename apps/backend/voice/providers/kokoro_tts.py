@@ -9,6 +9,7 @@ so the model is only ever fetched once regardless of which path runs).
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from voice.audio_utils import float32_to_pcm16, pcm16_to_wav
 from voice.errors import VoiceProviderError
@@ -34,6 +35,7 @@ class KokoroTTSProvider(TextToSpeechProvider):
             ) from exc
 
         self._voice = voice
+        self._inference_lock = threading.Lock()
         self._lang = lang
         resolved_model, resolved_voices = resolve_kokoro_paths(model_path, voices_path)
         try:
@@ -46,7 +48,8 @@ class KokoroTTSProvider(TextToSpeechProvider):
 
     def _synthesize_sync(self, text: str) -> SynthesisResult:
         try:
-            samples, sample_rate = self._kokoro.create(text, voice=self._voice, lang=self._lang)
+            with self._inference_lock:
+                samples, sample_rate = self._kokoro.create(text, voice=self._voice, lang=self._lang)
         except Exception as exc:
             raise VoiceProviderError(f"Kokoro synthesis failed: {exc}") from exc
         pcm = float32_to_pcm16(samples)

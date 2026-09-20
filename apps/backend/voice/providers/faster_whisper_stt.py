@@ -7,6 +7,7 @@ required after that first pull.
 from __future__ import annotations
 
 import asyncio
+import threading
 
 from voice.errors import VoiceProviderError
 from voice.interfaces import SpeechToTextProvider, TranscriptionResult
@@ -19,6 +20,7 @@ class FasterWhisperSTTProvider(SpeechToTextProvider):
     sample_rate = 16000
 
     def __init__(self, model_size: str = "base", device: str = "cpu", compute_type: str = "int8"):
+        self._inference_lock = threading.Lock()
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
@@ -27,7 +29,9 @@ class FasterWhisperSTTProvider(SpeechToTextProvider):
             ) from exc
 
         try:
-            self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
+            self._model = WhisperModel(
+                model_size, device=device, compute_type=compute_type, cpu_threads=4, num_workers=1
+            )
         except Exception as exc:
             raise VoiceProviderError(
                 f"failed to load faster-whisper model '{model_size}': {exc}"
@@ -41,8 +45,12 @@ class FasterWhisperSTTProvider(SpeechToTextProvider):
 
         samples = np.frombuffer(pcm_audio, dtype=np.int16).astype(np.float32) / PCM16_SCALE
         try:
-            segments, info = self._model.transcribe(samples, language=None)
-            text = " ".join(segment.text.strip() for segment in segments).strip()
+            with self._inference_lock:
+                segments, info = self._model.transcribe(
+                    samples, language="en", beam_size=1, condition_on_previous_text=False,
+                    hotwords="TARS, EURUSD, XAUUSD, gold",
+                )
+                text = " ".join(segment.text.strip() for segment in segments).strip()
         except Exception as exc:
             raise VoiceProviderError(f"faster-whisper transcription failed: {exc}") from exc
         return TranscriptionResult(text=text, language=info.language if info else None)

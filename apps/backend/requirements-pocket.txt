@@ -1,0 +1,2 @@
+# Optional CPU streaming voice; Kokoro remains available without this package.
+pocket-tts==3.1.0

@@ -66,6 +66,7 @@ export class AudioService {
   private activeBufferSource: AudioBufferSourceNode | null = null;
   private activePlaybackContext: AudioContext | null = null;
   private playbackGeneration = 0;
+  private finishPlayback: (() => void) | null = null;
   private activePlaybackAnimId: number | null = null;
 
   public async requestMicrophonePermission(): Promise<boolean> {
@@ -374,9 +375,12 @@ export class AudioService {
    */
   public playAudioBytes(
     audioBytes: ArrayBuffer,
-    onPlaybackVolume?: (volume: number) => void
+    onPlaybackVolume?: (volume: number) => void,
+    onStarted?: () => void
   ): Promise<void> {
+    const generation = this.playbackGeneration;
     return new Promise((resolve, reject) => {
+      this.finishPlayback = resolve;
       try {
         const AudioContextClass =
           window.AudioContext ||
@@ -389,6 +393,11 @@ export class AudioService {
           ctx.decodeAudioData(
             audioBytes.slice(0),
             (buffer) => {
+              if (generation !== this.playbackGeneration) {
+                void ctx.close().catch(() => {});
+                resolve();
+                return;
+              }
               const source = ctx.createBufferSource();
               source.buffer = buffer;
               this.activeBufferSource = source;
@@ -418,6 +427,7 @@ export class AudioService {
               }
 
               source.onended = () => {
+                if (generation !== this.playbackGeneration) { resolve(); return; }
                 if (animId !== null) cancelAnimationFrame(animId);
                 this.activePlaybackAnimId = null;
                 if (onPlaybackVolume) onPlaybackVolume(0);
@@ -432,14 +442,17 @@ export class AudioService {
               };
 
               source.start(0);
+              if (ctx.state === 'suspended') void ctx.resume();
+              onStarted?.();
             },
             (err) => {
+              if (generation !== this.playbackGeneration) { resolve(); return; }
               console.warn('[TARS Audio] decodeAudioData error, falling back to HTMLAudioElement:', err);
-              this.fallbackPlayBlob(audioBytes, resolve, reject);
+              this.fallbackPlayBlob(audioBytes, resolve, reject, onStarted);
             }
           );
         } else {
-          this.fallbackPlayBlob(audioBytes, resolve, reject);
+          this.fallbackPlayBlob(audioBytes, resolve, reject, onStarted);
         }
       } catch (err) {
         reject(err);
@@ -450,7 +463,8 @@ export class AudioService {
   private fallbackPlayBlob(
     audioBytes: ArrayBuffer,
     resolve: () => void,
-    reject: (err: unknown) => void
+    reject: (err: unknown) => void,
+    onStarted?: () => void
   ) {
     try {
       const blob = new Blob([audioBytes], { type: 'audio/wav' });
@@ -470,7 +484,7 @@ export class AudioService {
         reject(err);
       };
 
-      audio.play().catch(reject);
+      audio.play().then(() => onStarted?.()).catch(reject);
     } catch (e) {
       reject(e);
     }
@@ -537,6 +551,8 @@ export class AudioService {
    */
   public stopSpeaking(): void {
     this.playbackGeneration++;
+    this.finishPlayback?.();
+    this.finishPlayback = null;
 
     if (this.activePlaybackAnimId !== null) {
       cancelAnimationFrame(this.activePlaybackAnimId);

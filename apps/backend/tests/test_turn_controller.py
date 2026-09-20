@@ -122,6 +122,22 @@ def test_speech_is_chunked_only_on_complete_sentence_boundaries():
     ]
 
 
+async def test_interrupted_turn_cancels_execution_and_cannot_be_replayed(controller):
+    turns, provider = controller
+    task = asyncio.create_task(turns.execute_text("hello", turn_id="cancelled"))
+    await provider.entered.wait()
+    await turns.cancel_turn("cancelled")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(DuplicateTurnConflict, match="interrupted"):
+        await turns.execute_text("hello", turn_id="cancelled")
+    async with asyncio.timeout(1):
+        with pytest.raises(DuplicateTurnConflict, match="interrupted"):
+            async for _ in turns.stream_text("hello", turn_id="cancelled"):
+                pass
+    assert provider.calls == 1
+
+
 async def test_normal_conversation_fast_path_has_one_execution(controller):
     turn_controller, provider = controller
     provider.release.set()

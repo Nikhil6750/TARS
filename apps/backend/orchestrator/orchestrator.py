@@ -138,6 +138,10 @@ class TarsOrchestrator:
             presentation=presentation,
         )
 
+    async def analyze_monitor_event(self, context: str, conversation_id: str) -> str:
+        """Bounded event agents use read-only intelligence, never command parsing."""
+        return await self._assistant_router.analyze_monitor_context(context, conversation_id)
+
     async def handle_text_stream(self, text: str, conversation_id: str | None):
         """Streaming twin of handle_text -- see AssistantRouter.handle_text_stream
         for the event shape (`delta` / `complete`). Deterministic

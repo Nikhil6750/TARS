@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # ---- Mock trading events ----
     use_mock_trading_events: bool = True
     mock_event_interval_seconds: float = 45.0
+    event_analysis_enabled: bool = False
+    event_spoken_alerts_enabled: bool = False
+    event_relevant_symbols: str = ""
 
     # ---- quant_brain (future) ----
     quant_brain_base_url: str | None = None
@@ -73,6 +76,7 @@ class Settings(BaseSettings):
 
     # ---- TTS ----
     tts_provider: str = "mock"
+    pocket_tts_voice: str = "alba"
     fish_speech_model_path: str | None = None
     fish_speech_api_url: str = "http://localhost:8080"
     fish_speech_reference_id: str | None = None

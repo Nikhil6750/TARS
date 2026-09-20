@@ -215,7 +215,7 @@ $ttsProvider = [System.Environment]::GetEnvironmentVariable('TTS_PROVIDER')
 $problems = @()
 if ($assistantProvider -ne 'claude_code') { $problems += "ASSISTANT_PROVIDER=$assistantProvider (expected claude_code)" }
 if ($sttProvider -ne 'faster_whisper') { $problems += "STT_PROVIDER=$sttProvider (expected faster_whisper)" }
-if ($ttsProvider -ne 'kokoro') { $problems += "TTS_PROVIDER=$ttsProvider (expected kokoro)" }
+if ($ttsProvider -notin @('kokoro', 'pocket')) { $problems += "TTS_PROVIDER=$ttsProvider (expected kokoro or pocket)" }
 
 if ($problems.Count -gt 0) {
     Write-Warn "TARS voice services are not configured."
@@ -335,11 +335,11 @@ if (-not $needsBuild) {
         # (e.g. launched manually). Retry once after another stop attempt
         # rather than ever failing the user with a raw file-lock error.
         Stop-StaleNativeProcess -ExePath $exe
-        & $npmCmd.Source run tauri build
+        & $npmCmd.Source run tauri -- build --no-bundle
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "  Native build failed (possible lingering file lock) -- retrying once..."
             Stop-StaleNativeProcess -ExePath $exe
-            & $npmCmd.Source run tauri build
+            & $npmCmd.Source run tauri -- build --no-bundle
             if ($LASTEXITCODE -ne 0) { throw "native build failed with exit code $LASTEXITCODE" }
         }
     } finally {

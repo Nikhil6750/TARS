@@ -24,6 +24,7 @@ import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut, 
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
 import { nativeBridge } from './services/native-bridge';
 import { VoiceAssistantRuntime } from './runtime/VoiceAssistantRuntime';
+import { realtimeVoiceClient } from './runtime/RealtimeVoiceClient';
 import { assistantClient } from './runtime/AssistantClient';
 
 import { AppShell } from './components/shell/AppShell';
@@ -643,6 +644,11 @@ export const App: React.FC = () => {
 
   // Push to Talk Handler
   const handleTogglePushToTalk = async () => {
+    if (isTauri()) {
+      realtimeVoiceClient.interrupt();
+      await nativeBridge.summonHUD('voice');
+      return;
+    }
     cancelAutoHide();
     if (isListening) {
       setIsListening(false);

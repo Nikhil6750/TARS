@@ -60,7 +60,7 @@ class _FakeStreamProcess:
     def __init__(self, lines: list[bytes], returncode: int = 0, hang: bool = False, stderr: bytes = b""):
         self.stdout = _FakeStdout(lines, hang=hang)
         self.stderr = _FakeStderr(stderr)
-        self.returncode = returncode
+        self.returncode = None if hang else returncode
         self.killed = False
 
     def kill(self) -> None:
@@ -304,3 +304,38 @@ async def test_respond_stream_handles_line_far_larger_than_default_asyncio_limit
 
 async def _collect(async_gen):
     return [event async for event in async_gen]
+
+
+async def test_wrapped_partial_tokens_are_requested_and_not_duplicated(provider, monkeypatch):
+    calls = []
+    lines = [
+        {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hello. "}}},
+        {"type": "assistant", "message": {"content": [{"text": "Hello. World."}]}},
+        {"type": "result", "result": "Hello. World."},
+    ]
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        return _FakeStreamProcess([json.dumps(line).encode() + b"\n" for line in lines])
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    events = await _collect(provider.respond_stream(AssistantRequest(text="hi", conversation_id="test")))
+    assert "--include-partial-messages" in calls[0]
+    assert [e["text"] for e in events if e["type"] == "delta"] == ["Hello. ", "World."]
+
+
+async def test_cancel_stream_kills_real_child_process(monkeypatch):
+    real_exec = asyncio.create_subprocess_exec
+    processes = []
+    async def fake_exec(*args, **kwargs):
+        process = await real_exec(sys.executable, "-c", "import time; time.sleep(3600)",
+                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        processes.append(process)
+        return process
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    provider = ClaudeCodeProvider(command="test", timeout_seconds=30)
+    task = asyncio.create_task(_collect(provider.respond_stream(AssistantRequest(text="hi", conversation_id="test"))))
+    while not processes:
+        await asyncio.sleep(0.001)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert processes[0].returncode is not None

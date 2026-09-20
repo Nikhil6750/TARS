@@ -44,6 +44,7 @@ from app.routers import (
 )
 from app.routers import agent_runtime as agent_runtime_router
 from app.routers import agents as agents_router
+from app.routers import realtime as realtime_router
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
 from app.ws_manager import ConnectionManager
@@ -334,9 +335,36 @@ async def lifespan(app: FastAPI):
         voice_trace_store=app.state.voice_trace_store,
     )
 
+    from events.core import RealtimeEventCore, SignificanceGate
+
+    realtime_events = RealtimeEventCore(
+        db.conn, agent_runtime, orchestrator,
+        gate=SignificanceGate(
+            symbols=[s.strip() for s in settings.event_relevant_symbols.split(",") if s.strip()],
+            analyze=settings.event_analysis_enabled,
+            speak=settings.event_spoken_alerts_enabled,
+        ),
+    )
+    await realtime_events.start()
+    app.state.realtime_events = realtime_events
+    event_bus.normalized_core = realtime_events
+    realtime_events.subscribe(ws_manager.broadcast)
+
+    async def spoken_alert(payload):
+        session = getattr(app.state, "realtime_session", None)
+        if payload.get("decision") == "SPEAK" and session:
+            event = payload["event"]
+            await session.speak_alert(f"{event['title']}. {event['summary']}")
+
+    realtime_events.subscribe(spoken_alert)
+
     try:
         yield
     finally:
+        await realtime_events.close()
+        session = getattr(app.state, "realtime_session", None)
+        if session:
+            await session.close()
         voice_load_task.cancel()
         if settings.setup_watch_agent_enabled:
             await agent_runtime.stop_continuous("setup_watch_agent")
@@ -371,6 +399,7 @@ def create_app() -> FastAPI:
     app.include_router(chart_watch.router)
     app.include_router(memory.router)
     app.include_router(voice.router)
+    app.include_router(realtime_router.router)
     app.include_router(ws.router)
     app.include_router(actions.router)
     app.include_router(action_plans.router)

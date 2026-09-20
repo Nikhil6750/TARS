@@ -52,6 +52,7 @@ class VoiceStatusResponse(BaseModel):
         "silero",
         "faster_whisper",
         "kokoro",
+        "pocket",
         "fish_speech",
         "mock",
     ]
@@ -71,6 +72,7 @@ async def status(voice: VoiceProviders = Depends(get_voice_providers)) -> VoiceS
             "silero",
             "faster_whisper",
             "kokoro",
+            "pocket",
             "fish_speech",
             "mock",
         ],

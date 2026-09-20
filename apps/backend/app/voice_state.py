@@ -52,6 +52,7 @@ class VoiceProviders:
                 "failed to construct STT provider '%s' — falling back to mock",
                 settings.stt_provider,
             )
+            self.load_error = "STT provider failed to load"
 
         try:
             self.tts = await loop.run_in_executor(None, build_tts_provider, settings)
@@ -60,6 +61,15 @@ class VoiceProviders:
                 "failed to construct TTS provider '%s' — falling back to mock",
                 settings.tts_provider,
             )
+            self.load_error = "TTS provider failed to load"
+            if settings.tts_provider == "pocket":
+                try:
+                    self.tts = await loop.run_in_executor(
+                        None, build_tts_provider, settings.model_copy(update={"tts_provider": "kokoro"})
+                    )
+                    self.load_error = "Pocket unavailable; using local Kokoro fallback"
+                except Exception:
+                    logger.exception("local Kokoro fallback also unavailable")
 
         logger.info(
             "voice providers ready: wake=transcript_matcher stt=%s tts=%s",

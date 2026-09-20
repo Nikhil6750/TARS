@@ -8,6 +8,7 @@ import { TARSTradingEvent } from '../types/trading-event';
 import { TARSAssistantMessage } from '../types/assistant-message';
 import { ConnectionStatus, CompanionVisualState } from '../types/companion';
 import { validateTradingEvent, validateAssistantMessage } from '../contracts/validator';
+import { sendNotification } from './notifications';
 
 export type TradingEventListener = (event: TARSTradingEvent) => void;
 export type ActiveSnapshotListener = (events: TARSTradingEvent[]) => void;
@@ -177,6 +178,16 @@ export class TARSWebSocketClient {
     }
 
     const msg = parsed as Record<string, unknown>;
+
+    if (msg.type === 'proactive_event') {
+      const event = msg.event as Record<string, unknown> | undefined;
+      if (event && typeof event.title === 'string' && typeof event.summary === 'string'
+        && ['NOTIFY', 'ANALYZE', 'SPEAK'].includes(String(msg.decision))) {
+        void sendNotification({ title: event.title, body: event.summary });
+      }
+      return;
+    }
+    if (msg.type === 'provider_status' || msg.type === 'event_analysis') return;
 
     // Heartbeat pong handling from real backend
     if (msg.type === 'pong') {

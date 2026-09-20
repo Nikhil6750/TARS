@@ -25,6 +25,7 @@ class EventBus:
     def __init__(self, db: Database, ws_manager: ConnectionManager):
         self._db = db
         self._ws_manager = ws_manager
+        self.normalized_core = None
 
     async def emit(self, event: TradingEvent) -> None:
         with tracer.start_as_current_span("event.emit") as span:
@@ -46,6 +47,20 @@ class EventBus:
                         "active_state_change": change.action,
                     }
                 )
+                if self.normalized_core is not None:
+                    from events.core import EventSource, NormalizedEvent
+
+                    try:
+                        await self.normalized_core.publish(NormalizedEvent(
+                            id=str(event.event_id), timestamp=event.timestamp,
+                            source=EventSource.STRATEGY, kind=event.state.value,
+                            severity=3 if event.state.value == "RISK_WARNING" else 2,
+                            symbol=event.symbol, title=f"{event.symbol}: {event.state.value}",
+                            summary=", ".join(event.reason_codes), payload=payload,
+                            dedupe_key=f"{event.symbol}:{event.state.value}",
+                        ))
+                    except Exception:
+                        logger.exception("normalized event observer failed")
             except Exception as exc:
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)

@@ -197,6 +197,11 @@ class ClaudeCodeProvider(AssistantProvider):
             raise AssistantProviderError(
                 f"Claude Code CLI timed out after {self._timeout}s"
             ) from exc
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
         return process.returncode or 0, stdout, stderr
 
     async def respond_stream(self, request: AssistantRequest):
@@ -214,6 +219,7 @@ class ClaudeCodeProvider(AssistantProvider):
             prompt,
             "--output-format",
             "stream-json",
+            "--include-partial-messages",
             "--verbose",
             "--setting-sources",
             "user",
@@ -280,6 +286,10 @@ class ClaudeCodeProvider(AssistantProvider):
                 if isinstance(event.get("session_id"), str) and event["session_id"]:
                     session_id = event["session_id"]
 
+                # Claude wraps token deltas in stream_event when partial messages
+                # are enabled. Full assistant/result envelopes still dedupe below.
+                if event.get("type") == "stream_event":
+                    event = event.get("event", {})
                 event_type = event.get("type")
                 if event_type == "user" and not image_confirmed_read:
                     content_list = event.get("message", {}).get("content", [])
@@ -321,10 +331,11 @@ class ClaudeCodeProvider(AssistantProvider):
             final_text = final_result_text or accumulated_text
             final_text = sanitize_user_facing_text(final_text)
             yield {"type": "complete", "text": final_text, "provider": self.name}
-        except Exception:
-            process.kill()
-            await process.wait()
-            raise
+        finally:
+            # CancelledError/GeneratorExit must also kill the actual CLI process.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
 
 
 def _claude_subprocess_env() -> dict[str, str]:

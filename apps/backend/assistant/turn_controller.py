@@ -70,6 +70,7 @@ class TurnState(str, Enum):
 
 
 class TurnStatus(str, Enum):
+    INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     AWAITING_COMMAND = "awaiting_command"
     IGNORED = "ignored"
@@ -250,6 +251,7 @@ class AssistantTurnController:
         self._inflight: dict[str, asyncio.Task[AssistantResponse]] = {}
         self._fingerprints: dict[str, str] = {}
         self._completed: OrderedDict[str, AssistantResponse] = OrderedDict()
+        self._cancelled: OrderedDict[str, None] = OrderedDict()
         self._subscribers: dict[str, set[asyncio.Queue[TurnEvent]]] = {}
         self._execution_counts: dict[str, int] = {}
         self._utterance_inflight: dict[str, asyncio.Task[AssistantResponse]] = {}
@@ -280,6 +282,8 @@ class AssistantTurnController:
         fingerprint = _fingerprint(command, actual_conversation_id, input_mode, speak)
 
         async with self._lock:
+            if actual_turn_id in self._cancelled:
+                raise DuplicateTurnConflict(f"turn_id '{actual_turn_id}' was interrupted")
             known = self._fingerprints.get(actual_turn_id)
             if known is not None and known != fingerprint:
                 raise DuplicateTurnConflict(
@@ -303,6 +307,27 @@ class AssistantTurnController:
                 )
                 self._inflight[actual_turn_id] = task
         return await asyncio.shield(task)
+
+    async def cancel_turn(self, turn_id: str) -> None:
+        """Cancel the actual shielded execution, not only its stream subscriber."""
+        async with self._lock:
+            self._cancelled[turn_id] = None
+            self._cancelled.move_to_end(turn_id)
+            while len(self._cancelled) > self._cache_size:
+                expired, _ = self._cancelled.popitem(last=False)
+                self._fingerprints.pop(expired, None)
+                self._execution_counts.pop(expired, None)
+            task = self._inflight.pop(turn_id, None)
+            if task is not None:
+                task.cancel()
+            cached = self._completed.get(turn_id)
+            if cached is not None:
+                self._completed[turn_id] = cached.model_copy(
+                    update={"status": TurnStatus.INTERRUPTED, "audio_chunks_base64": []}
+                )
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        await self._publish(TurnEvent(turn_id=turn_id, type="interrupted"))
 
     async def stream_text(
         self,
@@ -335,14 +360,21 @@ class AssistantTurnController:
                 speak=speak,
             )
         )
+        def execution_finished(done):
+            if done.cancelled() or done.exception() is not None:
+                queue.put_nowait(TurnEvent(turn_id=actual_turn_id, type="execution_error"))
+        task.add_done_callback(execution_finished)
         try:
             while True:
                 event = await queue.get()
                 yield event
-                if event.type == "complete":
+                if event.type in {"complete", "interrupted", "execution_error"}:
                     break
             await task
         finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             async with self._lock:
                 subscribers = self._subscribers.get(actual_turn_id)
                 if subscribers is not None:

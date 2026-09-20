@@ -81,7 +81,7 @@ async def build_readiness_report(
 ) -> ReadinessReport:
     assistant_ready = settings.assistant_provider == REQUIRED_ASSISTANT_PROVIDER
     stt_ready = voice.ready.is_set() and voice.stt.name == REQUIRED_STT_PROVIDER
-    tts_ready = voice.ready.is_set() and voice.tts.name == REQUIRED_TTS_PROVIDER
+    tts_ready = voice.ready.is_set() and voice.tts.name in {REQUIRED_TTS_PROVIDER, "pocket"}
     claude_cli = _claude_cli_status(settings)
 
     assistant = ComponentStatus(
