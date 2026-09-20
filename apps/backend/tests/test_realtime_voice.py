@@ -246,6 +246,7 @@ def test_duplex_websocket_partial_final_barge_in_and_disconnect(monkeypatch):
     from app.routers import realtime
 
     monkeypatch.setattr(realtime, "SileroStreamingVAD", lambda: lambda pcm: pcm[0] != 0)
+    monkeypatch.setattr(realtime.SherpaPartialEngine, "available", classmethod(lambda cls, d: False))
     app = FastAPI()
     ready = asyncio.Event()
     ready.set()
@@ -275,3 +276,39 @@ def test_duplex_websocket_partial_final_barge_in_and_disconnect(monkeypatch):
             assert interrupt["previous_turn_id"] == audio["turn_id"]
             assert interrupt["turn_id"] != audio["turn_id"]
         assert app.state.realtime_session is None
+
+
+def test_streaming_partial_engine_emits_live_partials_and_whisper_final():
+    class Engine:
+        def __init__(self):
+            self.texts = iter(["Tars", "Tars what", "Tars what is", "Tars what is", "Tars what is", "Tars what is", "Tars what is"])
+            self.resets = 0
+
+        def reset(self):
+            self.resets += 1
+
+        def feed(self, pcm):
+            return next(self.texts, "Tars what is")
+
+    async def scenario():
+        events = []
+
+        async def emit(ev):
+            events.append(ev["type"])
+
+        from voice.streaming import IncrementalWhisperSTT
+        engine = Engine()
+        stt = IncrementalWhisperSTT(STT(), emit, lambda pcm: pcm[0] != 0, partial_engine=engine)
+        await stt.start()
+        for _ in range(12):
+            await stt.push_audio(bytes([1, 0]) * 512)
+        for _ in range(30):
+            await stt.push_audio(bytes(1024))
+        await asyncio.sleep(0.2)
+        await stt.stop()
+        return events, engine.resets
+
+    events, resets = asyncio.run(scenario())
+    assert "partial_transcript" in events and "final_transcript" in events
+    assert events.index("partial_transcript") < events.index("speech_ended") < events.index("final_transcript")
+    assert resets == 1

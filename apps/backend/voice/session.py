@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from app.schemas import InputMode
 from assistant.turn_controller import WakePhraseMatcher
-from voice.streaming import IncrementalWhisperSTT, LocalStreamingTTS, SpeechChunker
+from voice.streaming import IncrementalWhisperSTT, LocalStreamingTTS, SherpaPartialEngine, SpeechChunker
 
 logger = logging.getLogger("tars.realtime")
 
@@ -74,7 +74,7 @@ class LatencyMetrics:
 
 
 class VoiceSessionController:
-    def __init__(self, turns, voice, emit, vad, *, metrics=None, wake_aliases=None):
+    def __init__(self, turns, voice, emit, vad, *, metrics=None, wake_aliases=None, partial_engine=None):
         self.turns, self.voice, self.emit = turns, voice, emit
         self.metrics = metrics or LatencyMetrics()
         self.state = VoiceState.IDLE
@@ -93,7 +93,7 @@ class VoiceSessionController:
         self._interrupted: set[str] = set()
         self.history: deque[dict] = deque(maxlen=300)
         self._matcher = WakePhraseMatcher(wake_aliases or ["hey tars", "tars"])
-        self.stt = IncrementalWhisperSTT(voice.stt, self.on_stt, vad)
+        self.stt = IncrementalWhisperSTT(voice.stt, self.on_stt, vad, partial_engine=partial_engine)
         self.provider_status = {"microphone": "DISCONNECTED", "stt": "DISCONNECTED",
                                 "tts": "DISCONNECTED", "assistant": "DISCONNECTED"}
 
@@ -113,8 +113,16 @@ class VoiceSessionController:
 
     async def start(self):
         await self.stt.start()
+        # Warm the decoder off the event loop so the first real utterance is not cold.
+        asyncio.create_task(self._warm())
         await self.transition(VoiceState.LISTENING)
         await self.send("provider_status", providers=self.provider_status.copy())
+
+    async def _warm(self):
+        try:
+            await self.voice.stt.transcribe(bytes(32000))
+        except Exception:
+            pass
 
     async def push_audio(self, frame: bytes):
         if self.closed:

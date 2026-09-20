@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     # ---- TTS ----
     tts_provider: str = "mock"
     pocket_tts_voice: str = "alba"
+    sherpa_model_dir: str = "~/.cache/tars-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
     fish_speech_model_path: str | None = None
     fish_speech_api_url: str = "http://localhost:8080"
     fish_speech_reference_id: str | None = None

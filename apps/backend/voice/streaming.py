@@ -63,13 +63,65 @@ class SileroStreamingVAD:
         return float(out.reshape(-1)[-1]) >= 0.55
 
 
+class SherpaPartialEngine:
+    """True streaming partial transcripts (sherpa-onnx zipformer, ~2 ms/32 ms chunk).
+
+    Only drives live partials + endpoint stability; the accurate final transcript
+    still comes from faster-whisper over the finished utterance. Optional: absent
+    model/package simply means IncrementalWhisperSTT uses whisper rolling partials.
+    """
+
+    _recognizer = None
+
+    @classmethod
+    def available(cls, model_dir: str) -> bool:
+        from pathlib import Path
+        try:
+            import sherpa_onnx  # noqa: F401
+        except ImportError:
+            return False
+        return (Path(model_dir) / "tokens.txt").exists()
+
+    def __init__(self, model_dir: str):
+        import sherpa_onnx
+        from pathlib import Path
+
+        if SherpaPartialEngine._recognizer is None:
+            d = Path(model_dir)
+            SherpaPartialEngine._recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+                tokens=str(d / "tokens.txt"),
+                encoder=str(d / "encoder-epoch-99-avg-1.int8.onnx"),
+                decoder=str(d / "decoder-epoch-99-avg-1.int8.onnx"),
+                joiner=str(d / "joiner-epoch-99-avg-1.int8.onnx"),
+                num_threads=2, sample_rate=16000)
+        self.r = SherpaPartialEngine._recognizer
+        self.stream = None
+
+    def reset(self):
+        self.stream = self.r.create_stream()
+
+    def feed(self, pcm: bytes) -> str:
+        import numpy as np
+
+        if self.stream is None:
+            self.reset()
+        self.stream.accept_waveform(16000, np.frombuffer(pcm, dtype="<i2").astype("float32") / 32768.0)
+        while self.r.is_ready(self.stream):
+            self.r.decode_stream(self.stream)
+        result = self.r.get_result(self.stream)
+        return (result if isinstance(result, str) else result.text).strip().lower().capitalize()
+
+
 class IncrementalWhisperSTT:
     name = "incremental_faster_whisper"
 
     def __init__(self, provider: SpeechToTextProvider, emit: Callback,
-                 vad: Callable[[bytes], bool], *, partial_interval: float = 0.48):
+                 vad: Callable[[bytes], bool], *, partial_interval: float = 0.48,
+                 partial_engine: "SherpaPartialEngine | None" = None):
         self.provider, self.emit, self.vad = provider, emit, vad
         self.partial_interval = partial_interval
+        self.partial_engine = partial_engine
+        self.text_changed_at = 0.0
         self.pending = bytearray()
         self.preroll: deque[bytes] = deque(maxlen=6)
         self.audio = bytearray()
@@ -128,12 +180,21 @@ class IncrementalWhisperSTT:
                 self.duration, self.silence = 0.0, 0.0
                 self.last_text, self.stable = "", 0
                 self.next_partial = self.partial_interval
+                self.text_changed_at = 0.0
                 await self.on_speech_started({"utterance": self.utterance})
+                if self.partial_engine:
+                    self.partial_engine.reset()
+                    await self._engine_feed(b"".join(self.preroll))
             else:
                 self.audio.extend(chunk)
+                if self.partial_engine:
+                    await self._engine_feed(chunk)
             self.duration += 0.032
             self.silence = 0.0 if speech else self.silence + 0.032
-            if self.duration >= self.next_partial and speech:
+            if self.partial_engine:
+                # Stable = unchanged for 250 ms of audio (streaming text updates per chunk).
+                self.stable = 1 if self.duration - self.text_changed_at >= 0.25 and self.last_text else 0
+            elif self.duration >= self.next_partial and speech:
                 self._request(final=False)
                 self.next_partial = self.duration + self.partial_interval
             # Stable complete phrases can endpoint quickly. Short/unstable phrases
@@ -150,6 +211,18 @@ class IncrementalWhisperSTT:
                 self._request(final=True)
                 self.audio.clear()
                 self.preroll.clear()
+
+    async def _engine_feed(self, pcm: bytes):
+        try:
+            text = self.partial_engine.feed(pcm)
+        except Exception as exc:
+            await self.emit({"type": "provider_error", "provider": "stt",
+                             "detail": type(exc).__name__, "utterance": self.utterance})
+            self.partial_engine = None
+            return
+        if text and text != self.last_text:
+            self.last_text, self.text_changed_at = text, self.duration
+            await self.on_partial_transcript({"utterance": self.utterance, "text": text})
 
     def _request(self, *, final: bool):
         # Coalesce queued partials; never accumulate stale inference work.

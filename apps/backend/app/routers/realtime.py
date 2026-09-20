@@ -9,7 +9,10 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from events.core import NormalizedEvent
 from voice.session import LatencyMetrics, VoiceSessionController, VoiceState
-from voice.streaming import SileroStreamingVAD
+import os
+
+from app.config import get_settings
+from voice.streaming import SherpaPartialEngine, SileroStreamingVAD
 
 router = APIRouter(tags=["realtime"])
 
@@ -70,8 +73,12 @@ async def realtime(websocket: WebSocket):
         vad = SileroStreamingVAD()
         if not hasattr(state, "realtime_metrics"):
             state.realtime_metrics = LatencyMetrics()
+        engine = None
+        model_dir = os.path.expanduser(get_settings().sherpa_model_dir)
+        if SherpaPartialEngine.available(model_dir):
+            engine = await asyncio.to_thread(SherpaPartialEngine, model_dir)
         session = VoiceSessionController(state.turn_controller, voice, emit, vad,
-                                         metrics=state.realtime_metrics)
+                                         metrics=state.realtime_metrics, partial_engine=engine)
         state.realtime_session = session
         sender = asyncio.create_task(send())
         await session.start()
