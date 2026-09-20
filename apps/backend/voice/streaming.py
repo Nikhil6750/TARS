@@ -217,10 +217,15 @@ class IncrementalWhisperSTT:
             self.silence = 0.0 if speech else self.silence + 0.032
             if speech:
                 self.voiced += 0.032
-            if self.active and not self.announced and self.voiced >= (0.8 if not self.partial_engine else 0.7) and not (
-                    self.partial_engine and self.busy and self.busy()):
-                self.announced = True
-                await self.on_speech_started({"utterance": self.utterance})
+            if self.active and not self.announced:
+                busy = bool(self.busy and self.busy())
+                needed = 0.8 if not self.partial_engine else (1.2 if busy else 0.7)
+                reference = self.echo_reference() if (busy and self.echo_reference) else ""
+                # Sustained voiced audio the streaming engine could not match to TARS's own speech
+                # is a real utterance even if the small engine recognised no words.
+                if self.voiced >= needed and not is_echo(self.last_text, reference):
+                    self.announced = True
+                    await self.on_speech_started({"utterance": self.utterance})
             if self.partial_engine:
                 # Stable = unchanged for 250 ms of audio (streaming text updates per chunk).
                 self.stable = 1 if self.duration - self.text_changed_at >= 0.25 and self.last_text else 0

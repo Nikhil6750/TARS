@@ -85,8 +85,20 @@ async def main():
                     if "first_audio_at" not in marks:
                         marks["first_audio_at"] = now
                     acked.add((ev["turn_id"], ev["sequence"]))
-                    if not state["barged"] and now - marks["first_audio_at"] > 0.6:
-                        state["barged"] = True
+                    import base64
+                    seconds = max(0.05, (len(base64.b64decode(ev["audio"])) - 44) / 2 / 24000)
+                    turn, seq = ev["turn_id"], ev["sequence"]
+
+                    async def done(turn=turn, seq=seq, seconds=seconds):
+                        await asyncio.sleep(seconds)
+                        if not state["barged"]:  # after barge-in the client has stopped playback
+                            await ws.send(json.dumps({"type": "audio_done", "turn_id": turn, "sequence": seq}))
+                    asyncio.create_task(done())
+                    if "barge_timer" not in state:
+                        async def barge():
+                            await asyncio.sleep(0.8)
+                            state["barged"] = True
+                        state["barge_timer"] = asyncio.create_task(barge())
                 if t == "interrupt":
                     if state["barged"]:
                         marks.setdefault("interrupt_evt", now)
