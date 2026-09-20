@@ -80,6 +80,7 @@ def validate_http_url(raw_url: str) -> str:
 
 class BrowserSkill(BaseSkill):
     name = "browser"
+    description = "Control the connected browser/embedded-DOM: navigate, open URLs, read/inspect page content."
     capabilities: tuple[str, ...] = (
         "open_url",
         "search",
@@ -95,6 +96,9 @@ class BrowserSkill(BaseSkill):
 
     def __init__(self, bridge: FrontendCommandBridge | None = None) -> None:
         self._bridge = bridge
+
+    async def health(self) -> dict[str, Any]:
+        return {"available": self._bridge is not None, "requires": "FrontendCommandBridge"}
 
     def classify_risk(self, action: str, arguments: dict[str, Any]) -> RiskLevel:
         if action in ("open_url", "search", "navigate", "back", "forward"):

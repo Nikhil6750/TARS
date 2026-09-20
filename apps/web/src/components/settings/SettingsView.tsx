@@ -266,6 +266,32 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 className="w-full mt-1 accent-cyan-400 cursor-pointer"
               />
             </div>
+
+            <div className="pt-2 border-t border-slate-800">
+              <span className="text-slate-400 block mb-1.5 font-bold">Kokoro Voice Preference:</span>
+              <div className="grid grid-cols-2 gap-1.5">
+                {[
+                  { id: 'am_michael', name: 'am_michael (A)' },
+                  { id: 'am_onyx', name: 'am_onyx (B)' },
+                  { id: 'bm_george', name: 'bm_george (C)' },
+                  { id: 'af_heart', name: 'af_heart (Ref)' },
+                ].map((v) => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    onClick={() => onUpdateSettings({ ttsVoice: v.id })}
+                    className={`px-2 py-1 rounded text-[11px] text-left border transition-colors cursor-pointer flex items-center justify-between ${
+                      settings.ttsVoice === v.id
+                        ? 'bg-cyan-950/60 text-cyan-200 border-cyan-400'
+                        : 'bg-[#040810] text-slate-400 border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    <span>{v.name}</span>
+                    {settings.ttsVoice === v.id && <span className="text-cyan-400 text-[9px]">ACTIVE</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
 

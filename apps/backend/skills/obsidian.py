@@ -33,6 +33,7 @@ _ACTIONS = {"search", "read"}
 
 class ObsidianSkill(BaseSkill):
     name = "obsidian"
+    description = "Search and read notes in the indexed Obsidian research vault."
     capabilities: tuple[str, ...] = ("search", "read")
 
     def __init__(self, memory_service: MemoryService, vault_path: str):

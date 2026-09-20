@@ -13,6 +13,7 @@ request; this only skips the *LLM interpretation* step, never the runtime.
 from __future__ import annotations
 
 import logging
+import re
 
 from pipecat.frames.frames import (
     ErrorFrame,
@@ -26,6 +27,12 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from actions.runtime import ActionRuntime
 from app.action_contracts import ActionResult, ActionSource, ActionStatus
+from app.voice_telemetry import VoiceTurnRecorder
+from assistant.response_quality import (
+    prepare_speech_text,
+    public_error_message,
+    sanitize_display_text,
+)
 from assistant.router import AssistantRouter
 from skills.voice_bridge import build_action_request_from_voice
 
@@ -49,12 +56,14 @@ class AssistantBridgeProcessor(FrameProcessor):
         *,
         action_runtime: ActionRuntime | None = None,
         action_source: ActionSource = ActionSource.voice_ptt,
+        telemetry: VoiceTurnRecorder | None = None,
     ):
         super().__init__()
         self._router = assistant_router
         self._conversation_id = conversation_id
         self._action_runtime = action_runtime
         self._action_source = action_source
+        self._telemetry = telemetry
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -63,13 +72,19 @@ class AssistantBridgeProcessor(FrameProcessor):
             text = frame.text.strip()
             if not text:
                 return
+            if self._telemetry is not None:
+                await self._telemetry.mark("command_available")
             await self.push_frame(LLMFullResponseStartFrame(), direction)
             try:
                 reply_text = await self._handle_transcript(text)
+                if self._telemetry is not None:
+                    await self._telemetry.mark("assistant_first_text")
                 await self.push_frame(TextFrame(text=reply_text), direction)
-            except Exception as exc:
+            except Exception:
                 logger.exception("assistant bridge failed to produce a reply")
-                await self.push_frame(ErrorFrame(error=str(exc)), direction)
+                if self._telemetry is not None:
+                    await self._telemetry.fail("assistant")
+                await self.push_frame(ErrorFrame(error=public_error_message()), direction)
             finally:
                 await self.push_frame(LLMFullResponseEndFrame(), direction)
         else:
@@ -85,12 +100,15 @@ class AssistantBridgeProcessor(FrameProcessor):
         # Not a recognized deterministic action phrase (or no action runtime
         # wired in, e.g. some test harnesses) -- unchanged, existing path.
         reply = await self._router.handle_text(text, self._conversation_id)
-        return reply.assistant_message.content
+        return reply.speech_text
 
 
 def _speak_action_result(result: ActionResult) -> str:
     """A truthful spoken rendering of a real ActionResult -- never invents
     outcome language beyond what the runtime/skill actually reported."""
     if result.error and result.status != ActionStatus.SUCCEEDED:
-        return f"{result.summary} {result.error}".strip()
-    return result.summary
+        text = f"{result.summary} {result.error}".strip()
+    else:
+        text = result.summary
+        text = re.sub(r"\s*\(exit code 0\)\s*$", "", text, flags=re.IGNORECASE)
+    return prepare_speech_text(sanitize_display_text(text))

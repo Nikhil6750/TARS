@@ -1,34 +1,20 @@
 import React from 'react';
-import {
-  Activity,
-  Layers,
-  Bell,
-  MessageSquare,
-  Mic,
-  Settings
-} from 'lucide-react';
+import { Bot, LayoutGrid, Settings } from 'lucide-react';
 import { ActiveTab } from '../../types/companion';
 
 interface MobileTabBarProps {
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
-  activeSetupsCount: number;
-  unreadAlertsCount: number;
 }
 
 export const MobileTabBar: React.FC<MobileTabBarProps> = ({
   activeTab,
   setActiveTab,
-  activeSetupsCount,
-  unreadAlertsCount,
 }) => {
-  const tabs: Array<{ tab: ActiveTab; label: string; icon: React.ComponentType<{ className?: string }>; badge?: number }> = [
-    { tab: 'companion', label: 'TARS', icon: Activity },
-    { tab: 'setups', label: 'Setups', icon: Layers, badge: activeSetupsCount },
-    { tab: 'voice', label: 'Voice', icon: Mic },
-    { tab: 'chat', label: 'Chat', icon: MessageSquare },
-    { tab: 'alerts', label: 'Alerts', icon: Bell, badge: unreadAlertsCount },
-    { tab: 'settings', label: 'Config', icon: Settings },
+  const tabs: Array<{ tab: ActiveTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+    { tab: 'tars', label: 'TARS', icon: Bot },
+    { tab: 'workspace', label: 'Workspace', icon: LayoutGrid },
+    { tab: 'settings', label: 'Settings', icon: Settings },
   ];
 
   return (
@@ -54,11 +40,6 @@ export const MobileTabBar: React.FC<MobileTabBarProps> = ({
             >
               <div className="relative">
                 <Icon className={`w-5 h-5 transition-transform ${isActive ? 'scale-110' : ''}`} />
-                {item.badge !== undefined && item.badge > 0 && (
-                  <span className="absolute -top-1.5 -right-2.5 px-1 min-w-4 h-4 rounded-full text-[9px] font-mono bg-cyan-500 text-slate-950 font-bold flex items-center justify-center shadow-[0_0_8px_rgba(0,240,255,0.6)]">
-                    {item.badge}
-                  </span>
-                )}
               </div>
               <span className="text-[10px] mt-0.5 font-mono tracking-tight">{item.label}</span>
               {isActive && (

@@ -14,16 +14,19 @@
     "windows": [
       {
         "label": "main",
-        "title": "TARS — Quantitative Trading Companion",
-        "width": 1280,
-        "height": 840,
-        "minWidth": 380,
-        "minHeight": 480,
+        "title": "TARS",
+        "width": 1100,
+        "height": 780,
+        "minWidth": 480,
+        "minHeight": 520,
         "resizable": true,
         "fullscreen": false,
-        "decorations": true,
+        "decorations": false,
         "transparent": false,
-        "shadow": true
+        "alwaysOnTop": false,
+        "shadow": true,
+        "visible": true,
+        "skipTaskbar": false
       }
     ],
     "security": {

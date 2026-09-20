@@ -1,7 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -18,9 +20,19 @@ from assistant.conversation_store import ConversationStore
 from assistant.errors import AssistantProviderError
 from assistant.grounding import build_system_context
 from assistant.provider import AssistantProvider, AssistantRequest
+from assistant.response_quality import (
+    QUALITY_SYSTEM_PROMPT,
+    ResponseComposer,
+    ResponsePresentation,
+    public_error_message,
+)
 from events.service import EventService
+from intelligence.router import IntelligenceRouter, IntentKind
+from intelligence.strategy_evaluation import StrategyEvaluationEngine
+from intelligence.trade_calculation import TradeCalculationEngine
 
 if TYPE_CHECKING:
+    from app.latency_store import LatencyTraceStore
     from memory.service import MemoryService
 
 tracer = get_tracer()
@@ -43,6 +55,36 @@ class RouterReply:
     conversation_id: str
     user_message: AssistantMessage
     assistant_message: AssistantMessage
+    presentation: ResponsePresentation | None = None
+
+    @property
+    def display_text(self) -> str:
+        return (
+            self.presentation.display_text
+            if self.presentation is not None
+            else self.assistant_message.content
+        )
+
+    @property
+    def speech_text(self) -> str:
+        if self.presentation is not None:
+            return self.presentation.speech_text
+        return ResponseComposer().compose(
+            user_text=self.user_message.content,
+            display_text=self.assistant_message.content,
+        ).speech_text
+
+    def to_response_dict(self) -> dict[str, Any]:
+        """V2 envelope; the nested message remains the frozen v1 contract."""
+
+        presentation = self.presentation or ResponseComposer().compose(
+            user_text=self.user_message.content,
+            display_text=self.assistant_message.content,
+        )
+        return {
+            "message": self.assistant_message.to_contract_dict(),
+            **presentation.to_dict(),
+        }
 
 
 class AssistantRouter:
@@ -52,11 +94,19 @@ class AssistantRouter:
         conversation_store: ConversationStore,
         provider: AssistantProvider,
         memory_service: MemoryService | None = None,
+        trace_store: LatencyTraceStore | None = None,
     ):
         self._events = event_service
         self._conversations = conversation_store
         self._provider = provider
         self._memory = memory_service
+        self._trace_store = trace_store
+        self._composer = ResponseComposer()
+        self._intelligence_router = IntelligenceRouter(
+            provider=self._provider,
+            memory_service=self._memory,
+            event_service=self._events,
+        )
 
     async def _save(self, message: AssistantMessage) -> None:
         await self._conversations.save(message)
@@ -85,14 +135,212 @@ class AssistantRouter:
                 providers=MessageProviders(assistant="deterministic"),
             )
         else:
-            assistant_message = await self._call_provider(text, conversation_id)
+            classified_intent = self._intelligence_router.classify_intent(text)
+            if classified_intent in (
+                IntentKind.MARKET_RESEARCH,
+                IntentKind.CHART_ANALYSIS,
+                IntentKind.STRATEGY_EVALUATION,
+            ):
+                _, intel_content, provider_name = await self._intelligence_router.handle(
+                    text, conversation_id
+                )
+                assistant_message = AssistantMessage(
+                    conversation_id=UUID(conversation_id),
+                    role=MessageRole.assistant,
+                    content=intel_content,
+                    input_mode=InputMode.text,
+                    intent=classified_intent.value,
+                    providers=MessageProviders(assistant=provider_name),
+                )
+            else:
+                assistant_message = await self._call_provider(text, conversation_id)
 
+        presentation = self._composer.compose(
+            user_text=text,
+            display_text=assistant_message.content,
+            grounding_context="deterministic-router",
+        )
+        assistant_message.content = presentation.display_text
         await self._save(assistant_message)
         return RouterReply(
             conversation_id=conversation_id,
             user_message=user_message,
             assistant_message=assistant_message,
+            presentation=presentation,
         )
+
+    async def handle_text_stream(self, text: str, conversation_id: str | None):
+        """Streaming twin of handle_text: yields `{"type": "delta", ...}`
+        events as the provider produces them and a final `{"type":
+        "complete", "message": ...}` once the full reply is known."""
+        conversation_id = conversation_id or str(uuid4())
+
+        user_message = AssistantMessage(
+            conversation_id=UUID(conversation_id),
+            role=MessageRole.user,
+            content=text,
+            input_mode=InputMode.text,
+        )
+        await self._save(user_message)
+
+        intent, deterministic_text = await self._try_deterministic(text)
+        if deterministic_text is not None:
+            presentation = self._composer.compose(
+                user_text=text,
+                display_text=deterministic_text,
+                grounding_context="deterministic-router",
+            )
+            assistant_message = AssistantMessage(
+                conversation_id=UUID(conversation_id),
+                role=MessageRole.assistant,
+                content=presentation.display_text,
+                input_mode=InputMode.text,
+                intent=intent,
+                providers=MessageProviders(assistant="deterministic"),
+            )
+            await self._save(assistant_message)
+            yield {"type": "delta", "text": presentation.display_text}
+            yield {
+                "type": "complete",
+                "message": assistant_message.to_contract_dict(),
+                **presentation.to_dict(),
+            }
+            return
+
+        classified_intent = self._intelligence_router.classify_intent(text)
+        if classified_intent in (
+            IntentKind.MARKET_RESEARCH,
+            IntentKind.CHART_ANALYSIS,
+            IntentKind.STRATEGY_EVALUATION,
+        ):
+            accumulated = ""
+            provider_used = self._provider.name
+            async for event in self._intelligence_router.handle_stream(text, conversation_id):
+                if event.get("type") == "delta":
+                    chunk = event.get("text", "")
+                    accumulated += chunk
+                    yield event
+                elif event.get("type") == "complete":
+                    provider_used = event.get("provider", provider_used)
+                    if event.get("text"):
+                        accumulated = event["text"]
+
+            presentation = self._composer.compose(
+                user_text=text,
+                display_text=accumulated,
+                grounding_context="deterministic-intelligence-router",
+            )
+            assistant_message = AssistantMessage(
+                conversation_id=UUID(conversation_id),
+                role=MessageRole.assistant,
+                content=presentation.display_text,
+                input_mode=InputMode.text,
+                intent=classified_intent.value,
+                providers=MessageProviders(assistant=provider_used),
+            )
+            await self._save(assistant_message)
+            yield {
+                "type": "complete",
+                "message": assistant_message.to_contract_dict(),
+                **presentation.to_dict(),
+            }
+            return
+
+        active = await self._events.get_active_setups()
+        history_rows = await self._conversations.get_recent(conversation_id, limit=10)
+        history = [
+            {"role": row["role"], "content": row["content"]}
+            for row in history_rows
+            if row["role"] in ("user", "assistant")
+        ]
+        memory_notes: list[dict[str, Any]] = []
+        if self._memory is not None:
+            try:
+                memory_notes = await self._memory.search(text, limit=3)
+            except Exception:
+                pass
+
+        request = AssistantRequest(
+            text=text,
+            conversation_id=conversation_id,
+            system_context=(
+                f"{build_system_context(active, memory_notes=memory_notes)}\n\n"
+                f"{QUALITY_SYSTEM_PROMPT}"
+            ),
+            history=history,
+        )
+
+        if hasattr(self._provider, "respond_stream"):
+            accumulated = ""
+            final_provider = self._provider.name
+            try:
+                async for event in self._provider.respond_stream(request):
+                    if event.get("type") == "delta":
+                        chunk = event.get("text", "")
+                        accumulated += chunk
+                        if chunk:
+                            yield {"type": "delta", "text": chunk}
+                    elif event.get("type") == "complete":
+                        accumulated = event.get("text", accumulated)
+                        final_provider = event.get("provider", final_provider)
+            except AssistantProviderError:
+                user_error = public_error_message()
+                presentation = self._composer.compose(
+                    user_text=text,
+                    display_text=user_error,
+                )
+                assistant_message = AssistantMessage(
+                    conversation_id=UUID(conversation_id),
+                    role=MessageRole.assistant,
+                    content=presentation.display_text,
+                    input_mode=InputMode.text,
+                    providers=MessageProviders(assistant=self._provider.name),
+                    error=user_error,
+                )
+                await self._save(assistant_message)
+                yield {
+                    "type": "complete",
+                    "message": assistant_message.to_contract_dict(),
+                    **presentation.to_dict(),
+                }
+                return
+
+            presentation = self._composer.compose(
+                user_text=text,
+                display_text=accumulated,
+                grounding_context=request.system_context,
+            )
+            assistant_message = AssistantMessage(
+                conversation_id=UUID(conversation_id),
+                role=MessageRole.assistant,
+                content=presentation.display_text,
+                input_mode=InputMode.text,
+                providers=MessageProviders(assistant=final_provider),
+            )
+        else:
+            # Provider has no streaming mode -- fall back to one blocking
+            # call, delivered as a single delta so callers still only ever
+            # handle the delta/complete shape.
+            assistant_message = await self._call_provider(text, conversation_id)
+            presentation = self._composer.compose(
+                user_text=text,
+                display_text=assistant_message.content,
+                grounding_context=request.system_context,
+            )
+            assistant_message.content = presentation.display_text
+            yield {"type": "delta", "text": presentation.display_text}
+
+        await self._save(assistant_message)
+        presentation = self._composer.compose(
+            user_text=text,
+            display_text=assistant_message.content,
+            grounding_context=request.system_context,
+        )
+        yield {
+            "type": "complete",
+            "message": assistant_message.to_contract_dict(),
+            **presentation.to_dict(),
+        }
 
     async def _try_deterministic(self, text: str) -> tuple[str | None, str | None]:
         if _ACTIVE_SETUPS_PATTERN.search(text):
@@ -108,6 +356,12 @@ class AssistantRouter:
                 (e for e in history if e.get("state") == "SETUP_INVALIDATED"), None
             )
             return "last_invalidation_reason", _format_invalidation_summary(invalidated)
+        if StrategyEvaluationEngine.is_entry_inquiry(text):
+            active = await self._events.get_active_setups()
+            return "strategy_evaluation", StrategyEvaluationEngine.evaluate_entry_decision(active)
+        if TradeCalculationEngine.is_calculation_query(text):
+            res = TradeCalculationEngine.evaluate(text)
+            return "trade_calculation", res.formatted_text
         return None, None
 
     async def _call_provider(self, text: str, conversation_id: str) -> AssistantMessage:
@@ -129,9 +383,15 @@ class AssistantRouter:
         request = AssistantRequest(
             text=text,
             conversation_id=conversation_id,
-            system_context=build_system_context(active, memory_notes=memory_notes),
+            system_context=(
+                f"{build_system_context(active, memory_notes=memory_notes)}\n\n"
+                f"{QUALITY_SYSTEM_PROMPT}"
+            ),
             history=history,
         )
+        request_id = uuid4().hex
+        started_at = datetime.now(UTC).isoformat()
+        t0 = time.monotonic()
         with tracer.start_as_current_span("assistant.request") as span:
             span.set_attribute("assistant.provider", self._provider.name)
             span.set_attribute("assistant.history_turns", len(history))
@@ -142,24 +402,71 @@ class AssistantRouter:
             except AssistantProviderError as exc:
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)
+                await self._record_trace(
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    started_at=started_at,
+                    t0=t0,
+                    provider_id=self._provider.name,
+                    error=str(exc),
+                )
+                user_error = public_error_message()
                 return AssistantMessage(
                     conversation_id=UUID(conversation_id),
                     role=MessageRole.assistant,
-                    content=(
-                        "I couldn't reach the configured assistant provider "
-                        f"({self._provider.name}) to answer that."
-                    ),
+                    content=user_error,
                     input_mode=InputMode.text,
                     providers=MessageProviders(assistant=self._provider.name),
-                    error=str(exc),
+                    error=user_error,
                 )
 
+        await self._record_trace(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            started_at=started_at,
+            t0=t0,
+            provider_id=reply.provider,
+            provider_latency_ms=reply.diagnostics.latency_ms if reply.diagnostics else None,
+        )
+        presentation = self._composer.compose(
+            user_text=text,
+            display_text=reply.text,
+            grounding_context=request.system_context,
+        )
         return AssistantMessage(
             conversation_id=UUID(conversation_id),
             role=MessageRole.assistant,
-            content=reply.text,
+            content=presentation.display_text,
             input_mode=InputMode.text,
             providers=MessageProviders(assistant=reply.provider),
+        )
+
+    async def _record_trace(
+        self,
+        *,
+        request_id: str,
+        conversation_id: str,
+        started_at: str,
+        t0: float,
+        provider_id: str | None,
+        provider_latency_ms: float | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self._trace_store is None:
+            return
+        from app.latency_store import RequestTrace
+
+        await self._trace_store.record(
+            RequestTrace(
+                request_id=request_id,
+                kind="assistant_text",
+                conversation_id=conversation_id,
+                provider_id=provider_id,
+                started_at=started_at,
+                provider_latency_ms=provider_latency_ms,
+                total_ms=round((time.monotonic() - t0) * 1000),
+                error=error,
+            )
         )
 
 

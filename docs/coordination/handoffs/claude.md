@@ -11,6 +11,588 @@ for that).
 
 ---
 
+## Latest handoff — Alexa-speed hot-state, Phases E-H: deep verification, provider health, benchmark harness (2026-08-21)
+
+**Branch**: `feature/realtime-hot-state`
+**Base SHA**: `17713e4` (unchanged across the whole effort)
+**Final SHA**: `4eec097` (Phase E: `b636287`, Phase G: `f601f57`, Phase H: `4eec097`)
+
+All eight phases of the Alexa-speed hot-state architecture are now
+implemented and committed on this branch, not merged anywhere. See the
+Phase A/B+C/D entries below for the earlier phases; this entry covers the
+remainder plus a scope note on Phase F.
+
+**Phase E — async deep verification** (`b636287`): after a fast response,
+the router now schedules `assistant/deep_verification.py`'s
+`run_deep_verification()` via FastAPI `BackgroundTasks` -- runs a real
+re-verification vision call after the response has already gone out,
+compares it against what was served (`materially_different()`: bias,
+setup, action, invalidation, key levels -- never wording-only changes),
+and updates `HotChartState` for the *next* request if it genuinely
+differs. Caught a real integration bug via a corrected test before this
+shipped: the router passes `ChartAnalysisResult.to_dict()`'s output
+(which adds `speech_text`/`formatted_tars_text`) as the "served" payload
+to compare against, and reconstructing a `ChartAnalysisResult` from that
+dict directly would reject those two extra keys -- fixed by filtering to
+known dataclass fields before reconstructing, and by changing the test to
+use the same `.to_dict()` the router actually calls (a `dataclasses.
+asdict()`-based version of the test had missed this entirely). No push
+channel exists yet to proactively notify an already-answered user of a
+correction -- same "no consumer yet" reasoning Phase C used to defer its
+own broadcast wiring.
+
+**Phase F — voice latency: mostly already true, one piece not
+implementable as scoped**. Confirmed via Phase A's recon: STT
+(faster-whisper) and TTS (Kokoro) are already warm singletons loaded once
+at startup, not per-request, and TTS is already sentence-chunked. The one
+remaining piece in the original plan -- partial-transcript prefetch (Part
+12: "begin intent detection from partial transcript") -- turns out not to
+be buildable as a "narrow" addition: `faster-whisper` in this codebase is
+used as a **batch** transcriber, only run after `wake_engine.rs`'s
+silence-based utterance finalization, not a streaming ASR that emits
+partial hypotheses mid-utterance. There is no partial-transcript signal
+anywhere in the current pipeline to hook into. Implementing genuine
+partial-transcript prefetch would require adding real streaming STT first
+-- a separate, materially larger undertaking, not a small addition to this
+effort. Reported honestly rather than building something cosmetic that
+looks like prefetch but has no real partial signal driving it.
+
+**Phase G — provider health tracking** (`f601f57`):
+`assistant/provider_health.py`'s `ProviderHealthTracker` computes real
+success rate / P50 / P90 / P95 / last error from Phase A's `request_traces`
+table -- this repo's own recorded evidence, never assumed numbers.
+Exposed at `GET /api/v1/diagnostics/provider-health` (same dev-only
+exposure level as the existing latency/readiness endpoints). Scope stated
+honestly: this repo has exactly one vision-capable provider adapter
+(`ClaudeCodeProvider` -- `build_chart_assistant_provider()` always returns
+it), so there is no second real candidate to dynamically route
+chart-analysis requests between yet. `healthiest()` is a real, tested
+selection helper (success-rate-first, then lowest P50) usable once/where
+more than one provider genuinely serves the same capability -- not wired
+into `AssistantRouter`/`ChartAnalysisService`'s construction this session,
+since both are built once at app startup from static config today; making
+provider choice a genuine per-request decision is a separate, larger
+structural change than "add health tracking off telemetry."
+
+**Phase H — benchmark harness, and the acceptance evidence itself**
+(`4eec097`): `scripts/chart_latency_benchmark.py`, a real CLI driving
+warm/cold runs against a live backend with a real chart image, reporting
+P50/P90/P95/max plus Part 25's quality checklist (a fast-but-fabricated
+response fails the run). Uses `httpx` (already pinned) rather than adding
+`requests` as a new dependency -- caught mid-session that `requests` was
+only ever present in this environment via unrelated third-party packages,
+not anything this repo declares.
+
+**Actually run, not just built** -- the headline acceptance numbers for
+the whole effort:
+
+| | P50 | P90 | P95 | max | sample |
+|---|---|---|---|---|---|
+| **Warm path** (real backend, real chart, real HotChartState) | 0.744s | 1.511s | 1.714s | 2.140s | 20 runs, 0 errors, 0 quality failures |
+| **Cold path** (formal tool cross-check) | 26.0s | 28.3s | 28.7s | 29.1s | 5 runs, 0 errors, 0 quality failures |
+| **Cold path** (Phase A's original live baseline) | 24.3s | 28.3s | 28.5s | 28.7s | 7 runs |
+
+Part 24's acceptance bar (>=18/20 warm runs within ~5s) is cleared with
+the full 20/20, and every single warm run landed under 2.2s -- not a
+narrow pass. A bug in the harness itself (60s client timeout, too tight
+for at least one real vision call observed exceeding it) was caught and
+fixed by actually running the tool against a live backend, not by
+inspection.
+
+**Files changed this entry**: `apps/backend/assistant/{deep_verification,
+provider_health}.py` (new), `apps/backend/app/routers/diagnostics.py`
+(new endpoint), `apps/backend/app/routers/assistant.py` (background task
+wiring), `apps/backend/scripts/chart_latency_benchmark.py` (new),
+`apps/backend/tests/test_{deep_verification,provider_health,
+chart_latency_benchmark}.py` (new), `test_analyze_chart_fast_path.py` /
+`test_diagnostics_router.py` (added cases).
+
+**Tests run**: 13 `deep_verification` cases, 7 `provider_health` cases, 8
+`chart_latency_benchmark` pure-logic cases, plus router-level integration
+tests for background-task scheduling and the new diagnostics endpoint.
+Full backend suite: **628 passed** on the final clean run (an earlier run
+this session showed one flaky, pre-existing `test_skill_desktop_control.py`
+failure -- confirmed passing 20/20 in isolation and on the next full run,
+consistent with this repo's own documented `SetForegroundWindow`/UIA
+flakiness history, not a regression). `ruff check` and `mypy` clean
+throughout (same 7 pre-existing, untouched errors in provider adapters and
+`skill_registry/db.py`).
+
+**Known limitations, stated plainly for whoever picks this up next**:
+- No WebSocket "state updated" push exists yet (Phase C deferred it, Phase
+  E's corrections currently only affect the *next* request, not an
+  in-flight conversation).
+- Fast path only serves `Freshness.HOT` state, not `WARM` (a documented,
+  deliberate scope decision from Phase D -- `WARM` needs an "as of Ns ago"
+  honesty caveat that doesn't exist yet).
+- Symbol/timeframe-change detection relies entirely on the vision call
+  itself plus the perceptual-hash content check -- the originally
+  discussed cheap OCR pre-check (`Windows.Media.Ocr`) was never built;
+  the perceptual-hash approach closes the correctness gap it would have
+  addressed, but OCR would let the *watcher* detect a symbol switch
+  without waiting for its own vision-call cooldown to elapse.
+- Provider health tracking exists but isn't wired into a live routing
+  decision (Phase G, above) -- no second vision-capable provider exists to
+  route between yet.
+- No multi-hour resource/CPU/RAM profile of the watcher running
+  continuously (Part 21) -- only interactive capture cycles were exercised
+  this session.
+- HASH_DIFF_THRESHOLD (14/256 bits, both Rust and Python sides) is a
+  reasoned starting constant, not empirically tuned against a large
+  real-world sample.
+
+**Exact dependencies required from other agents**: same as every prior
+entry in this arc -- `apps/web/src-tauri/` was touched across Phases C/D
+(new files + two additive `ScreenCaptureResult`/`Cargo.toml` changes,
+nothing existing modified); flagged for Antigravity/coordinator review
+before any merge. `apps/web/src/types/actions.ts` also touched (additive
+field only).
+
+**Next recommended action**: a coordinator decides whether to merge this
+branch (not attempted automatically, per the task's own instruction).
+Before merging: install `apps/web` node_modules and do a real Tauri build
++ manual capture test in an environment with a GPU/real display (this
+session's `cargo check`/`cargo test`/live captures all ran directly on the
+target machine already, but a full packaged-app smoke test is still
+worth doing before shipping). If pursued further: real OCR-based
+symbol/timeframe detection for the watcher, WARM-tier fast responses with
+an honesty caveat, the WebSocket state-update push once Phase D/E have a
+real UI consumer to notify, and streaming STT as a prerequisite for any
+real partial-transcript prefetch.
+
+---
+
+## Latest handoff — Alexa-speed hot-state, Phase D: real fast-path proof (2026-08-21)
+
+**Branch**: `feature/realtime-hot-state`
+**Base SHA**: `17713e4` (unchanged)
+**Final SHA**: `f787e98`
+
+**The headline result**: a genuine, live, end-to-end measurement, not a
+projection. Simulated the watcher pushing a real WGC-captured frame to
+`/api/v1/chart-watch/frame` (real Claude Code CLI vision call, 19.3s,
+persisted `HotChartState`), then immediately called
+`/api/v1/assistant/analyze-chart/stream` against the same window with a
+fresh capture of the same chart. **Total response time: 0.537s**, correctly
+served the same accurate, real analysis, correctly flagged
+`timing.warm_path: true`. That's this repo's own 15-31s cold baseline
+(Phase A entry below) down to well under 1s -- a ~30-50x speedup, well
+inside the task's ~5s target, for the case that matters (a window the
+watcher has recently seen).
+
+**What actually shipped**: `/api/v1/assistant/analyze-chart/stream` now
+tries `assistant/fast_chart_response.py`'s `try_fast_response()` first;
+`None` means "nothing honest to serve fast," and the handler falls through
+to the existing cold `analyze_stream()` path completely unchanged -- there
+is no code path where a fast answer gets fabricated. Deliberately
+conservative for this first cut: only `Freshness.HOT` state is served (not
+`WARM`, which `HotChartState.usable_for()` would technically allow) --
+serving `WARM` honestly needs an "as of Ns ago" caveat that
+`ChartAnalysisResult`'s render methods have no hook for yet; flagged as a
+follow-up, not silently dropped. The fast path is also only attempted for
+the generic "Analyze this chart." goal -- any more specific question
+(a different `goal_text`) always gets a fresh vision call, since a cached
+generic read could easily answer the wrong question.
+
+**A real correctness gap found and closed before this could be wired
+safely**: a fast-path lookup only has `chart_window_id` at request time,
+not the exact `symbol`/`timeframe` identity `usable_for()` needs (that's
+only known *after* a vision call runs). Age-based freshness alone cannot
+catch the Part 19/26 case this implies: the user switches symbols in the
+same window, then asks again before the watcher's own vision-call cooldown
+produces a fresh read for the new symbol -- a HOT-by-age row for the *old*
+symbol would otherwise get served. `assistant/perceptual_hash.py` (new --
+the Python half of `chart_watcher.rs`'s average-hash technique) compares
+the *current* request's own capture against the stored analysis's frame;
+a real symbol/timeframe switch fails this check even inside the freshness
+window, ordinary price-tick movement does not. `ChartWatchService`
+(Phase C) was updated to use this same check -- it previously stored a
+cryptographic sha256 of the raw bytes, which would almost never match
+between two real captures a few seconds apart (prices tick every second)
+and made its own freshness pre-check nearly a no-op. Caught via a
+dedicated regression test (`test_returns_none_when_content_has_drifted_
+even_if_hot`), not by inspection.
+
+**Rust side**: `ScreenCaptureResult` gains an additive `window_id` field
+(the captured window's own HWND as a string, matching
+`chart_watcher.rs`'s identity scheme exactly) so the frontend's existing
+user-triggered capture can tell the backend which physical window it came
+from. `capture_chart_window`/`capture_active_window` behavior is otherwise
+completely unchanged; `capture_screen_region` always reports `window_id:
+None` (no window concept applies to a region capture).
+
+**A live testing pitfall worth recording**: the first attempt at this
+verification used a standalone PowerShell screen-rect capture (this
+session's own throwaway test harness, not any shipped code) and got a
+stale/wrong result -- a different window happened to be occluding the
+target's screen region at that exact moment (several windows on this
+machine share identical bounds `1550x830 @(-7,-7)`, apparently all
+maximized in place). That is precisely the occlusion problem Phase C's
+WGC choice exists to solve, live-demonstrated by my own flawed ad-hoc
+tooling, not by the production code -- `capture_wgc.rs`'s real capture
+path was unaffected (already proven immune to this in the Phase C entry
+below) and was used instead for the corrected, honest re-verification
+above.
+
+**Files changed**: `apps/backend/assistant/fast_chart_response.py` (new),
+`perceptual_hash.py` (new), `chart_watch.py` (hash method changed),
+`hot_chart_state.py` (docstring only), `apps/backend/app/{deps,routers/
+assistant}.py`, `apps/backend/tests/test_{fast_chart_response,
+perceptual_hash,analyze_chart_fast_path}.py` (new),
+`test_chart_watch.py` (updated for the hash change + new regression case),
+`apps/web/src-tauri/src/lib.rs` (additive field only),
+`apps/web/src/types/actions.ts` (additive field only).
+
+**Tests run**: 7 new `fast_chart_response` cases, 5 `perceptual_hash`
+cases, 3 router-level integration tests (provider genuinely never called
+via `monkeypatch` assertion on the fast path; cold path confirmed for
+no-`window_id` and custom-goal cases), `chart_watch.py`'s tests updated
+and passing with a new content-drift regression. Full backend suite --
+**597 passed**, `ruff check` clean, `mypy` clean (same 7 pre-existing
+errors, none new). `cargo check`/`cargo clippy --no-deps` clean (same one
+pre-existing, untouched warning). Live verification as described above,
+against the real backend, real Claude CLI, and a real WGC-captured chart
+-- not a mock or a projection.
+
+**Known limitations**:
+- WARM-tier fast responses are not served yet (see above) -- narrows how
+  often the fast path fires today; a real, deliberate scope decision, not
+  an oversight.
+- The fast path answers `capital_note`-less generic analysis only; a
+  capital/profit sub-question riding on "Analyze this chart." would still
+  need `TradeCalculationEngine`'s deterministic split (`chart_analysis.py`
+  already does this on the cold path) -- not exercised on the fast path
+  since `try_fast_response` only fires for the exact default goal text and
+  a capital question changes the goal text, which routes it to cold
+  automatically. Not a gap, just worth naming why it's safe.
+- No WebSocket "state updated" push yet (still true from the Phase C
+  entry) -- the fast path is pull-only (the user has to ask); nothing
+  proactively tells the UI a fresher read exists.
+
+**Exact dependencies required from other agents**: same as Phase C --
+`apps/web/src-tauri/src/lib.rs` touched again (additive field only), no
+existing behavior changed. Flagging for review before any merge.
+
+**Next recommended action**: Phase E (async deep verification -- after a
+fast response, kick the same refresh path in the background and diff for
+material differences before ever pushing a follow-up correction to the
+user).
+
+---
+
+## Latest handoff — Alexa-speed hot-state, Phases B+C: HotChartState + non-intrusive BackgroundChartWatcher (2026-08-21)
+
+**Branch**: `feature/realtime-hot-state`
+**Worktree**: `C:\TARS-worktrees\realtime-hot-state`
+**Base SHA**: `17713e4` (unchanged from the Phase A entry below)
+**Final SHA**: `d4ce217` (Phase B: `28e2cef`, Phase C: `d4ce217`)
+
+**Live baseline run (between Phase A and Phase B)**: 7 valid real
+`analyze-chart` requests against a real XAUUSD 15m chart in the actual
+native TradingView desktop app (not mocked), driven by a standalone
+harness against the Phase A-instrumented backend on an isolated port/DB.
+Total time P50 24.3s / P90 28.3s / P95 28.5s / max 28.7s. First-meaningful-
+text (server `first_token_ms`) P50 5.3s but P90/P95 ~23.2-23.4s -- **2 of 7
+runs got zero visible/speakable text until the entire response arrived as
+one final chunk**, not the incremental stream the other 5 runs showed.
+This is a real Claude CLI streaming-behavior variance, not something this
+backend controls, and is a genuine risk to the "first TTS audio <=5s"
+target that Phase F/H should measure again with a larger sample. Quality:
+6/7 correctly read the real chart (accurate price levels, matched the
+image), but **0/7 returned the strict JSON schema** the chart-analysis
+system prompt demands -- all fell back to the existing, tested unstructured
+markdown path. This matters for Phase D: the deterministic composer needs
+parsed fields, so before relying on them, either tighten the prompt or make
+the composer degrade honestly when `structured=False`. One run (excluded
+from the stats above) accidentally captured this very Claude Code/IDE
+session instead of the chart -- a live, unplanned demonstration of exactly
+the window-occlusion problem that motivated Phase C's capture-architecture
+decision below (Claude correctly refused to analyze it as a chart, which
+is the correct/desired truthfulness behavior).
+
+**Phase B — HotChartState** (`28e2cef`): new
+`assistant/hot_chart_state.py` (`HotChartState`/`ChartIdentity`/
+`Freshness` -- HOT/WARM/STALE/MISSING with documented, timeframe-adaptive
+thresholds) and `assistant/hot_chart_state_store.py`, reusing
+`ChartAnalysisResult` as the analysis payload rather than duplicating its
+fields. New migration `0006_hot_chart_state.sql` (composite PK on
+`chart_window_id, symbol, timeframe`, with `''` rather than SQL `NULL` for
+unknown symbol/timeframe -- SQLite's `PRIMARY KEY` does not imply
+`NOT NULL` for non-INTEGER composite keys, and `NULL != NULL` for
+uniqueness, which would have silently allowed duplicate "unknown identity"
+rows). Purely additive: nothing in the live path used it yet as of this
+commit.
+
+**Phase C — BackgroundChartWatcher** (`d4ce217`): the substantial piece.
+Per explicit direction, background capture uses **Windows.Graphics.Capture
+(WGC)**, not the existing `capture_chart_window` hide/BitBlt/focus-steal
+path (unusable for a silent loop -- it steals OS input focus on every
+restore) and not DXGI Desktop Duplication (still captures the composited
+desktop, so it wouldn't actually solve the occlusion problem WGC's
+per-window mode does). New Rust modules:
+
+- `capture_wgc.rs` -- `WgcCapture`: D3D11 device + WGC capture session
+  bound to a target hwnd, polled via `try_capture_frame()`. **Verified
+  against the real, live TradingView window this session**, not just
+  compiled: captured a genuine 1920x1020 frame, decoded it back to PNG and
+  visually inspected it (right side up, correct colors, the actual chart)
+  while VS Code was in front on another window -- proving the "no
+  occlusion problem" claim directly, not just asserting it. Caught two
+  real bugs only a live run could catch: (1) `TryGetNextFrame`'s "no frame
+  yet" case surfaces as `Err(HRESULT S_OK)` in this WinRT binding, not
+  `Ok(None)` -- the first version treated every `Err` as fatal, which
+  would have made the watcher never produce a frame against a real
+  session; (2) D3D11 texture memory is top-down but the reused
+  `create_bmp_bytes` (lib.rs) expects bottom-up rows (matching its other
+  caller, `GetDIBits` with positive `biHeight`) -- unflipped, every
+  background-watcher frame would have shipped upside down to Claude.
+- `chart_watcher.rs` -- the polling/diff/trigger loop on its own
+  background OS thread (same independence-from-the-webview pattern as
+  `wake_engine.rs`). Window discovery is **not** foreground-biased (unlike
+  the existing `get_target_chart_window_hwnd`, deliberately, since the
+  watcher must keep tracking the chart while the user works elsewhere) --
+  matches by process name or title containing "tradingview"; confirmed via
+  the live baseline that the real app's process name is "TradingView" but
+  its *title* is the ticker/price (not "TradingView"), so both fields
+  must be checked, and an earlier test-only helper that checked title only
+  was caught failing against the live window and fixed. Cheap 16x16
+  average-hash frame diffing (hand-rolled, no image crate) gates whether
+  to push a frame to the backend; separate cooldown floors on the Rust
+  side (anti-spam, 5s) and Python side (anti-cost, per-window, default
+  20s) are deliberately distinct concerns. Pauses on idle/lock
+  (`GetLastInputInfo`) and when no chart window is found.
+- `assistant/chart_watch.py` -- `ChartWatchService`, the real vision-call
+  policy: per-window cooldown plus a freshness pre-check against
+  `HotChartStateStore.get_latest_for_window()` so a still-HOT window never
+  re-triggers a vision call just because Rust detected some pixel change.
+  Reuses `ChartAnalysisService.analyze()` verbatim -- same system prompt,
+  same epistemic discipline, same disclaimer -- never a second vision-call
+  path.
+- `app/routers/chart_watch.py` -- `POST /api/v1/chart-watch/frame`, the
+  Rust watcher's receiving endpoint (not reachable from the
+  frontend/webview, matching `wake_engine.rs`'s own backend-direct
+  pattern for `/api/v1/voice/transcribe`).
+
+**Deliberately not done in Phase C**: the state-update WebSocket broadcast
+Part 3 mentions is not wired -- there is no consumer until Phase D's fast
+path exists to react to it, and building unused pub/sub plumbing now would
+be speculative infrastructure. `HotChartState` persistence itself is fully
+wired and tested; a future session adds the broadcast once Phase D needs
+it.
+
+**Files changed** (Phase B+C combined): `apps/backend/assistant/
+hot_chart_state.py`, `hot_chart_state_store.py`, `chart_watch.py` (new),
+`apps/backend/app/routers/chart_watch.py` (new), `apps/backend/app/
+{deps,main}.py`, `apps/backend/storage/migrations/0006_hot_chart_state.sql`,
+`apps/backend/tests/test_hot_chart_state{,_store}.py`,
+`test_chart_watch{,_router}.py`, `apps/web/src-tauri/src/{capture_wgc,
+chart_watcher}.rs` (new), `apps/web/src-tauri/src/lib.rs` (module
+registration + startup wiring only -- `capture_chart_window`/
+`capture_active_window`/`get_target_chart_window_hwnd` untouched),
+`apps/web/src-tauri/Cargo.toml` (additive `windows` crate dependency +
+two new `windows-sys` features for idle detection).
+
+**Tests run**: Rust -- `cargo check`, `cargo clippy --no-deps` (clean
+except one pre-existing, untouched warning in `lib.rs`), `cargo test --lib`
+(6 pure-logic tests passing; the live-hardware capture test is
+`#[ignore]`d by default and was run explicitly this session, see above --
+it needs a real TradingView window open and is not part of normal CI).
+Backend -- full suite **581 passed**, `ruff check` clean, `mypy` clean
+(same 7 pre-existing errors as Phase A, none new, none in touched files).
+
+**Known limitations**:
+- Chart-window discovery is hardcoded to matching "tradingview" in
+  process name or title -- not configurable yet if a different charting
+  app needs support later.
+- The average-hash diff threshold (`HASH_DIFF_THRESHOLD = 14` out of 256
+  bits) is a reasoned starting constant, not empirically tuned against a
+  large real-world sample of "meaningful vs. cosmetic" chart changes.
+- Symbol/timeframe-change detection relies entirely on the vision call
+  itself (via `ChartIdentity`) -- the originally discussed cheap local OCR
+  of the ticker label (`Windows.Media.Ocr`) to detect a symbol switch
+  *before* spending a vision call was not built this session; flagged as a
+  Phase C follow-up, not silently dropped.
+- No physical, multi-hour resource/CPU/RAM measurement of the watcher
+  running continuously yet (Part 21) -- only a few real capture cycles
+  were exercised interactively this session.
+- The Rust `windows` crate direct dependency sits alongside two already-
+  transitively-resolved `windows` crate versions (0.61.3, 0.62.2) pulled
+  in by `tauri`'s own dependency tree -- confirmed this compiles and links
+  correctly (both `cargo check` and the live capture test succeeded), just
+  flagging the duplication for awareness, not a defect.
+
+**Exact dependencies required from other agents**: this session again
+touched `apps/web/src-tauri/` (Antigravity's normal lane per `AGENTS.md`)
+-- two new files (`capture_wgc.rs`, `chart_watcher.rs`) plus additive-only
+changes to `lib.rs`/`Cargo.toml`. No existing Rust command, struct, or
+behavior was modified. Flagging for review before any merge, per the same
+rationale as the Phase A entry below.
+
+**Next recommended action**: Phase D (wire a real `FAST_CHART_ANALYSIS`
+path into the actual trigger -- today's `IntelligenceRouter.CHART_ANALYSIS`
+branch is still a stub that just says "use the HUD trigger"; the
+deterministic composer must handle `structured=False` gracefully given the
+0/7 JSON-compliance finding above).
+
+---
+
+## Latest handoff — Alexa-speed hot-state, Phase A: latency instrumentation (2026-08-20)
+
+**Branch**: `feature/realtime-hot-state`
+**Worktree**: `C:\TARS-worktrees\realtime-hot-state` (dedicated, per the
+task's own isolation requirement — do not confuse with the main
+`c:\TARS-Overnight-Integration` checkout, which stays on
+`feature/trading-intelligence-architecture`)
+**Base SHA**: `17713e4` (tip of `feature/trading-intelligence-architecture`
+at session start — includes the Claude/Codex provider work, trading-
+intelligence fixes, and skill system)
+**Final SHA**: `aa21d8a`
+
+**Ownership note**: this is a multi-phase, cross-stack feature ("TARS
+should begin a meaningful chart response in ~5s instead of 15-25s")
+explicitly directed at one agent building the full stack in an isolated
+worktree, specifically so it doesn't collide with other agents' concurrent
+sessions on the shared repo. `apps/web/` (including `src-tauri/`) is
+normally Antigravity's lane per `AGENTS.md` — later phases of this same
+effort (background chart watcher, native capture) will touch
+`apps/web/src-tauri/*.rs` and `apps/web/src/*`; each such change will be
+called out explicitly in this file for review before any merge. This
+Phase A session touched one frontend file
+(`apps/web/src/runtime/ChartAnalysisClient.ts`, one additive line — see
+below); everything else is `apps/backend/`. `contracts/*.schema.json` was
+not touched.
+
+**Work completed** — Phase A only (baseline latency instrumentation; the
+task requires measuring a real baseline before changing behavior, not
+optimizing on anecdote): the codebase already had two pieces of latency
+infrastructure that were built but never actually wired up —
+`ProviderDiagnostics` (`assistant/provider.py`, added by an earlier
+session) was computed on every provider call but discarded immediately
+(`assistant/router.py`'s `_call_provider` built it then only used
+`reply.text`/`reply.provider`), and `app/latency.py`'s `LatencyTracker` was
+exercised only by its own unit tests, never called from a live request
+path. Phase A closes that gap rather than inventing a third timing
+mechanism:
+
+1. **`storage/migrations/0005_request_traces.sql`** — new
+   `request_traces` table: one row per chart-analysis or text-chat
+   request, with `capture_ms`/`provider_start_ms`/`first_token_ms`/
+   `provider_latency_ms`/`total_ms`/`error`, indexed on `(kind,
+   started_at)`.
+2. **`app/latency_store.py`** (new) — `LatencyTraceStore`, the same
+   `*Service`-wrapping-the-shared-`aiosqlite`-connection pattern every
+   other service in this backend uses (`EventService`,
+   `ConversationStore`, etc.). `record()` writes a trace;
+   `percentiles(kind)` computes P50/P90/P95/max/error-count in Python
+   (linear-interpolation percentile, since SQLite has no
+   `PERCENTILE_CONT`).
+3. **`assistant/chart_analysis.py`** — `ChartAnalysisService` takes an
+   optional `trace_store` (default `None`, so every existing caller/test
+   keeps working unchanged). `analyze_stream()` now records a trace on
+   every exit path: success (provider name, `claude_start_ms` as
+   `provider_start_ms`, `first_token_ms`, total), image-decode failure,
+   and any provider exception — never only the happy path, since the
+   whole point is real baseline numbers including failures.
+4. **`assistant/router.py`** — `AssistantRouter` takes the same optional
+   `trace_store`; `_call_provider()` now persists `reply.diagnostics`
+   (finally using the field that was always being computed) on both
+   success and `AssistantProviderError` failure.
+5. **`app/routers/diagnostics.py`** (new) —
+   `GET /api/v1/diagnostics/latency?kind=chart_analysis&limit=200`,
+   same exposure level as the existing `/api/v1/runtime/readiness`
+   (developer-facing, not called by the HUD/voice UI, no secrets).
+6. **Capture-stage timing threaded end to end**: the frontend already
+   computed `captureMs` (hide/DWM-wait/BitBlt/restore) locally for its own
+   console `[PERF][chart]` marks but never sent it to the backend —
+   `ChartAnalysisClient.ts` now includes `capture_ms` in the POST body
+   (one additive line), `app/routers/assistant.py`'s
+   `analyze_chart_stream` reads it, and it flows into the trace row. This
+   is the one frontend file this session touched.
+7. Wiring: `app/main.py` constructs one `LatencyTraceStore` off the
+   shared DB connection at startup and passes it into both
+   `ChartAnalysisService` and (via `app/deps.py`'s
+   `get_assistant_router`) `AssistantRouter`.
+
+**Files changed**: `apps/backend/storage/migrations/0005_request_traces.sql`
+(new), `apps/backend/app/latency_store.py` (new),
+`apps/backend/app/routers/diagnostics.py` (new),
+`apps/backend/app/deps.py`, `apps/backend/app/main.py`,
+`apps/backend/app/routers/assistant.py`,
+`apps/backend/assistant/chart_analysis.py`,
+`apps/backend/assistant/router.py`,
+`apps/backend/tests/test_chart_analysis.py` (added streaming-trace cases),
+`apps/backend/tests/test_latency_store.py` (new),
+`apps/backend/tests/test_latency_trace_wiring.py` (new),
+`apps/backend/tests/test_diagnostics_router.py` (new),
+`apps/web/src/runtime/ChartAnalysisClient.ts` (one additive line).
+
+**Tests run**: full `apps/backend` suite — **553 passed**, 0 failed, 0
+regressions. `ruff check` on every touched/created file — clean (3
+findings auto-fixed: unnecessary quoted forward-refs now that
+`from __future__ import annotations` makes them unneeded, one unsorted
+import block). `mypy --config-file pyproject.toml app assistant` —
+clean, same 7 pre-existing errors as before this session (in
+`assistant/providers/{gemini,codex,claude_code}.py` and
+`skill_registry/db.py` — none in any file this session touched).
+Frontend change **not** type-checked with `tsc` — `apps/web/node_modules`
+is not installed in this worktree (consistent with prior sessions'
+handoffs noting the same gap); the change itself is a single additive
+object-literal field with no type surface change, low risk, but flagging
+per this repo's honesty convention rather than claiming a check that
+didn't run.
+
+**Known limitations / deliberately deferred**:
+
+- **No live P50/P90/P95 numbers from a real running app yet.** This
+  session proves the plumbing (trace rows are written correctly on every
+  exit path, percentiles compute correctly — see the new test files) but
+  has not run the actual `claude` CLI against a real captured chart N
+  times to produce real baseline numbers. That requires either the user's
+  own TradingView session or a live backend + Tauri app running
+  end-to-end, which this session didn't have. The commit-message numbers
+  already in this repo's history (`8ce9ea1`, `9159069`: 10-31s, model
+  inference dominates) remain the best evidence until a live run happens
+  — Phase H's benchmark harness is the right place to automate that,
+  though a spot real-world check earlier would sharpen Phase B-D's exact
+  threshold choices.
+- **`respond_stream()` (both `ClaudeCodeProvider` and any future
+  provider) still doesn't emit `ProviderDiagnostics`** — only the
+  non-streaming `respond()` does. The chart-analysis streaming path's
+  trace instead uses its own `claude_start_ms`/`first_token_ms`/
+  `complete_ms` marks (already existed, just now persisted), which cover
+  the same ground for that path specifically. If a future phase wants
+  richer diagnostics (exit code, request_id, model name) on the streaming
+  path too, `respond_stream`'s `complete` event would need an additive
+  `diagnostics` field — not done here to keep this phase additive-only
+  and scoped to persistence, not provider-adapter changes.
+- **General-chat streaming (`handle_text_stream`) is not traced** — only
+  `handle_text`'s non-streaming `_call_provider()` path is. The streaming
+  chat path's provider branch doesn't produce a `ProviderDiagnostics`
+  either (see above), so there was nothing to persist yet; adding a
+  timing-only trace there without diagnostics felt like it would produce
+  a real-but-thin row that invites over-reading. Left for whoever wires
+  streaming diagnostics.
+- **Dev-endpoint exposure, not access-controlled** — matches
+  `/api/v1/runtime/readiness`'s existing exposure level (this app binds
+  to `127.0.0.1` by default per `ARCHITECTURE.md`); no new gating pattern
+  invented.
+
+**Exact dependencies required from other agents**: none blocking. Later
+phases of this same effort (B: HotChartState model/persistence; C:
+BackgroundChartWatcher, which needs new Rust capture code in
+`apps/web/src-tauri/`) will cross into Antigravity's normal ownership —
+flagged in advance here per `AGENTS.md`'s "flag it in your handoff instead"
+guidance, not attempted without disclosure.
+
+**Next recommended action**: Phase B (HotChartState domain model +
+`0006_hot_chart_state.sql`, purely additive, no behavior change) on the
+same branch/worktree. Full plan (all 8 phases) is tracked outside this
+repo in the originating conversation; ping the coordinator if a written
+copy in `docs/coordination/` would help future sessions pick this up
+independently.
+
+---
+
 ## Latest handoff — Wave 2B: Windows context + desktop-control skills (2026-08-17)
 
 **Branch**: `feature/wave2b-context-windows`

@@ -3,6 +3,7 @@ import { TARSTradingEvent } from './types/trading-event';
 import { TARSAssistantMessage } from './types/assistant-message';
 import {
   ActiveTab,
+  WorkspaceSection,
   CompanionVisualState,
   ConnectionState,
   AppSettings
@@ -12,58 +13,100 @@ import {
   saveSettings,
   loadStoredAlerts,
   saveStoredAlerts,
-  loadStoredChat,
-  saveStoredChat
+  loadStoredSessions,
+  saveStoredSessions,
+  StoredChatSession,
 } from './services/storage';
 import { TARSWebSocketClient } from './services/websocket';
 import { audioService } from './services/audio';
 import { sendNotification } from './services/notifications';
-import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut } from './services/tauri';
+import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut, isTauri } from './services/tauri';
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
-import { actionRuntimeClient } from './services/actions';
-
-import { DesktopHeader } from './components/navigation/DesktopHeader';
-import { MobileTabBar } from './components/navigation/MobileTabBar';
-import { HUDOverlay } from './components/hud/HUDOverlay';
-import { CompanionHero } from './components/companion/CompanionHero';
-import { ActiveSetupsView } from './components/setups/ActiveSetupsView';
-import { AlertHistoryView } from './components/alerts/AlertHistoryView';
-import { AskTARSView } from './components/assistant/AskTARSView';
-import { VoiceControlView } from './components/voice/VoiceControlView';
-import { MemoryView } from './components/memory/MemoryView';
-import { SystemStatusView } from './components/system/SystemStatusView';
-import { SettingsView } from './components/settings/SettingsView';
 import { nativeBridge } from './services/native-bridge';
+import { VoiceAssistantRuntime } from './runtime/VoiceAssistantRuntime';
+import { assistantClient } from './runtime/AssistantClient';
+
+import { AppShell } from './components/shell/AppShell';
+import { ConversationView } from './components/assistant/ConversationView';
+import { WorkspaceView } from './components/workspace/WorkspaceView';
+import { SettingsView } from './components/settings/SettingsView';
 
 export const App: React.FC = () => {
   // App Settings
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
 
-  // View & UI Navigation
-  const [activeTab, setActiveTab] = useState<ActiveTab>('companion');
+  // View & Navigation State
+  const [activeTab, setActiveTab] = useState<ActiveTab>('tars');
+  const [workspaceSection, setWorkspaceSection] = useState<WorkspaceSection>('setups');
   const [companionState, setCompanionState] = useState<CompanionVisualState>('IDLE');
+
+  // Surface mode: 'workstation' is the primary desktop companion UI
+  const [appMode, setAppMode] = useState<'voice' | 'workstation'>('workstation');
+
+  // Multi-session chat management
+  const [sessions, setSessions] = useState<StoredChatSession[]>(() => {
+    const loaded = loadStoredSessions();
+    if (loaded.length > 0) return loaded;
+    const initialId = crypto.randomUUID();
+    return [
+      {
+        id: initialId,
+        title: 'New Conversation',
+        createdAt: new Date().toISOString(),
+        messages: [],
+      },
+    ];
+  });
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => sessions[0]?.id || crypto.randomUUID());
 
   // Real-time Data Stores
   const [activeSetups, setActiveSetups] = useState<TARSTradingEvent[]>([]);
   const [alertsHistory, setAlertsHistory] = useState<TARSTradingEvent[]>(loadStoredAlerts);
   const [selectedAlert, setSelectedAlert] = useState<TARSTradingEvent | null>(null);
-  const [chatMessages, setChatMessages] = useState<TARSAssistantMessage[]>(loadStoredChat);
-  const [criticalWarnings, setCriticalWarnings] = useState<string[]>([]);
   const [protocolErrors, setProtocolErrors] = useState<Array<{ title: string; errors: string[] }>>([]);
 
   // Audio / Mic State
   const [isListening, setIsListening] = useState(false);
   const [audioVolume, setAudioVolume] = useState(0);
 
+  // Text streaming in as assistant reply arrives
+  const [streamingAnswer, setStreamingAnswer] = useState('');
+  const [analysisProgress, setAnalysisProgress] = useState<string | undefined>(undefined);
+
   // WebSocket Connection State
   const [connectionState, setConnectionState] = useState<ConnectionState>({
     status: 'connecting',
     url: settings.serverEndpoint,
     reconnectAttempts: 0,
-    latencyMs: 0
+    latencyMs: 0,
   });
 
   const wsClientRef = useRef<TARSWebSocketClient | null>(null);
+  const autoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    document.title = 'TARS Ready';
+    void nativeBridge.markFrontendReady();
+  }, []);
+
+  const cancelAutoHide = useCallback(() => {
+    if (autoHideTimerRef.current !== null) {
+      clearTimeout(autoHideTimerRef.current);
+      autoHideTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleAutoHide = useCallback(
+    (delayMs = 2800) => {
+      cancelAutoHide();
+      if (appMode === 'voice') {
+        autoHideTimerRef.current = setTimeout(() => {
+          nativeBridge.hideHUD();
+        }, delayMs);
+      }
+    },
+    [appMode, cancelAutoHide]
+  );
 
   // Save settings when changed
   const updateSettings = useCallback((newPartial: Partial<AppSettings>) => {
@@ -74,140 +117,423 @@ export const App: React.FC = () => {
     });
   }, []);
 
+  // Request microphone permission on mount
+  useEffect(() => {
+    audioService.requestMicrophonePermission().catch(() => {});
+  }, []);
+
   // Handle Compact Window Mode for Tauri
   useEffect(() => {
     toggleCompactWindow(settings.compactMode);
   }, [settings.compactMode]);
 
-  // Register Global & In-App Shortcuts (Ctrl+Shift+Space / Ctrl+Shift+T / Ctrl+Shift+V)
-  useEffect(() => {
-    const handleToggleHUD = () => {
-      setSettings((prev) => {
-        const next = { ...prev, compactMode: !prev.compactMode };
-        saveSettings(next);
-        return next;
+  // Active session messages helper
+  const currentSession = sessions.find((s) => s.id === activeSessionId) || sessions[0];
+  const chatMessages = currentSession ? currentSession.messages : [];
+
+  // Helper to append message to active session
+  const appendMessageToActiveSession = useCallback(
+    (msg: TARSAssistantMessage) => {
+      setSessions((prev) => {
+        const idx = prev.findIndex((s) => s.id === msg.conversation_id);
+        let updated: StoredChatSession[];
+        if (idx >= 0) {
+          const current = prev[idx];
+          const newMessages = [...current.messages, msg];
+          let newTitle = current.title;
+          if (current.title === 'New Conversation' && msg.role === 'user') {
+            newTitle = msg.content.slice(0, 28) + (msg.content.length > 28 ? '...' : '');
+          }
+          const updatedSession = { ...current, title: newTitle, messages: newMessages };
+          updated = [...prev];
+          updated[idx] = updatedSession;
+        } else {
+          const newSession: StoredChatSession = {
+            id: msg.conversation_id,
+            title: msg.role === 'user' ? msg.content.slice(0, 28) : 'Conversation',
+            createdAt: new Date().toISOString(),
+            messages: [msg],
+          };
+          updated = [newSession, ...prev];
+        }
+        saveStoredSessions(updated);
+        return updated;
       });
+    },
+    []
+  );
+
+  // Start new conversation session
+  const handleNewChat = useCallback(() => {
+    const newId = crypto.randomUUID();
+    const newSession: StoredChatSession = {
+      id: newId,
+      title: 'New Conversation',
+      createdAt: new Date().toISOString(),
+      messages: [],
     };
-
-    // 1. In-App Keydown Listener (for web, PWA, and direct in-window input)
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === ' ' || e.code === 'Space')) {
-        e.preventDefault();
-        handleToggleHUD();
-      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
-        e.preventDefault();
-        handleToggleHUD();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-
-    // 2. Native OS Global Shortcuts
-    registerGlobalShortcut('CommandOrControl+Shift+Space', handleToggleHUD);
-    registerGlobalShortcut('CommandOrControl+Shift+T', handleToggleHUD);
-
-    // 3. Native event bridge listeners (tars://summon-hud and tars://ptt-toggle)
-    let cleanupNativeListeners: (() => void) | undefined;
-    nativeBridge.listenToNativeEvents(
-      () => handleToggleHUD(),
-      () => handleTogglePushToTalk()
-    ).then((cleanup) => {
-      cleanupNativeListeners = cleanup;
+    setSessions((prev) => {
+      const updated = [newSession, ...prev];
+      saveStoredSessions(updated);
+      return updated;
     });
+    setActiveSessionId(newId);
+    setActiveTab('tars');
+    setStreamingAnswer('');
+    setAnalysisProgress(undefined);
+  }, []);
 
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      unregisterGlobalShortcut('CommandOrControl+Shift+Space');
-      unregisterGlobalShortcut('CommandOrControl+Shift+T');
-      if (cleanupNativeListeners) cleanupNativeListeners();
+  // Delete a conversation session
+  const handleDeleteSession = useCallback(
+    (id: string) => {
+      setSessions((prev) => {
+        const filtered = prev.filter((s) => s.id !== id);
+        const nextSessions =
+          filtered.length > 0
+            ? filtered
+            : [
+                {
+                  id: crypto.randomUUID(),
+                  title: 'New Conversation',
+                  createdAt: new Date().toISOString(),
+                  messages: [],
+                },
+              ];
+        saveStoredSessions(nextSessions);
+        if (activeSessionId === id) {
+          setActiveSessionId(nextSessions[0].id);
+        }
+        return nextSessions;
+      });
+    },
+    [activeSessionId]
+  );
+
+  // Clear all conversation history
+  const handleClearHistory = useCallback(() => {
+    const newId = crypto.randomUUID();
+    const freshSession: StoredChatSession = {
+      id: newId,
+      title: 'New Conversation',
+      createdAt: new Date().toISOString(),
+      messages: [],
     };
+    setSessions([freshSession]);
+    saveStoredSessions([freshSession]);
+    setActiveSessionId(newId);
+    setActiveTab('tars');
+    setStreamingAnswer('');
+    setAnalysisProgress(undefined);
   }, []);
 
   // Handle incoming Trading Events with lifecycle state management
-  const handleIncomingTradingEvent = useCallback((event: TARSTradingEvent) => {
-    // 1. Add to alerts history
-    setAlertsHistory((prev) => {
-      const updated = [event, ...prev.filter((a) => a.event_id !== event.event_id)];
-      saveStoredAlerts(updated);
-      return updated;
-    });
+  const handleIncomingTradingEvent = useCallback(
+    (event: TARSTradingEvent) => {
+      // 1. Add to alerts history
+      setAlertsHistory((prev) => {
+        const updated = [event, ...prev.filter((a) => a.event_id !== event.event_id)];
+        saveStoredAlerts(updated);
+        return updated;
+      });
 
-    // 2. Update active setups collection per deterministic lifecycle
-    setActiveSetups((prev) => {
-      const shouldClear =
-        event.state === 'IDLE' ||
-        event.state === 'SETUP_INVALIDATED' ||
-        event.validation_status === 'INVALID' ||
-        event.validation_status === 'EXPIRED';
+      // 2. Update active setups collection per deterministic lifecycle
+      setActiveSetups((prev) => {
+        const shouldClear =
+          event.state === 'IDLE' ||
+          event.state === 'SETUP_INVALIDATED' ||
+          event.validation_status === 'INVALID' ||
+          event.validation_status === 'EXPIRED';
 
-      if (shouldClear) {
-        return prev.filter((s) => s.symbol !== event.symbol);
-      }
-
-      if (event.state === 'SETUP_DEVELOPING' || event.state === 'SETUP_VALID') {
-        const existingIdx = prev.findIndex((s) => s.symbol === event.symbol);
-        if (existingIdx >= 0) {
-          const next = [...prev];
-          next[existingIdx] = event;
-          return next;
+        if (shouldClear) {
+          return prev.filter((s) => s.symbol !== event.symbol);
         }
-        return [event, ...prev];
-      }
 
-      return prev;
-    });
+        if (event.state === 'SETUP_DEVELOPING' || event.state === 'SETUP_VALID') {
+          const existingIdx = prev.findIndex((s) => s.symbol === event.symbol);
+          if (existingIdx >= 0) {
+            const next = [...prev];
+            next[existingIdx] = event;
+            return next;
+          }
+          return [event, ...prev];
+        }
 
-    // 3. Update critical warnings
-    if (event.warnings && event.warnings.length > 0) {
-      setCriticalWarnings((prev) => Array.from(new Set([...event.warnings!, ...prev])).slice(0, 5));
-    }
+        return prev;
+      });
 
-    // 4. Update companion face state based on event
-    if (event.state === 'SETUP_VALID') {
-      setCompanionState('ALERT');
-      if (settings.audioEnabled) {
+      // 3. Update companion face state based on event
+      if (event.state === 'SETUP_VALID') {
+        setCompanionState('ALERT');
+        if (settings.audioEnabled) {
+          sendNotification({
+            title: `TARS Validated Setup: ${event.symbol} (${event.direction || 'LONG'})`,
+            body: `Entry: ${event.entry || '-'} | R:R ${event.risk_reward ? `${event.risk_reward}R` : '-'}`,
+          });
+        }
+      } else if (event.state === 'RISK_WARNING' || event.state === 'SYSTEM_WARNING') {
+        setCompanionState('WARNING');
         sendNotification({
-          title: `TARS Validated Setup: ${event.symbol} (${event.direction || 'LONG'})`,
-          body: `Entry: ${event.entry || '-'} | R:R ${event.risk_reward ? `${event.risk_reward}R` : '-'}`
+          title: `TARS Warning: ${event.symbol}`,
+          body: event.warnings?.[0] || 'Risk threshold or data quality trigger',
         });
       }
-    } else if (event.state === 'RISK_WARNING' || event.state === 'SYSTEM_WARNING') {
-      setCompanionState('WARNING');
-      sendNotification({
-        title: `TARS Warning: ${event.symbol}`,
-        body: event.warnings?.[0] || 'Risk threshold or data quality trigger'
-      });
-    }
 
-    // Return to IDLE after a short alert period
-    setTimeout(() => {
-      setCompanionState((current) => (current === 'ALERT' || current === 'WARNING' ? 'IDLE' : current));
-    }, 4500);
-  }, [settings.audioEnabled]);
+      setTimeout(() => {
+        setCompanionState((current) => (current === 'ALERT' || current === 'WARNING' ? 'IDLE' : current));
+      }, 4500);
+    },
+    [settings.audioEnabled]
+  );
 
   // Handle incoming Assistant Messages
-  const handleIncomingAssistantMessage = useCallback((msg: TARSAssistantMessage) => {
-    setChatMessages((prev) => {
-      const updated = [...prev, msg];
-      saveStoredChat(updated);
-      return updated;
+  const handleIncomingAssistantMessage = useCallback(
+    (msg: TARSAssistantMessage) => {
+      cancelAutoHide();
+      appendMessageToActiveSession(msg);
+
+      if (msg.role === 'assistant') {
+        setCompanionState('IDLE');
+        setAudioVolume(0);
+        scheduleAutoHide(3000);
+      }
+    },
+    [
+      cancelAutoHide,
+      scheduleAutoHide,
+      appendMessageToActiveSession,
+    ]
+  );
+
+  /* Deprecated duplicate execution path (inactive): chart capture, intent
+   * selection, and voice-command execution now belong to the backend
+   * AssistantTurnController. Retained in this commit only as migration
+   * history while workstation chart rendering remains intact.
+  // "Analyze this chart": captures active window and runs analysis
+  const isAnalyzingChartRef = useRef(false);
+
+  const handleAnalyzeChart = useCallback(async (userText?: string) => {
+    if (isAnalyzingChartRef.current) return;
+    isAnalyzingChartRef.current = true;
+    cancelAutoHide();
+    // The user's full request (e.g. "...and estimate the profit if my
+    // capital was 10000 rupees") must reach the backend, not just the
+    // generic default goal -- otherwise TARS silently drops half of what
+    // was actually asked.
+    const goal = userText?.trim() || undefined;
+
+    const convId = activeSessionId;
+    const newMessage = (content: string, error?: string, providerName?: string): TARSAssistantMessage => ({
+      schema_version: '1.0.0',
+      message_id: crypto.randomUUID(),
+      conversation_id: convId,
+      timestamp: new Date().toISOString(),
+      role: 'assistant',
+      content,
+      input_mode: 'text',
+      error: error ?? null,
+      providers: providerName ? { assistant: providerName } : undefined,
     });
 
-    if (msg.role === 'assistant') {
-      setCompanionState('SPEAKING');
-      if (settings.audioEnabled && msg.content) {
-        audioService.synthesizeAndPlay(msg.content, settings.apiEndpoint)
-          .catch((ttsErr) => {
-            console.warn('[TARS TTS] Backend synthesis error, fallback to browser synthesis:', ttsErr);
-            return audioService.speakText(msg.content, settings.speechRate, settings.speechVolume);
-          })
-          .finally(() => {
-            setCompanionState('IDLE');
-          });
-      } else {
-        setTimeout(() => setCompanionState('IDLE'), 2000);
+    setCompanionState('THINKING');
+    setAnalysisProgress('Looking at the chart...');
+
+    try {
+      const [activeContext, capture] = await Promise.all([
+        nativeBridge.getActiveWindowContext(),
+        nativeBridge.captureChartWindow(true),
+      ]);
+
+      if (capture.is_secure_desktop) {
+        setAnalysisProgress(undefined);
+        handleIncomingAssistantMessage(
+          newMessage(
+            "I can't capture the screen right now — a secure desktop or credential prompt is active.",
+            'secure_desktop_blocked'
+          )
+        );
+        return;
       }
+      if (capture.error) {
+        setAnalysisProgress(undefined);
+        handleIncomingAssistantMessage(
+          newMessage(`I couldn't capture the screen to analyze it: ${capture.error}`, capture.error)
+        );
+        return;
+      }
+
+      setAnalysisProgress('Reading the chart...');
+
+      let streamCompleted = false;
+      try {
+        const streamRes = await fetch(`${settings.apiEndpoint}/api/v1/assistant/analyze-chart/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext, goal }),
+        });
+
+        if (streamRes.ok && streamRes.body) {
+          const reader = streamRes.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let buffer = '';
+          let finalData: ChartAnalysisData | null = null;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('data: ')) {
+                try {
+                  const event = JSON.parse(trimmed.slice(6));
+                  if (event.type === 'complete' && event.result) {
+                    finalData = event.result as ChartAnalysisData;
+                    streamCompleted = true;
+                  }
+                } catch {
+                  // ignore non-json SSE frames
+                }
+              }
+            }
+          }
+
+          if (finalData) {
+            setAnalysisProgress(undefined);
+            // The full structured breakdown, not the short speech-only
+            // summary -- the chat bubble must show the complete analysis
+            // (headings/zones/levels), not a flattened one-line paragraph.
+            const displayText: string =
+              typeof finalData.formatted_tars_text === 'string' && finalData.formatted_tars_text
+                ? finalData.formatted_tars_text
+                : typeof finalData.speech_text === 'string' && finalData.speech_text
+                ? finalData.speech_text
+                : String(finalData.market_context || 'Chart analysis complete.');
+            handleIncomingAssistantMessage(newMessage(displayText, undefined, finalData.provider));
+            return;
+          }
+        }
+      } catch (streamErr) {
+        console.warn('[TARS Chart Stream] Stream error, falling back to standard endpoint:', streamErr);
+      }
+
+      // Fallback HTTP endpoint if stream was unavailable
+      if (!streamCompleted) {
+        const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/analyze-chart`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversation_id: convId, capture, active_context: activeContext, goal }),
+        });
+
+        setAnalysisProgress(undefined);
+
+        if (!response.ok) {
+          const errBody = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+          const detail = typeof errBody.detail === 'string' ? errBody.detail : `HTTP ${response.status}`;
+          handleIncomingAssistantMessage(newMessage(`Chart analysis failed: ${detail}`, detail));
+          return;
+        }
+
+        const result = await response.json();
+        const displayText: string =
+          typeof result.formatted_tars_text === 'string' && result.formatted_tars_text
+            ? result.formatted_tars_text
+            : typeof result.speech_text === 'string' && result.speech_text
+            ? result.speech_text
+            : String(result.market_context || 'No analysis available.');
+        handleIncomingAssistantMessage(newMessage(displayText, undefined, result.provider));
+      }
+    } catch (err) {
+      setAnalysisProgress(undefined);
+      const msg = err instanceof Error ? err.message : String(err);
+      handleIncomingAssistantMessage(newMessage(`Chart analysis error: ${msg}`, msg));
+    } finally {
+      setAnalysisProgress(undefined);
+      isAnalyzingChartRef.current = false;
     }
-  }, [settings.audioEnabled, settings.apiEndpoint, settings.speechRate, settings.speechVolume]);
+  }, [activeSessionId, settings.apiEndpoint, handleIncomingAssistantMessage, cancelAutoHide]);
+
+  // Shared routing for transcribed voice utterance
+  const processVoiceTranscript = useCallback(
+    async (transcript: string) => {
+      cancelAutoHide();
+      const convId = activeSessionId;
+      setCompanionState('THINKING');
+
+      const userVoiceMsg: TARSAssistantMessage = {
+        schema_version: '1.0.0',
+        message_id: crypto.randomUUID(),
+        conversation_id: convId,
+        timestamp: new Date().toISOString(),
+        role: 'user',
+        content: transcript,
+        input_mode: 'voice',
+        providers: { stt: 'faster-whisper' },
+      };
+      handleIncomingAssistantMessage(userVoiceMsg);
+
+      try {
+        actionRuntimeClient.setEndpoint(settings.apiEndpoint);
+        const activeContext = await nativeBridge.getActiveWindowContext();
+
+        const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
+          transcript,
+          activeContext,
+          'voice_ptt'
+        );
+        if (deterministicReq) {
+          await actionRuntimeClient.submitAction(deterministicReq);
+          setCompanionState('IDLE');
+          scheduleAutoHide(2500);
+          return;
+        }
+
+        if (ANALYZE_CHART_PATTERN.test(transcript)) {
+          await handleAnalyzeChart(transcript);
+          return;
+        }
+
+        const result = await assistantClient.query(
+          transcript,
+          convId,
+          settings.apiEndpoint
+        );
+        const assistantReply: TARSAssistantMessage = {
+          ...result.message,
+          content: result.display_text || result.message.content,
+          display_text: result.display_text,
+          speech_text: result.speech_text,
+        };
+        handleIncomingAssistantMessage(assistantReply);
+        return;
+      } catch (err) {
+        console.warn('[TARS Voice] Voice processing error:', err);
+      }
+
+      if (settings.mockGeneratorActive) {
+        setTimeout(() => {
+          const reply = createMockAssistantReply('status check', convId, activeSetups);
+          handleIncomingAssistantMessage(reply);
+        }, 500);
+      } else {
+        setCompanionState('IDLE');
+        scheduleAutoHide(2500);
+      }
+    },
+    [
+      activeSessionId,
+      settings.apiEndpoint,
+      settings.mockGeneratorActive,
+      activeSetups,
+      handleIncomingAssistantMessage,
+      handleAnalyzeChart,
+      cancelAutoHide,
+      scheduleAutoHide,
+    ]
+  );
+  */
 
   // Fetch initial state from HTTP backend on mount
   useEffect(() => {
@@ -255,7 +581,7 @@ export const App: React.FC = () => {
         ...prev,
         status,
         latencyMs: latency ?? prev.latencyMs,
-        errorMessage: err
+        errorMessage: err,
       }));
     });
     const unsubErr = ws.onProtocolError((title, errors) => {
@@ -275,16 +601,34 @@ export const App: React.FC = () => {
     };
   }, [settings.serverEndpoint, handleIncomingTradingEvent, handleIncomingAssistantMessage]);
 
-  // Mock Event Generator Timer (only when explicitly enabled in settings)
+  // Mock Event Generator Timer (only when explicitly enabled)
   useEffect(() => {
     if (!settings.mockGeneratorActive) return;
 
-    // Seed initial mock setups if list is empty
     if (activeSetups.length === 0) {
       const initial = [
-        createMockTradingEvent({ symbol: 'XAUUSD', direction: 'LONG', state: 'SETUP_VALID', validation_status: 'VALID', entry: 2684.50, stop_loss: 2676.00, take_profit: 2708.50, risk_reward: 2.82, risk_percent: 1.0 }),
-        createMockTradingEvent({ symbol: 'NQ', direction: 'SHORT', state: 'SETUP_DEVELOPING', validation_status: 'PENDING', entry: 20420.25, stop_loss: 20475.00, take_profit: 20265.00, risk_reward: 2.83, risk_percent: 0.75 }),
-        createMockTradingEvent({ symbol: 'ES', direction: 'LONG', state: 'RISK_WARNING', validation_status: 'VALID', entry: 5880.50, stop_loss: 5865.00, take_profit: 5925.00, risk_reward: 2.87, risk_percent: 1.5 }),
+        createMockTradingEvent({
+          symbol: 'XAUUSD',
+          direction: 'LONG',
+          state: 'SETUP_VALID',
+          validation_status: 'VALID',
+          entry: 2684.5,
+          stop_loss: 2676.0,
+          take_profit: 2708.5,
+          risk_reward: 2.82,
+          risk_percent: 1.0,
+        }),
+        createMockTradingEvent({
+          symbol: 'NQ',
+          direction: 'SHORT',
+          state: 'SETUP_DEVELOPING',
+          validation_status: 'PENDING',
+          entry: 20420.25,
+          stop_loss: 20475.0,
+          take_profit: 20265.0,
+          risk_reward: 2.83,
+          risk_percent: 0.75,
+        }),
       ];
       initial.forEach((evt) => handleIncomingTradingEvent(evt));
     }
@@ -297,8 +641,9 @@ export const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [settings.mockGeneratorActive, settings.mockIntervalSeconds, activeSetups.length, handleIncomingTradingEvent]);
 
-  // Certified Push to Talk Handler (Microphone -> Real Audio Blob -> Backend STT -> Assistant -> Backend TTS)
+  // Push to Talk Handler
   const handleTogglePushToTalk = async () => {
+    cancelAutoHide();
     if (isListening) {
       setIsListening(false);
       const audioBlob = await audioService.stopPushToTalk();
@@ -306,76 +651,59 @@ export const App: React.FC = () => {
 
       if (!audioBlob || audioBlob.size === 0) {
         setCompanionState('IDLE');
+        scheduleAutoHide(2000);
         return;
       }
 
-      const convId = 'conv_voice_session';
       try {
-        // Step 1: Forward actual microphone Blob bytes to backend transcription endpoint
-        const transcript = await audioService.transcribeAudio(audioBlob, settings.apiEndpoint);
-        if (!transcript || !transcript.trim()) {
-          setCompanionState('IDLE');
-          return;
-        }
-
-        // Step 2: Display user message with actual transcribed text
-        const userVoiceMsg: TARSAssistantMessage = {
-          schema_version: '1.0.0',
-          message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
-          conversation_id: convId,
-          timestamp: new Date().toISOString(),
-          role: 'user',
-          content: transcript,
-          input_mode: 'voice',
-          providers: { stt: 'faster-whisper' }
-        };
-        handleIncomingAssistantMessage(userVoiceMsg);
-
-        // Step 2.5: A recognized deterministic action phrase bypasses the LLM
-        // (not the Action Runtime) -- submitted through the same shared
-        // actionRuntimeClient the HUD uses, so its permission classification,
-        // skill dispatch, and CONFIRMATION_REQUIRED handling are identical,
-        // and the HUD's own onAnyActionResult listener picks up the real
-        // result automatically. Anything not recognized falls through
-        // unchanged to the assistant/LLM query below.
-        actionRuntimeClient.setEndpoint(settings.apiEndpoint);
-        const activeContext = await nativeBridge.getActiveWindowContext();
-        const deterministicReq = actionRuntimeClient.parseDeterministicCommand(
-          transcript,
-          activeContext,
-          'voice_ptt'
+        const response = await audioService.submitUtterance(
+          audioBlob,
+          settings.apiEndpoint,
+          activeSessionId,
+          `ptt-${activeSessionId}`
         );
-        if (deterministicReq) {
-          await actionRuntimeClient.submitAction(deterministicReq);
+        if (response.status === 'ignored') {
           setCompanionState('IDLE');
           return;
         }
-
-        // Step 3: Query assistant endpoint with transcribed text
-        const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: transcript, conversation_id: convId }),
-        });
-
-        if (response.ok) {
-          const assistantReply: TARSAssistantMessage = await response.json();
-          handleIncomingAssistantMessage(assistantReply);
-          return;
+        if (response.transcript) {
+          handleIncomingAssistantMessage({
+            schema_version: '1.0.0',
+            message_id: `${response.turn_id}-user`,
+            conversation_id: response.conversation_id,
+            timestamp: new Date().toISOString(),
+            role: 'user',
+            content: response.transcript,
+            input_mode: 'voice',
+            providers: { stt: 'backend' },
+          });
         }
+        handleIncomingAssistantMessage({
+          schema_version: '1.0.0',
+          message_id: response.turn_id,
+          conversation_id: response.conversation_id,
+          timestamp: new Date().toISOString(),
+          role: 'assistant',
+          content: response.display_text,
+          display_text: response.display_text,
+          speech_text: response.speech_text,
+          input_mode: 'voice',
+          intent: response.intent,
+          providers: { assistant: response.provider, tts: 'backend' },
+        });
+        if (response.audio_chunks_base64.length > 0) {
+          setCompanionState('SPEAKING');
+          await audioService.playBase64Chunks(response.audio_chunks_base64, setAudioVolume);
+        }
+        setCompanionState(response.status === 'awaiting_command' ? 'LISTENING' : 'IDLE');
       } catch (err) {
-        console.warn('[TARS Voice PTT] Voice processing error:', err);
-      }
-
-      if (settings.mockGeneratorActive) {
-        setTimeout(() => {
-          const reply = createMockAssistantReply('status check', convId, activeSetups);
-          handleIncomingAssistantMessage(reply);
-        }, 500);
-      } else {
+        console.warn('[TARS Voice PTT] Golden-loop error:', err);
         setCompanionState('IDLE');
       }
     } else {
+      if (companionState === 'SPEAKING') {
+        audioService.stopSpeaking();
+      }
       const started = await audioService.startPushToTalk((vol) => {
         setAudioVolume(vol);
       });
@@ -386,12 +714,13 @@ export const App: React.FC = () => {
     }
   };
 
-  // Send Chat Message via real backend endpoint
+  // Send Chat Message via real backend endpoint with streaming
   const handleSendMessage = async (text: string, inputMode: 'text' | 'voice' = 'text') => {
-    const convId = 'conv_main_session';
+    cancelAutoHide();
+    const convId = activeSessionId;
     const userMsg: TARSAssistantMessage = {
       schema_version: '1.0.0',
-      message_id: crypto.randomUUID ? crypto.randomUUID() : 'msg_' + Date.now(),
+      message_id: crypto.randomUUID(),
       conversation_id: convId,
       timestamp: new Date().toISOString(),
       role: 'user',
@@ -399,182 +728,171 @@ export const App: React.FC = () => {
       input_mode: inputMode,
     };
 
+    console.info('[CHAT] submitted:', text);
     handleIncomingAssistantMessage(userMsg);
+
+    console.info('[CHAT] route selected: assistant query stream');
     setCompanionState('THINKING');
+    setStreamingAnswer('');
 
-    try {
-      const response = await fetch(`${settings.apiEndpoint}/api/v1/assistant/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text,
-          conversation_id: convId,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        handleIncomingAssistantMessage(data);
-        return;
-      }
-    } catch (err) {
-      console.warn('[TARS Chat API] HTTP Assistant query error, trying WebSocket:', err);
-    }
-
-    // Try WebSocket if HTTP was unreachable
-    if (wsClientRef.current && wsClientRef.current.getStatus() === 'connected') {
-      wsClientRef.current.send({
-        type: 'assistant_message',
-        payload: userMsg
-      });
-    } else if (settings.mockGeneratorActive) {
-      setTimeout(() => {
-        const reply = createMockAssistantReply(text, convId, activeSetups);
-        handleIncomingAssistantMessage(reply);
-      }, 500);
-    } else {
-      setCompanionState('IDLE');
-    }
+    let gotFirstDelta = false;
+    await assistantClient.streamQuery(text, convId, settings.apiEndpoint, {
+      onDelta: (chunk) => {
+        if (!gotFirstDelta) {
+          gotFirstDelta = true;
+          console.info('[CHAT] first delta');
+        }
+        setStreamingAnswer((prev) => prev + chunk);
+      },
+      onComplete: (payload) => {
+        console.info('[CHAT] complete');
+        setStreamingAnswer('');
+        handleIncomingAssistantMessage(payload.message!);
+      },
+      onError: (detail) => {
+        console.warn('[TARS Chat API] streaming query error:', detail);
+        setStreamingAnswer('');
+        if (settings.mockGeneratorActive) {
+          setTimeout(() => {
+            const reply = createMockAssistantReply(text, convId, activeSetups);
+            handleIncomingAssistantMessage(reply);
+          }, 500);
+        } else {
+          setCompanionState('IDLE');
+          scheduleAutoHide(2500);
+        }
+      },
+    });
   };
 
-  // Switch to Setups view and inspect
+  // Inspect Setup in Workspace Alerts
   const handleInspectSetup = (setup: TARSTradingEvent) => {
     setSelectedAlert(setup);
-    setActiveTab('alerts');
+    setActiveTab('workspace');
+    setWorkspaceSection('alerts');
   };
 
-  // Manual Trigger Mock Event (dev only)
+  // Manual Trigger Mock Event
   const handleManualTriggerMock = () => {
     const evt = createMockTradingEvent();
     handleIncomingTradingEvent(evt);
   };
 
-  // Compact Mode HUD Layout (Wave 2A Assistant Shell)
-  if (settings.compactMode) {
-    return (
-      <div className="w-screen h-screen bg-[#03060a] p-1 overflow-hidden">
-        <HUDOverlay
-          companionState={companionState}
-          onExpand={() => updateSettings({ compactMode: false })}
-          activeSetups={activeSetups}
-          criticalWarnings={criticalWarnings}
-          isListening={isListening}
-          onTogglePushToTalk={handleTogglePushToTalk}
-          audioVolume={audioVolume}
-          apiEndpoint={settings.apiEndpoint}
-          onSendMessage={handleSendMessage}
-        />
-      </div>
-    );
-  }
+  // Global Shortcuts for summoning voice panel
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === ' ' || e.code === 'Space')) {
+        e.preventDefault();
+        nativeBridge.summonHUD('voice');
+      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
+        e.preventDefault();
+        nativeBridge.summonHUD('voice');
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    registerGlobalShortcut('CommandOrControl+Shift+Space', () => nativeBridge.summonHUD('voice'));
+    registerGlobalShortcut('CommandOrControl+Shift+T', () => nativeBridge.summonHUD('voice'));
 
-  // Full Workstation Layout (Desktop & Responsive Mobile PWA)
+    let cleanupPtt: (() => void) | undefined;
+    void (async () => {
+      if (isTauri()) {
+        const { listen } = await import('@tauri-apps/api/event');
+        cleanupPtt = await listen('tars://ptt-toggle', () => handleTogglePushToTalk());
+      }
+    })();
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      unregisterGlobalShortcut('CommandOrControl+Shift+Space');
+      unregisterGlobalShortcut('CommandOrControl+Shift+T');
+      if (cleanupPtt) cleanupPtt();
+    };
+  }, []);
+
+  const sessionMetas = sessions.map((s) => ({
+    id: s.id,
+    title: s.title,
+    createdAt: s.createdAt,
+    messageCount: s.messages.length,
+  }));
+
   return (
-    <div className="w-screen h-screen flex flex-col bg-[#03060a] text-slate-100 overflow-hidden font-sans select-none">
-      {/* Desktop Header Navigation */}
-      <DesktopHeader
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        connectionStatus={connectionState.status}
-        latencyMs={connectionState.latencyMs || 0}
-        compactMode={settings.compactMode}
-        setCompactMode={(compact) => updateSettings({ compactMode: compact })}
-        activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
-        unreadAlertsCount={alertsHistory.length}
+    <>
+      {/* Background Voice Assistant Runtime */}
+      <VoiceAssistantRuntime
+        visible={appMode === 'voice'}
+        onModeChange={setAppMode}
       />
 
-      {/* Main Content View Container with Safe Areas */}
-      <main className="flex-1 overflow-hidden relative pb-16 lg:pb-0 safe-top">
-        {activeTab === 'companion' && (
-          <CompanionHero
-            companionState={companionState}
-            connectionStatus={connectionState.status}
-            latencyMs={connectionState.latencyMs || 0}
-            activeSetups={activeSetups}
-            criticalWarnings={criticalWarnings}
-            isListening={isListening}
-            onTogglePushToTalk={handleTogglePushToTalk}
-            audioVolume={audioVolume}
-            onSendMessage={handleSendMessage}
-            onInspectSetup={handleInspectSetup}
-          />
-        )}
+      {/* Main OpenJarvis-Style Desktop Application Shell */}
+      {appMode === 'workstation' && (
+        <AppShell
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          workspaceSection={workspaceSection}
+          onSelectWorkspaceSection={setWorkspaceSection}
+          sessions={sessionMetas}
+          activeSessionId={activeSessionId}
+          onSelectSession={setActiveSessionId}
+          onNewChat={handleNewChat}
+          onDeleteSession={handleDeleteSession}
+          onClearHistory={handleClearHistory}
+          companionState={companionState}
+          connectionStatus={connectionState.status}
+        >
+          {activeTab === 'tars' && (
+            <ConversationView
+              messages={chatMessages}
+              streamingAnswer={streamingAnswer}
+              analysisProgress={analysisProgress}
+              companionState={companionState}
+              isListening={isListening}
+              onTogglePushToTalk={handleTogglePushToTalk}
+              onSendMessage={handleSendMessage}
+              onOpenWorkspace={() => setActiveTab('workspace')}
+              onSpeak={(text) => {
+                audioService.speakText(text, settings.speechRate, settings.speechVolume);
+              }}
+            />
+          )}
 
-        {activeTab === 'setups' && (
-          <ActiveSetupsView
-            setups={activeSetups}
-            onSelectSetup={handleInspectSetup}
-          />
-        )}
+          {activeTab === 'workspace' && (
+            <WorkspaceView
+              section={workspaceSection}
+              setSection={setWorkspaceSection}
+              connectionState={connectionState}
+              activeSetups={activeSetups}
+              alertsHistory={alertsHistory}
+              selectedAlert={selectedAlert}
+              setSelectedAlert={setSelectedAlert}
+              isListening={isListening}
+              onTogglePushToTalk={handleTogglePushToTalk}
+              audioVolume={audioVolume}
+              onSendMessage={handleSendMessage}
+              onInspectSetup={handleInspectSetup}
+              apiEndpoint={settings.apiEndpoint}
+              mockModeActive={settings.mockGeneratorActive}
+              onUpdateEndpoint={(url) => updateSettings({ serverEndpoint: url })}
+              onReconnect={() => {
+                if (wsClientRef.current) {
+                  wsClientRef.current.disconnect();
+                  wsClientRef.current.connect();
+                }
+              }}
+              protocolErrors={protocolErrors}
+              onClearErrors={() => setProtocolErrors([])}
+            />
+          )}
 
-        {activeTab === 'alerts' && (
-          <AlertHistoryView
-            alerts={alertsHistory}
-            selectedAlert={selectedAlert}
-            onSelectAlert={setSelectedAlert}
-          />
-        )}
-
-        {activeTab === 'chat' && (
-          <AskTARSView
-            messages={chatMessages}
-            activeSetups={activeSetups}
-            onSendMessage={handleSendMessage}
-            isListening={isListening}
-            onTogglePushToTalk={handleTogglePushToTalk}
-            onInspectSetup={handleInspectSetup}
-            apiEndpoint={settings.apiEndpoint}
-          />
-        )}
-
-        {activeTab === 'voice' && (
-          <VoiceControlView
-            isListening={isListening}
-            onTogglePushToTalk={handleTogglePushToTalk}
-            audioVolume={audioVolume}
-            onVoiceTranscribed={(text) => handleSendMessage(text, 'voice')}
-            apiEndpoint={settings.apiEndpoint}
-          />
-        )}
-
-        {activeTab === 'memory' && (
-          <MemoryView
-            apiEndpoint={settings.apiEndpoint}
-            mockModeActive={settings.mockGeneratorActive}
-          />
-        )}
-
-        {activeTab === 'system' && (
-          <SystemStatusView
-            connectionState={connectionState}
-            onUpdateEndpoint={(url) => updateSettings({ serverEndpoint: url })}
-            onReconnect={() => {
-              if (wsClientRef.current) {
-                wsClientRef.current.disconnect();
-                wsClientRef.current.connect();
-              }
-            }}
-            protocolErrors={protocolErrors}
-            onClearErrors={() => setProtocolErrors([])}
-          />
-        )}
-
-        {activeTab === 'settings' && (
-          <SettingsView
-            settings={settings}
-            onUpdateSettings={updateSettings}
-            onTriggerMockEvent={handleManualTriggerMock}
-          />
-        )}
-      </main>
-
-      {/* Mobile Tab Bar Navigation */}
-      <MobileTabBar
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        activeSetupsCount={activeSetups.filter((s) => s.state === 'SETUP_VALID').length}
-        unreadAlertsCount={alertsHistory.length}
-      />
-    </div>
+          {activeTab === 'settings' && (
+            <SettingsView
+              settings={settings}
+              onUpdateSettings={updateSettings}
+              onTriggerMockEvent={handleManualTriggerMock}
+            />
+          )}
+        </AppShell>
+      )}
+    </>
   );
 };

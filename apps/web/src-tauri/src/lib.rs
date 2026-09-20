@@ -7,7 +7,71 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+mod wake_engine;
+#[cfg(target_os = "windows")]
+mod capture_wgc;
+#[cfg(target_os = "windows")]
+mod chart_watcher;
+
 static CAPTURE_COUNTER: AtomicUsize = AtomicUsize::new(1);
+static LAST_EXTERNAL_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+unsafe fn get_target_chart_window_hwnd() -> windows_sys::Win32::Foundation::HWND {
+    use windows_sys::Win32::Foundation::*;
+    use windows_sys::Win32::System::Threading::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    let current_pid = GetCurrentProcessId();
+    let current_fg = GetForegroundWindow();
+
+    // 1. If current foreground is an external application (e.g. TradingView), preserve & return it
+    if !current_fg.is_null() {
+        let mut fg_pid = 0u32;
+        GetWindowThreadProcessId(current_fg, &mut fg_pid);
+        if fg_pid != 0 && fg_pid != current_pid {
+            LAST_EXTERNAL_HWND.store(current_fg as isize, Ordering::SeqCst);
+            return current_fg;
+        }
+    }
+
+    // 2. If TARS is foreground, check the preserved previous external window
+    let stored_raw = LAST_EXTERNAL_HWND.load(Ordering::SeqCst);
+    if stored_raw != 0 {
+        let stored_hwnd = stored_raw as HWND;
+        if IsWindow(stored_hwnd) != 0 && IsWindowVisible(stored_hwnd) != 0 {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(stored_hwnd, &mut pid);
+            if pid != 0 && pid != current_pid {
+                return stored_hwnd;
+            }
+        }
+    }
+
+    // 3. Fallback: Search top-level windows in Z-order for top visible non-TARS application
+    let mut curr = GetTopWindow(std::ptr::null_mut());
+    while !curr.is_null() {
+        if IsWindowVisible(curr) != 0 {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(curr, &mut pid);
+            if pid != 0 && pid != current_pid {
+                let mut title_buf = [0u16; 64];
+                let len = GetWindowTextW(curr, title_buf.as_mut_ptr(), 64);
+                let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetWindowRect(curr, &mut rect);
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                if len > 0 && w > 200 && h > 200 {
+                    LAST_EXTERNAL_HWND.store(curr as isize, Ordering::SeqCst);
+                    return curr;
+                }
+            }
+        }
+        curr = GetWindow(curr, GW_HWNDNEXT);
+    }
+
+    current_fg
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowBounds {
@@ -54,6 +118,14 @@ pub struct ScreenCaptureResult {
     pub image_data_base64: Option<String>,
     pub temp_file_path: Option<String>,
     pub error: Option<String>,
+    // The captured window's own HWND, as a string -- present only for
+    // "active_window" captures with a real target (None for the no-window,
+    // region, and monitor cases). Lets the backend look up HotChartState
+    // for this exact window using the SAME chart_window_id scheme
+    // chart_watcher.rs already uses (hwnd.to_string()) -- see TARS
+    // Alexa-Speed Phase D. Additive field; existing consumers that ignore
+    // unknown JSON fields are unaffected.
+    pub window_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +259,15 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
+fn mark_frontend_ready(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_title("TARS Ready").map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    Err("Main window not found".into())
+}
+
+#[tauri::command]
 fn is_always_on_top(app: tauri::AppHandle) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window("main") {
         return window.is_always_on_top().map_err(|e| e.to_string());
@@ -199,7 +280,7 @@ fn toggle_compact_mode(app: tauri::AppHandle, is_compact: Option<bool>) -> Resul
     if let Some(window) = app.get_webview_window("main") {
         let next_compact = is_compact.unwrap_or_else(|| !window.is_always_on_top().unwrap_or(false));
         if next_compact {
-            window.set_size(tauri::LogicalSize::new(440.0, 740.0)).map_err(|e| e.to_string())?;
+            window.set_size(tauri::LogicalSize::new(380.0, 180.0)).map_err(|e| e.to_string())?;
             window.set_always_on_top(true).map_err(|e| e.to_string())?;
         } else {
             window.set_size(tauri::LogicalSize::new(1280.0, 840.0)).map_err(|e| e.to_string())?;
@@ -211,8 +292,20 @@ fn toggle_compact_mode(app: tauri::AppHandle, is_compact: Option<bool>) -> Resul
 }
 
 #[tauri::command]
-fn summon_hud(app: tauri::AppHandle, _mode: Option<String>) -> Result<(), String> {
-    summon_hud_impl(&app)
+fn set_window_size(app: tauri::AppHandle, width: f64, height: f64, always_on_top: Option<bool>) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_size(tauri::LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
+        if let Some(on_top) = always_on_top {
+            window.set_always_on_top(on_top).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    Err("Main window not found".into())
+}
+
+#[tauri::command]
+fn summon_hud(app: tauri::AppHandle, mode: Option<String>) -> Result<(), String> {
+    summon_hud_impl(&app, mode.as_deref())
 }
 
 #[tauri::command]
@@ -221,8 +314,8 @@ fn hide_hud(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn toggle_hud(app: tauri::AppHandle, _mode: Option<String>) -> Result<bool, String> {
-    toggle_hud_impl(&app)
+fn toggle_hud(app: tauri::AppHandle, mode: Option<String>) -> Result<bool, String> {
+    toggle_hud_impl(&app, mode.as_deref())
 }
 
 #[tauri::command]
@@ -231,14 +324,54 @@ fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn summon_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
+#[derive(Debug, Clone, Serialize)]
+pub struct WakeEngineStatus {
+    pub running: bool,
+    pub last_error: Option<String>,
+}
+
+#[tauri::command]
+fn wake_engine_status() -> WakeEngineStatus {
+    WakeEngineStatus {
+        running: wake_engine::is_running(),
+        last_error: wake_engine::last_error(),
+    }
+}
+
+#[tauri::command]
+fn set_wake_playback_state(app: tauri::AppHandle, speaking: bool) -> Result<(), String> {
+    wake_engine::set_playback_speaking(speaking, &app);
+    Ok(())
+}
+
+fn summon_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::System::Threading::*;
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let fg = GetForegroundWindow();
+        if !fg.is_null() {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(fg, &mut pid);
+            if pid != 0 && pid != GetCurrentProcessId() {
+                LAST_EXTERNAL_HWND.store(fg as isize, Ordering::SeqCst);
+            }
+        }
+    }
+
     if let Some(window) = app.get_webview_window("main") {
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
-        window.set_size(tauri::LogicalSize::new(440.0, 740.0)).map_err(|e| e.to_string())?;
-        window.set_always_on_top(true).map_err(|e| e.to_string())?;
+        let requested_mode = mode.unwrap_or("voice");
+        let (width, height, always_on_top) = if requested_mode == "voice" {
+            (420.0, 260.0, true)
+        } else {
+            (1100.0, 780.0, false)
+        };
+        window.set_size(tauri::LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
+        window.set_always_on_top(always_on_top).map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
-        let _ = app.emit("tars://summon-hud", ());
+        let _ = app.emit("tars://summon-hud", requested_mode);
         return Ok(());
     }
     Err("Main window not found".into())
@@ -248,9 +381,10 @@ fn show_main_impl(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
-        window.set_size(tauri::LogicalSize::new(1280.0, 840.0)).map_err(|e| e.to_string())?;
+        window.set_size(tauri::LogicalSize::new(1100.0, 780.0)).map_err(|e| e.to_string())?;
         window.set_always_on_top(false).map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
+        let _ = app.emit("tars://summon-hud", "workstation");
         return Ok(());
     }
     Err("Main window not found".into())
@@ -264,14 +398,14 @@ fn hide_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
     Err("Main window not found".into())
 }
 
-fn toggle_hud_impl(app: &tauri::AppHandle) -> Result<bool, String> {
+fn toggle_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window("main") {
         let is_visible = window.is_visible().unwrap_or(false);
         if is_visible {
             let _ = hide_hud_impl(app);
             Ok(false)
         } else {
-            let _ = summon_hud_impl(app);
+            let _ = summon_hud_impl(app, mode);
             Ok(true)
         }
     } else {
@@ -288,7 +422,7 @@ fn get_active_window_context() -> Result<ActiveWindowContext, String> {
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
         unsafe {
-            let hwnd = GetForegroundWindow();
+            let hwnd = get_target_chart_window_hwnd();
             if hwnd.is_null() {
                 return Ok(ActiveWindowContext {
                     executable: "unknown.exe".into(),
@@ -463,6 +597,71 @@ fn get_monitors_geometry() -> Result<Vec<MonitorInfo>, String> {
     }
 }
 
+/// Chart-analysis capture: TARS's own window (shown with "Looking at the
+/// chart..." right before this runs) sits directly over the target chart
+/// window's screen region, and `capture_active_window` grabs raw on-screen
+/// pixels (BitBlt from the screen DC) rather than the target window's own
+/// contents -- so without this, the capture contains TARS itself, not the
+/// chart underneath it. Hides TARS, gives DWM a moment to repaint whatever
+/// was underneath, captures, then restores TARS exactly as it was.
+#[tauri::command]
+fn capture_chart_window(
+    app: tauri::AppHandle,
+    include_image_data: Option<bool>,
+) -> Result<ScreenCaptureResult, String> {
+    // Perf instrumentation (TARS MASTER MILESTONE Phase 2): stderr so it
+    // shows up in a redirected launch log without touching the JSON
+    // response shape the frontend depends on.
+    let t_start = std::time::Instant::now();
+    let window = app.get_webview_window("main");
+    let was_visible = window
+        .as_ref()
+        .map(|w| w.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+
+    if was_visible {
+        if let Some(w) = &window {
+            let _ = w.hide();
+        }
+    }
+    let t_hidden = t_start.elapsed().as_millis();
+
+    // Let DWM finish repainting the window(s) now exposed underneath
+    // before grabbing screen pixels.
+    std::thread::sleep(std::time::Duration::from_millis(220));
+    let t_dwm_wait_done = t_start.elapsed().as_millis();
+
+    let result = capture_active_window(include_image_data);
+    let t_capture_done = t_start.elapsed().as_millis();
+
+    if was_visible {
+        if let Some(w) = &window {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
+    let t_restored = t_start.elapsed().as_millis();
+
+    eprintln!(
+        "[PERF][capture_chart_window] hide={}ms dwm_wait_done={}ms capture_done={}ms (capture_only={}ms) restored={}ms",
+        t_hidden,
+        t_dwm_wait_done,
+        t_capture_done,
+        t_capture_done - t_dwm_wait_done,
+        t_restored
+    );
+
+    match &result {
+        Ok(capture) if capture.executable.eq_ignore_ascii_case("tars-companion.exe") => Err(
+            "Captured window is TARS itself -- hiding before capture did not \
+             clear it from the target region, refusing to send a self-capture \
+             to the model."
+                .to_string(),
+        ),
+        _ => result,
+    }
+}
+
 #[tauri::command]
 fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptureResult, String> {
     #[cfg(target_os = "windows")]
@@ -474,7 +673,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
         unsafe {
-            let hwnd = GetForegroundWindow();
+            let hwnd = get_target_chart_window_hwnd();
             let now = chrono::Utc::now().to_rfc3339();
             let count = CAPTURE_COUNTER.fetch_add(1, Ordering::SeqCst);
             let capture_id = format!("cap_{}_{}", chrono::Utc::now().timestamp_millis(), count);
@@ -491,6 +690,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
                     dpi: 96,
                     width: 0,
                     height: 0,
+                    window_id: None,
                     is_secure_desktop: false,
                     image_format: "image/bmp".into(),
                     image_data_base64: None,
@@ -549,6 +749,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
                     dpi: 96,
                     width: 0,
                     height: 0,
+                    window_id: None,
                     is_secure_desktop: true,
                     image_format: "image/bmp".into(),
                     image_data_base64: None,
@@ -633,6 +834,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
                 dpi,
                 width: w as u32,
                 height: h as u32,
+                window_id: Some((hwnd as isize).to_string()),
                 is_secure_desktop: false,
                 image_format: "image/bmp".into(),
                 image_data_base64: base64_str,
@@ -649,6 +851,7 @@ fn capture_active_window(include_image_data: Option<bool>) -> Result<ScreenCaptu
             capture_id,
             captured_at: chrono::Utc::now().to_rfc3339(),
             source: "active_window".into(),
+            window_id: None,
             executable: "mock_browser.exe".into(),
             window_title: "Mock Window".into(),
             bounds: WindowBounds { x: 100, y: 100, width: 800, height: 600 },
@@ -750,6 +953,7 @@ fn capture_screen_region(
                 dpi,
                 width: w as u32,
                 height: h as u32,
+                window_id: None,
                 is_secure_desktop: false,
                 image_format: "image/bmp".into(),
                 image_data_base64: base64_str,
@@ -766,6 +970,7 @@ fn capture_screen_region(
             capture_id,
             captured_at: chrono::Utc::now().to_rfc3339(),
             source: "region".into(),
+            window_id: None,
             executable: "mock_region".into(),
             window_title: format!("Region ({}, {}, {}x{})", x, y, width, height),
             bounds: WindowBounds { x, y, width, height },
@@ -1035,7 +1240,7 @@ pub fn run() {
                 .with_handler(move |app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
                         if shortcut == &summon_shortcut_space || shortcut == &summon_shortcut_t {
-                            let _ = toggle_hud_impl(app);
+                            let _ = toggle_hud_impl(app, Some("voice"));
                         } else if shortcut == &ptt_shortcut {
                             let _ = app.emit("tars://ptt-toggle", ());
                         }
@@ -1045,7 +1250,9 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             greet,
+            mark_frontend_ready,
             toggle_compact_mode,
+            set_window_size,
             is_always_on_top,
             summon_hud,
             hide_hud,
@@ -1054,12 +1261,22 @@ pub fn run() {
             get_active_window_context,
             get_monitors_geometry,
             capture_active_window,
+            capture_chart_window,
             capture_screen_region,
             get_active_window_elements,
             clear_captures_cache,
             get_autostart_status,
             set_autostart,
+            wake_engine_status,
+            set_wake_playback_state,
         ])
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+            {
+                let _ = webview.window().set_title("TARS Ready");
+            }
+        })
         .on_window_event(|window, event| {
             // M2A/M2B Background persistence (Close-to-tray)
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -1107,7 +1324,7 @@ pub fn run() {
                 .tooltip("TARS Windows Assistant (Running in Background)")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "summon_hud" => {
-                        let _ = summon_hud_impl(app);
+                        let _ = summon_hud_impl(app, Some("voice"));
                     }
                     "show_main" => {
                         let _ = show_main_impl(app);
@@ -1128,7 +1345,7 @@ pub fn run() {
                     } = event
                     {
                         let app = tray.app_handle();
-                        let _ = toggle_hud_impl(app);
+                        let _ = toggle_hud_impl(app, Some("voice"));
                     }
                 })
                 .build(app)?;
@@ -1140,6 +1357,21 @@ pub fn run() {
                 let _ = app.global_shortcut().register(summon_t_setup);
                 let _ = app.global_shortcut().register(ptt_setup);
             }
+
+            // Start listening for "Hey TARS" immediately, on its own
+            // background thread -- independent of whether any window is
+            // ever shown. The main window itself starts hidden (see
+            // tauri.conf.json `visible: false`); this is what lets TARS
+            // run as a true background/tray app rather than a dashboard
+            // that happens to also listen.
+            wake_engine::start(app.handle().clone());
+
+            // Non-intrusive background chart observation (TARS Alexa-Speed
+            // Phase C): polls a discovered chart window via
+            // Windows.Graphics.Capture -- never hides/focuses TARS's own
+            // window, unlike the user-triggered capture_chart_window path.
+            #[cfg(target_os = "windows")]
+            chart_watcher::start(app.handle().clone());
 
             Ok(())
         })

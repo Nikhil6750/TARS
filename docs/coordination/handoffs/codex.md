@@ -6,7 +6,322 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
-## Latest handoff
+## Latest handoff — minimal golden voice loop awaiting physical certification (2026-08-22)
+
+**Branch**: `feature/tars-minimal-golden-loop`
+
+**Implementation commit SHA**: `2c383377d0f1550bb57c8653a8f5e10a0ce98b11`
+
+**Base SHA / worktree**:
+`eeb117a4c8474f7da82c6229b0dcf8f453525225` /
+`C:\TARS-worktrees\tars-minimal-golden-loop`. The hot-state tip
+`f7a7310c861c2fdddde357cf67b42519a2c927f0` is an ancestor of this base.
+
+**Work completed**:
+
+- Studied `Avinashb722/jarvis-ai-assistant` and `open-jarvis/OpenJarvis`, then
+  reduced the production turn to one backend owner without copying either
+  implementation.
+- Added `AssistantTurnController` with one utterance/turn ID/execution/final
+  response/TTS invariant, in-flight joining, completed replay, and conflicting
+  turn-ID rejection.
+- Made `POST /api/v1/voice/utterance` the only production audio entry. Native
+  Rust now owns microphone capture, segmentation, WAV transport, and playback
+  state only. React observes backend state and plays backend-produced audio.
+- Added configurable normalized transcript wake aliases, one-shot commands,
+  and a seven-second two-stage `Hey TARS` / `Yeah?` command window.
+- Added the explicit deterministic/normal/chart/tool/research/trading router.
+  Normal conversation directly calls one configured primary and uses strict
+  sequential fallback only after a provider error.
+- Unified the response as `AssistantResponse` with separate Markdown-capable
+  `display_text` and backend-sanitized natural `speech_text`; Kokoro synthesis
+  chunks only complete sentences.
+- Preserved hot chart state, WGC watcher/capture, asynchronous deep
+  verification, action/permission, skill, memory, research fail-closed, and
+  quant-brain boundaries behind the controller.
+- Hardened `scripts/start_tars.ps1` to discover the primary worktree `.env`,
+  reject a foreign port owner, wait for real provider readiness, build from the
+  current source into a worktree-local target, and verify the finished native
+  page-load marker.
+- Built and launched the actual app. Runtime probe reports zero findings;
+  backend PID `22940` points to this worktree's `run.py`, and native PID `17576`
+  points to this worktree's release EXE with a responsive `TARS Ready` window.
+
+**Files changed**:
+
+- Backend: `.env.example`, `apps/backend/app/{config,deps,main,readiness,voice_state,voice_telemetry}.py`,
+  `apps/backend/app/routers/{assistant,health,voice}.py`,
+  `apps/backend/assistant/{factory,hot_chart_state_store,provider_router,turn_controller}.py`,
+  migration `0008_golden_voice_trace.sql`, and the associated backend tests.
+- Native/web: `apps/web/src-tauri/{Cargo.lock,Cargo.toml}`, native
+  `src/{lib,wake_engine}.rs`, `App.tsx`, assistant/HUD/voice components,
+  `runtime/{AssistantClient,VoiceAssistantRuntime,WakeClient}.ts(x)`,
+  `services/{audio,native-bridge}.ts`, new response/runtime types, and associated
+  frontend tests.
+- Removed active duplicate frontend paths:
+  `apps/web/src/services/{speech,wake-word}.ts` and tests
+  `{single-utterance-wake,speech}.test.ts`.
+- Quality/operations: `docs/runtime/GOLDEN_LOOP_INVENTORY.md`,
+  `scripts/start_tars.ps1`, golden acceptance/integration tests,
+  `tools/{README,core_experience_checks,generate_voice_comparison}.py`, and
+  `artifacts/voice-samples/{manifest.json,voice_A.wav,voice_B.wav,voice_C.wav}`.
+
+**Interfaces exposed**:
+
+- `POST /api/v1/voice/utterance` — canonical multipart native utterance entry.
+- `POST /api/v1/assistant/query` and its stream — canonical text entry through
+  the same controller.
+- `AssistantResponse` — `turn_id`, `display_text`, `speech_text`, `intent`,
+  `status`, `provider`, `latency_ms`, plus correlation/audio fields.
+- `GET /api/v1/diagnostics/voice-latency` — per-turn requested timing markers
+  and exact failure stage.
+- `scripts\start_tars.ps1` — one-command production launch.
+
+**Tests run**:
+
+- Backend full suite: **670 passed**, one third-party deprecation warning.
+- Root contract/integration suite: **66 passed, 24 expected external/hardware
+  skipped**, one third-party deprecation warning.
+- Frontend Vitest: **134 passed**; TypeScript, ESLint, and production Vite/PWA
+  build passed.
+- Rust: **8 passed, 1 real-WGC hardware test ignored**; `cargo check` passed.
+- Source diagnostics and live runtime diagnostics: **zero findings**.
+- Tauri release + NSIS build passed. The launcher itself returned exit 0 and
+  printed `TARS READY` only after provider and native page-load verification.
+
+**Measured evidence (not fabricated)**:
+
+- Kokoro samples: A `am_michael` 3.984 s / 10.057 s audio (RTF 0.396), B
+  `am_onyx` 3.360 s / 9.459 s (RTF 0.355), C `bm_george` 3.731 s / 9.907 s
+  (RTF 0.377). Human naturalness choice is pending.
+- Current native background/noise captures show STT completion around 1.3–4.1
+  seconds and are correctly classified at `wake_match`; these are not physical
+  wake attempts and are not evidence of wake success.
+- No physical wake, normal-provider, or hot-chart latency is claimed yet.
+
+**Known limitations**:
+
+- Required 20-attempt physical microphone test is pending; 19/20 reliability
+  and absence of duplicated spoken responses are not yet certified.
+- Early sentence TTS is prepared as complete-sentence chunks, but the multipart
+  voice endpoint currently returns its final response before native playback;
+  it does not yet overlap provider generation with first-sentence playback.
+- The existing Claude/Codex benchmark was inconclusive. Runtime therefore keeps
+  the explicitly configured `claude_code` primary and strict Codex fallback; no
+  unsupported quality winner is claimed.
+- Hot chart capability is preserved and regression-tested, but physical
+  sub-two-second latency was not remeasured in this session.
+
+**Exact dependencies required from other agents/users**:
+
+- User/hardware: perform the prescribed 20 deliberate microphone attempts and
+  two-stage follow-up, report any duplicate audible response, and physically
+  choose A/B/C. No other agent dependency blocks this milestone.
+
+**Next recommended action**: perform the physical test against the running
+native app, then inspect `GET /api/v1/diagnostics/voice-latency` for every miss
+and publish the final measured acceptance report. Do not merge this branch.
+
+## Latest handoff — core-experience recovery evidence
+
+**Branch**: `feature/tars-core-experience-v2`
+
+**Commit SHA**: `1b6fe6207b1cefbb5bda2a7408e7f38e98790266`
+
+**Work completed**:
+
+- Reproduced the requested flow from the latest integrated hot-state base and
+  built the source-matched Tauri release. The production binary is
+  self-contained: no Vite listener was present during native verification.
+- Replaced the old screenshot helper (which wrote into an external
+  Antigravity artifact directory) with a Windows-native verifier that selects
+  the real `tars-companion.exe` window, captures it with `PrintWindow`, clicks
+  Chat/Workspace/Memory/Settings through UI Automation, and fails for a
+  missing/clipped window or missing navigation controls.
+- Added a source/runtime release-blocker detector. It currently reports 13
+  findings rather than treating HTTP/process health as proof of a usable app.
+- Added a fixed 30-prompt, 10-category Claude Code/Codex benchmark with seven
+  deterministic quality/hygiene checks and a separate bounded Markdown-free
+  speech representation. Human correctness review remains explicit.
+- Ran all 30 exact prompts through both current CLI adapters. Claude Code
+  failed all 30 nested invocations; Codex returned 30 responses but passed
+  zero corpus-specific completeness checks, usually asking what repository
+  work to perform. No provider winner is claimed.
+- Added an offline-only Kokoro A/B/C generator using installed model assets
+  and the four required listening lines. Candidates are `am_michael`,
+  `am_onyx`, and `bm_george`, with optional current `af_heart` reference.
+- Added regression tests for native-window selection, all principal detected
+  source blockers, corpus shape/categories, speech sanitization, and internal
+  implementation-detail leakage.
+
+**Files changed**:
+
+- `tools/capture_native_tars.py`
+- `tools/core_experience_checks.py`
+- `tools/assistant_quality_benchmark.py`
+- `tools/quality_corpus.json`
+- `tools/generate_voice_comparison.py`
+- `tools/README.md`
+- `tests/unit/test_core_experience_tools.py`
+- This Codex handoff file only under shared coordination docs.
+
+**Interfaces exposed**:
+
+- `python tools/core_experience_checks.py --runtime`
+- `python tools/capture_native_tars.py --pid <pid> --verify-navigation --output-dir <dir>`
+- `python tools/assistant_quality_benchmark.py --provider claude_code --provider codex --output <file>`
+- `python tools/generate_voice_comparison.py --include-current-reference --output-dir <dir>`
+
+**Tests run**:
+
+- `python -m pytest tests -q` — 66 passed, 24 expected external/hardware
+  skips after `npm ci --prefix tools/codegen`.
+- New regression module — 6 passed.
+- Ruff on all changed Python files — passed.
+- Repository-wide `python -m ruff check tests tools` — nonzero only for 34
+  pre-existing violations in unchanged `tools/verify_integrated_voice_runtime.py`.
+- Backend targeted voice/assistant/readiness suite — 29 passed.
+- Frontend Vitest — 140 passed; TypeScript check and production build passed.
+- Frontend lint — nonzero because the configured
+  `react-hooks/exhaustive-deps` rule has no installed plugin (two errors).
+- Tauri Rust tests — 6 passed, one hardware WGC capture test ignored.
+- Source-matched `npm run tauri build` — passed and produced the release EXE
+  and NSIS installer in the configured shared Cargo target.
+- Native UI Automation run — actual Tauri Chat, Workspace, Memory, and
+  Settings controls were invoked and produced four distinct capture hashes;
+  actual native captures were saved under untracked `scratch/` evidence.
+- Full provider corpus — 30 Claude Code failures; 30 Codex responses,
+  174/210 deterministic checks but 0/30 completeness anchors; human review
+  still required.
+
+**Known limitations / current release blockers**:
+
+- Launcher requires a copied per-worktree `.env`, can launch/accept a stale
+  shared Cargo binary, can confuse an existing port owner with the process it
+  started, does not verify the native main webview, and prints `TARS READY` /
+  `Say: Hey TARS` while runtime readiness is false.
+- Default `compactMode: true` shrinks the full workstation to roughly 380x180;
+  navigation works only after manually expanding/summoning the real window.
+- Native wake code has only Wake/Command modes, lacks the requested timing
+  markers, drops the command tail in a general one-utterance “Hey TARS ...”
+  request, and lacks sufficient adaptive-noise/output-suppression diagnostics.
+- `/health` and `/runtime/readiness` disagree about the wake provider, while
+  Voice Control displays hard-coded provider names unrelated to runtime state.
+- Raw streaming Markdown and persisted display Markdown are both passed to
+  TTS. The actual native Chat capture also shows raw `**` markers and leaked
+  provider/tool wording.
+- There is no response-quality contract or task-based Claude/Codex routing in
+  the application. The benchmark shows the current CLI invocation context is
+  not a valid basis for choosing a provider.
+- Physical microphone wake reliability and A/B/C voice quality cannot be
+  certified headlessly. A user must perform the required 20/20 wake trial and
+  listen to all candidates before selection.
+
+**Exact dependencies required from other agents**:
+
+- Antigravity/frontend + Tauri: implement the explicit wake lifecycle and
+  timing telemetry; preserve same-utterance command tails; improve adaptive
+  audio handling/output suppression; default to a usable workstation window;
+  expose runtime-backed provider state; repair streaming Markdown rendering;
+  and separate display text from sanitized spoken text at every TTS entry.
+- Claude Code/backend: implement the response-quality contract/composer,
+  improve user-facing internal-detail sanitization, add task-based provider
+  routing with explicit diagnostics, and make readiness accurately reflect
+  the active native wake path without weakening deterministic trading facts.
+- Coordinator/integration owner: harden `scripts/start_tars.ps1` around
+  worktree env discovery, source/binary provenance, backend PID/port
+  ownership, runtime readiness, and native-window verification.
+- User/hardware: listen to the generated Kokoro candidates and run the 20/20
+  physical “Hey TARS” acceptance matrix after product-owner fixes land.
+
+**Next recommended action**: Product owners implement the enumerated blockers
+on their own branches, then run these tools plus the full certification suite.
+Do not merge this branch as part of the handoff.
+
+## Latest handoff — overnight agent and safety runtime
+
+**Branch**: `feature/overnight-agent-runtime`
+
+**Commit SHA**: `3582ff1805597cbb0e47a06d2f492264c9ff5050`
+
+**Work completed**:
+
+- Added a durable agent lifecycle runtime with explicit `ON_DEMAND`,
+  `SCHEDULED`, and `CONTINUOUS` modes, bounded iterations, lifetime cycle
+  limits, provider retries, provider/action/run timeouts, cooperative
+  cancellation, due-job scheduling, duplicate ID/dedupe-key protection, and
+  explicit interrupted-job recovery.
+- Added strict provider-neutral intelligence, orchestrator-decision,
+  skill-discovery, and memory-context contracts. Intelligence output is data
+  only; it has no execution, risk, confirmation, or verification authority.
+- Integrated every proposed skill call through the existing authoritative
+  `ActionRuntime`, including pause/resume around one-time confirmation.
+- Added `StrategyProvider`, `StrategyDefinition`, typed strategy signals, and a
+  read-only `QuantBrainBoundary` that emits no signals when the provider is
+  `NOT_CONFIGURED` or failed.
+- Added SQLite lifecycle state and append-only redacted audit records, startup
+  interruption detection, an explicit recovery transition, scheduler polling
+  for due bounded slices, and REST lifecycle endpoints.
+- Added adversarial coverage for direct-execution isolation, risk downgrade,
+  fabricated `VERIFIED`, unbounded continuous loops, missing strategy
+  providers, secret retention, malformed skill calls, provider failures,
+  duplicate jobs, timeout, cancellation races, ActionRuntime cancellation,
+  scheduling, and recovery.
+
+**Files changed**:
+
+- `apps/backend/agents/` — contracts, provider/skill discovery registries,
+  quant boundary, safety, durable store, and lifecycle runtime.
+- `apps/backend/app/routers/agents.py`, `app/main.py`, `app/deps.py` — REST,
+  lifespan, dependency, and scheduler integration.
+- `apps/backend/tests/test_agent_runtime.py` — targeted adversarial suite.
+- This handoff and `docs/coordination/overnight/codex.done.json` in the
+  completion-metadata commit.
+
+**Interfaces exposed**:
+
+- `POST /api/v1/agents`
+- `GET /api/v1/agents/{job_id}`
+- `GET /api/v1/agents/{job_id}/audit`
+- `POST /api/v1/agents/{job_id}/run`
+- `POST /api/v1/agents/{job_id}/cancel`
+- `POST /api/v1/agents/{job_id}/recover`
+- Python: `AgentRuntime`, `AgentStore`, `AgentDefinition`, `AgentJob`,
+  `RuntimeLimits`, `IntelligenceProvider`, `OrchestratorDecision`,
+  `SkillDiscoveryProvider`, `MemoryContext`, `StrategyProvider`,
+  `StrategyDefinition`, and `QuantBrainBoundary`.
+
+**Tests run**:
+
+- `python -m pytest tests/test_agent_runtime.py tests/test_action_runtime.py
+  tests/test_plan_runtime.py -q` — 64 passed.
+- Ruff on all changed backend/runtime/test code — passed.
+- MyPy on all 12 changed backend source files (`--follow-imports=skip`) —
+  passed with no issues.
+
+**Known limitations**:
+
+- No concrete intelligence or `quant_brain` strategy provider is enabled by
+  default; the runtime fails closed until an adapter is explicitly registered.
+- Continuous agents intentionally execute only scheduler-driven bounded slices;
+  there is no detached forever-loop.
+- Confirmation is completed through the existing Action API, then the agent is
+  explicitly resumed; the runtime never self-confirms.
+
+**Exact dependencies required from other agents**:
+
+- Intelligence-provider owners may register adapters implementing
+  `IntelligenceProvider`; adapters return typed decisions only.
+- Future `quant_brain` integration must implement read-only `StrategyProvider`
+  and preserve source/evidence identifiers.
+- UI owners may consume the REST lifecycle and existing ActionRuntime
+  confirmation endpoints; no backend dependency is required for correctness.
+
+**Next recommended action**: Integrate one intelligence adapter and the real
+read-only `quant_brain` adapter, then exercise an end-to-end scheduled slice
+through user confirmation without weakening runtime authority boundaries.
+
+## Previous handoff — Wave 2B control runtime
 
 **Branch**: `feature/wave2b-control-runtime`
 

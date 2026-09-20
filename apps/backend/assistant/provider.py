@@ -22,12 +22,47 @@ class AssistantRequest:
     # Prior turns for this conversation, oldest first, as
     # {"role": "user"|"assistant", "content": str} dicts.
     history: list[dict] = field(default_factory=list)
+    # Path to an image on disk for the provider to look at (e.g. a captured
+    # chart screenshot). None for ordinary text turns. A path rather than
+    # inline bytes because the only current image-capable adapter
+    # (ClaudeCodeProvider) drives a CLI subprocess that reads files itself
+    # via its own Read tool -- see its respond() for how this is used.
+    image_path: str | None = None
+
+
+@dataclass
+class ProviderDiagnostics:
+    provider_id: str
+    provider_executable: str | None = None
+    model: str | None = None
+    request_id: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    latency_ms: float | None = None
+    exit_code: int | None = None
+    fallback_used: bool = False
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "provider_id": self.provider_id,
+            "provider_executable": self.provider_executable,
+            "model": self.model,
+            "request_id": self.request_id,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "latency_ms": self.latency_ms,
+            "exit_code": self.exit_code,
+            "fallback_used": self.fallback_used,
+            "error": self.error,
+        }
 
 
 @dataclass
 class AssistantReply:
     text: str
     provider: str
+    diagnostics: ProviderDiagnostics | None = None
 
 
 class AssistantProvider(ABC):
@@ -36,3 +71,21 @@ class AssistantProvider(ABC):
     @abstractmethod
     async def respond(self, request: AssistantRequest) -> AssistantReply:
         """Raises AssistantProviderError on any failure to produce a reply."""
+
+
+def render_provider_prompt(request: AssistantRequest) -> str:
+    """Render bounded conversation context for stateless provider adapters."""
+
+    history = request.history[-8:]
+    if history and history[-1].get("role") == "user" and history[-1].get("content") == request.text:
+        history = history[:-1]
+    if not history:
+        return request.text
+    lines = ["Relevant conversation context:"]
+    for turn in history:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        content = str(turn.get("content", "")).strip()
+        if content:
+            lines.append(f"{role}: {content[:2000]}")
+    lines.extend(("", "Current user request:", request.text))
+    return "\n".join(lines)

@@ -73,6 +73,7 @@ def resolve_within_safe_roots(raw_path: str) -> Path:
 
 class FilesystemSkill(BaseSkill):
     name = "filesystem"
+    description = "List, search, and open files on the local filesystem."
     capabilities: tuple[str, ...] = ("list", "search", "open")
 
     def classify_risk(self, action: str, arguments: dict[str, Any]) -> RiskLevel:

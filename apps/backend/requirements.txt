@@ -27,6 +27,11 @@ pywin32==312
 comtypes==1.4.16
 uiautomation==2.0.29
 
+# Chart analysis -- converts a captured screenshot (BMP from Win32 GDI) to
+# PNG before handing it to Claude Code's Read tool, which reliably supports
+# PNG but not BMP. See assistant/chart_analysis.py.
+Pillow==11.2.1
+
 # Testing
 pytest==8.3.3
 pytest-asyncio==0.24.0

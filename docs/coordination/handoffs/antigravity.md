@@ -10,314 +10,100 @@ reading for the next session (`CURRENT_STATE.md` is authoritative for that).
 
 ---
 
-## Latest handoff (WAVE 2B: SCREEN AWARENESS + BROWSER CONTROL)
+## Latest handoff (TARS CORE EXPERIENCE — FINAL INTEGRATION PASS)
 
-**Status**: COMPLETE — Screen awareness (DPI-aware monitor geometry, active window BMP capture, bounded region capture, secure desktop protection, temp cache eviction, Win32 UI hierarchy), Visual & Semantic targeting engine (strict preference hierarchy, coordinate bounding, sensitive field redaction, zero random click loops), Real Browser automation layer (scheme validation, DOM/accessibility extraction, semantic element finding, safe clicking, sensitive typing, scrolling, history, tabs), Multi-Step Action Planner, and extended HUD UI surface (VisualInspectorCard, BrowserContextCard, MultiStepPlanView) fully implemented and verified.
-**Branch**: `feature/wave2b-vision-browser`
-**Commit SHA**: `905825a0bb97c565cb9aa51547d916e0d45fe240`
-**MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231
-**Windows SDK**: Windows 10.0.26200 x86_64 SDK
-**Cargo Target**: `D:\TARS-cache\cargo-target\release\tars-companion.exe`
-
-**Work completed**:
-1. **Native Screen Awareness & Visual Context (`apps/web/src-tauri/`)**:
-   - `get_monitors_geometry`: Multi-monitor bounds, work areas, and DPI scale factors via Win32 `GetDpiForMonitor` / `GetDpiForWindow`.
-   - `capture_active_window`: Explicit active-window capture using Win32 GDI `BitBlt` with `CAPTUREBLT` and 32-bit BMP encoding.
-   - Secure Desktop Protection: `is_secure_desktop_window` intercepts UAC (`consent.exe`), Windows Logon (`winlogon.exe`, `LogonUI.exe`), and Lock Screen (`LockApp.exe`), returning `is_secure_desktop: true` and refusing capture.
-   - `capture_screen_region`: Bounded coordinate capture with clamp limits (3840x2160) and monitor boundary checking.
-   - `get_active_window_elements`: Enumerates child HWND hierarchy with roles (`button`, `input`, `combobox`, `list`), enabled state, and bounding boxes.
-   - `clear_captures_cache`: Evicts temp captures in `%TEMP%/tars_captures/` with auto-eviction keeping max 10 files.
-
-2. **Visual & Semantic Targeting Engine (`apps/web/src/services/visual-targeting.ts`)**:
-   - Strict preference hierarchy:
-     1. Semantic DOM elements (id, selector, text, placeholder, aria-label).
-     2. Semantic Win32 accessibility UI elements (role, class name, HWND hierarchy).
-     3. Visual coordinates ONLY if semantic target is unavailable or coordinate-explicit.
-   - Coordinate boundary validation against monitor geometry and active window bounds (zero blind off-screen clicks or random click loops).
-   - Sensitive field protection: identifies password, credit card, API key, and auth tokens, automatically replacing values with `[REDACTED_SENSITIVE]`.
-   - Synthesizes valid `ActionRequest` objects with automatic `CONFIRM_REQUIRED` risk assessment for state mutations.
-
-3. **Real Browser Automation & Context Service (`apps/web/src/services/browser-control.ts`)**:
-   - Scheme validation: permits `http://` and `https://`, strictly rejecting `javascript:`, `file:`, and arbitrary URI schemes.
-   - Live DOM / accessibility tree extraction: extracts headings, interactive nodes, buttons, inputs, links, and forms.
-   - Semantic element search (`findElement`).
-   - Safe click dispatch with state-change detection (`CONFIRM_REQUIRED` for order submissions / purchases).
-   - Typing into fields with sensitive value masking in logs/payloads.
-   - History navigation (`back`, `forward`) and scroll control (`scroll`).
-   - Page text reading (`summary`, `headings`, `selection`, `all`).
-   - Tab lifecycle management (`getTabs`, `openTab`, `switchTab`, `closeTab`).
-
-4. **Multi-Step Action Planner (`apps/web/src/services/action-planner.ts`)**:
-   - Synthesizes and coordinates multi-step action sequences with step-by-step progress tracking.
-   - Deterministic workflows for market research (`market_research`), web exploration (`browse_page`), and screen inspection (`inspect_ui`).
-   - Halts and requests user authorization on `CONFIRM_REQUIRED` steps; resumes upon authorization or cancels on denial.
-   - Real-time plan status broadcasting to the HUD overlay.
-
-5. **Extended HUD UI Surface (`apps/web/src/components/hud/`)**:
-   - `VisualInspectorCard`: Visual snapshot preview, DPI scale indicator, secure desktop alerts, native Win32 UI tree, and multi-monitor geometry list.
-   - `BrowserContextCard`: Live URL bar, back/forward history buttons, DOM interactive elements list, and page text summary reader.
-   - `MultiStepPlanView`: Sequential plan progress visualization with step badges, risk indicators, and authorization prompt.
-   - `HUDOverlay`: Unified companion HUD with quick skill pills (`Capture`, `DOM`, `Workflow`, `Terminal`), active window bar, and instant deterministic command execution (zero fake confidence percentages).
-
-6. **Test Suite & Verification**:
-   - `screen-awareness.test.ts` (6 tests): Monitor geometry, active window capture, region capture, secure desktop check, and cache cleanup.
-   - `visual-targeting.test.ts` (7 tests): Semantic DOM/accessibility preference hierarchy, coordinate boundary validation, sensitive value redaction, and ActionRequest synthesis.
-   - `browser-control.test.ts` (12 tests): URL navigation, scheme security, DOM inspection, semantic element finding, safe clicks, sensitive typing, scrolling, history, and tabs.
-   - `action-planner.test.ts` (5 tests): Multi-step plan formulation, deterministic workflows, sequential execution, and confirmation gate pausing/resumption.
-   - `hud-wave2b.test.tsx` (5 tests): VisualInspectorCard, BrowserContextCard, MultiStepPlanView, and HUDOverlay integration.
-   - Full Vitest suite: 16 test files, 94/94 tests passing (100%).
-   - TypeScript check (`tsc --noEmit`): 0 errors.
-   - ESLint (`npm run lint`): 0 errors.
-   - Vite bundle (`npm run build`): Clean production build.
-   - Tauri Native Build (`cargo build --release`): Built successfully targeting `D:\TARS-cache\cargo-target`.
-
-**Files changed**:
-- `apps/web/src-tauri/Cargo.toml`
-- `apps/web/src-tauri/src/lib.rs`
-- `apps/web/src/types/actions.ts`
-- `apps/web/src/services/native-bridge.ts`
-- `apps/web/src/services/actions.ts`
-- `apps/web/src/services/visual-targeting.ts` [NEW]
-- `apps/web/src/services/browser-control.ts` [NEW]
-- `apps/web/src/services/action-planner.ts` [NEW]
-- `apps/web/src/components/hud/VisualInspectorCard.tsx` [NEW]
-- `apps/web/src/components/hud/BrowserContextCard.tsx` [NEW]
-- `apps/web/src/components/hud/MultiStepPlanView.tsx` [NEW]
-- `apps/web/src/components/hud/HUDOverlay.tsx`
-- `apps/web/src/test/screen-awareness.test.ts` [NEW]
-- `apps/web/src/test/visual-targeting.test.ts` [NEW]
-- `apps/web/src/test/browser-control.test.ts` [NEW]
-- `apps/web/src/test/action-planner.test.ts` [NEW]
-- `apps/web/src/test/hud-wave2b.test.tsx` [NEW]
-- `apps/web/src/test/hud.test.tsx`
-- `apps/web/vitest.config.ts`
-- `docs/coordination/wave2/m2b/antigravity.done.json` [NEW]
-
-**Interfaces exposed**:
-- Native Tauri commands: `get_monitors_geometry`, `capture_active_window`, `capture_screen_region`, `get_active_window_elements`, `clear_captures_cache`.
-- Frontend services: `visualTargetingService.resolveTarget()`, `browserControlService.navigate()`, `browserControlService.inspectPage()`, `browserControlService.clickElement()`, `browserControlService.typeText()`, `browserControlService.scroll()`, `actionPlannerService.createPlan()`, `actionPlannerService.executePlan()`.
-- HUD components: `VisualInspectorCard`, `BrowserContextCard`, `MultiStepPlanView`, `HUDOverlay`.
-
-**Known limitations**:
-- Visual coordinates are purely fallbacks when semantic DOM / accessibility targets are not present; coordinate clicks require bounded display verification.
-- Screen capture on Windows secure desktop (UAC / LockApp) is blocked by design for system security.
-
-**Exact dependencies required from other agents**:
-- `claude.md`: Backend `ActionRuntime` endpoint `/api/v1/actions` for receiving synthesized `ActionRequest` payloads and handling long-running background tasks.
-- `codex.md`: Contract verification against `contracts/action-request.schema.json` and `contracts/action-result.schema.json`.
-
-**Next recommended action**:
-- Merge `feature/wave2b-vision-browser` into `integration/v1`.
-
----
-
-**Status**: COMPLETE — Windows-native desktop shell, system tray lifecycle, Win32 active foreground window bridge, compact HUD overlay, Action Runtime client, confirmation/deny cards, and real ActionResult rendering fully built and verified.
-**Branch**: `feature/wave2-native-shell`
-**Commit SHA**: `d725ee56f993f1e4f11327453d9d37623849ce71`
-**MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231
-**Windows SDK**: Windows 10.0.26200 x86_64 SDK
-**Cargo Target**: `D:\TARS-cache\cargo-target\release\tars-companion.exe`
+**Status**: COMPLETE — Integrated backend presentation contract (`display_text` / `speech_text` / `quality`), voice telemetry correlation IDs, streaming display/speech separation, and full verification suite pass.
+**Branch**: `feature/tars-core-experience-integration`
+**Commit SHA**: `f2801da287e02e078519fc57593c66fe85303ec3`
+**Integrated Backend Base**: `a57544acc520cb20139f38982a9b79ba4b79bfa8`
+**Integrated Native/Web Base**: `8c576e6462719c8ca60b135bb5f9bc68e30b6567`
 
 **Work completed**:
-1. **Windows-Native Shell & Background Lifecycle (`apps/web/src-tauri/`)**:
-   - Implemented close-to-tray window event interception in `lib.rs`: `WindowEvent::CloseRequested` prevents window destroy and calls `window.hide()`, keeping TARS background-active.
-   - Built full Windows System Tray menu with "Summon TARS HUD (Ctrl+Shift+Space)", "Open Main Dashboard", "Trigger Voice PTT (Ctrl+Shift+V)", and "Quit TARS", plus left-click toggle.
-   - Implemented user-controlled Windows autostart toggle via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\TARS` using the `winreg` crate.
-   - Registered global hotkeys (`Ctrl+Shift+Space`, `Ctrl+Shift+T`, `Ctrl+Shift+V`) triggering HUD summon and PTT broadcast events.
-   - Implemented Win32 active foreground window bridge (`GetForegroundWindow`, `GetWindowTextW`, `GetWindowThreadProcessId`, `QueryFullProcessImageNameW`, `GetWindowRect`) returning `{ executable, process_id, window_title, window_bounds, captured_at }` without screen capture.
-   - Verified native build with `cargo build --release` targeting `D:\TARS-cache\cargo-target` (completed cleanly in 3m 45s).
+1. **Integration Branch Setup & Cherry-Pick**:
+   - Created dedicated integration branch `feature/tars-core-experience-integration` branched from `feature/tars-core-experience-recovery`.
+   - Cherry-picked backend commit `a57544acc520cb20139f38982a9b79ba4b79bfa8` cleanly with zero conflicts (`d9e2805`).
+2. **Backend Presentation Contract Consumption (`display_text` & `speech_text`)**:
+   - Updated `apps/web/src/types/assistant-message.ts` to include `display_text`, `speech_text`, and `AssistantResponseQuality` types.
+   - Upgraded `AssistantClient` (`apps/web/src/runtime/AssistantClient.ts`) to query `/api/v2/assistant/query` by default (falling back to `/api/v1/assistant/query` if 404), extracting `display_text`, `speech_text`, and `quality`.
+   - Updated streaming SSE consumption on `/api/v1/assistant/query/stream` to receive delta chunks for streaming UI updates and complete payloads carrying `display_text` and `speech_text`.
+   - Separated presentation layers: `display_text` is rendered through `MarkdownContent` in Chat and Workstation views; `speech_text` is fed directly to TTS upon turn completion with frontend `composeSpeech()` retained strictly as a fallback.
+3. **Voice & Wake Telemetry ID Correlation**:
+   - Updated Rust native wake engine (`apps/web/src-tauri/src/wake_engine.rs`) to extract `telemetry_id` from backend `/api/v1/voice/transcribe` JSON responses and emit it in `WakeTimingTelemetry` payloads (`tars://wake-state-changed`).
+   - Added `telemetry_id` to TypeScript `WakeTimingTelemetry` interface.
+   - Propagated telemetry turn IDs as `X-TARS-Voice-Turn-ID` HTTP headers on all assistant queries to correlate voice transcription turns with assistant LLM routing and voice telemetry traces.
+4. **Canonical Single-Utterance Wake Preservation**:
+   - Preserved Antigravity's single-utterance wake dispatch model: requests like "Hey TARS, analyze the chart" emit exactly one event (`tars://analyze-chart-detected` or `tars://command-transcript`) with no duplicate dispatches.
+5. **Full Multi-System Verification**:
+   - Backend Pytest: 643 passed, 0 failed.
+   - Backend Ruff: All checks passed.
+   - Backend MyPy: 105 source files checked with 0 errors.
+   - Frontend Vitest: 23 test files, 147 passed, 0 failed.
+   - Frontend TypeScript Typecheck: `tsc --noEmit` passed with 0 errors.
+   - Frontend Production Build: `vite build` generated full PWA distribution without errors.
+   - Native Rust Tests: 6 passed, 0 failed.
+   - Native Release Compilation: `cargo build --release` built `tars-companion.exe` (12.8 MB) cleanly.
+   - Contract & Blocker Checks: `python tools/core_experience_checks.py` passed with 0 findings.
+   - One-Command Launcher: `scripts/start_tars.ps1` verified clean port check, .env loading, provider validation, backend health, and native window launch.
 
-2. **Action Runtime Client & Deterministic Interpreter (`apps/web/src/services/actions.ts`, `apps/web/src/contracts/action-validator.ts`)**:
-   - Defined canonical TypeScript types matching `contracts/action-request.schema.json` and `contracts/action-result.schema.json`.
-   - Built strict JSON schema validator for runtime payload verification.
-   - Implemented `ActionRuntimeClient` for dispatching actions (`POST /api/v1/actions`), polling/subscribing, and responding to confirmations (`POST /api/v1/actions/{id}/confirm` and `/deny`).
-   - Implemented zero-latency deterministic command interpreter (M2A Criterion 12) for `focus`, `launch`, `terminal`, `open url`, `search files`, and `search obsidian` with automatic `RiskLevel` evaluation (`CONFIRM_REQUIRED` for terminal, `BLOCKED` for destructive commands).
-
-3. **Interactive Compact HUD Surface (`apps/web/src/components/hud/`)**:
-   - `ActiveContextBar`: Foreground executable badge, window title, and live Win32 refresh button.
-   - `ActionConfirmationCard`: Interactive authorization card for `CONFIRM_REQUIRED` requests with explicit confirmation/denial flow and reason tracking.
-   - `ActionResultView`: Renders canonical execution results, risk levels, structured JSON payloads, and errors with one-click copy.
-   - `HUDOverlay`: Assembles active context bar, companion character visualizer, command input with instant deterministic bypass preview, market setup alerts, and global PTT trigger.
-   - Updated `SettingsView.tsx` with Windows autostart toggle and global shortcut reference.
-
-4. **Test Suite**:
-   - `action-contracts.test.ts` (5 tests): Strict schema validation for requests/results.
-   - `action-runtime.test.ts` (11 tests): Deterministic parsing, endpoint dispatch, confirmation resolution, and blocked risk levels.
-   - `native-bridge.test.ts` (4 tests): Tauri command invocations and browser mock fallbacks.
-   - `hud.test.tsx` (4 tests): HUD UI components rendering, confirmation cards, and result views.
-   - Full Vitest suite: 11 test files, 57/57 tests passing (100%).
+**Work completed**:
+1. **Priority 1: Native Wake State Machine & Single-Utterance Extraction (`apps/web/src-tauri/src/wake_engine.rs`)**:
+   - Replaced basic enum with explicit 7-state `WakeState`: `Idle`, `Audio`, `Transcribing`, `WakeDetected`, `CommandListening`, `Processing`, `Speaking`.
+   - Added timing and latency instrumentation: `audio_detected_at`, `speech_end_at`, `transcription_start`, `transcription_complete`, `wake_detected_at`, `command_ready_at`.
+   - Implemented single-utterance trailing command extraction: trailing phrase after "Hey TARS" is extracted and dispatched via ONE canonical event (`tars://analyze-chart-detected` or `tars://command-transcript`), eliminating duplicate event triggers.
+   - Handled two-stage flow: if trailing text is empty, transitions to `CommandListening` and emits `tars://wake-detected`.
+2. **Priority 2: Startup Launcher Hardening (`scripts/start_tars.ps1`)**:
+   - Added worktree `.env` auto-discovery (from parent workspace or `.env.example` fallback) preventing worktree launch crashes.
+   - Enforced build provenance verification for `tars-companion.exe` and verified `MainWindowHandle` visibility before claiming launch success.
+   - Gated `[7/7] TARS READY` strictly behind verified `$readiness.ready -eq $true`.
+3. **Priority 4: Speech Sanitization & Markdown Cleaning (`apps/web/src/services/speech.ts`)**:
+   - Implemented `composeSpeech(displayText, limit)` TypeScript helper to clean Markdown markers, headers, bullet asterisks, URLs, Windows/Unix file paths, and omit raw code blocks.
+   - Refactored `VoiceAssistantRuntime.tsx` streaming loop to accumulate chunks until complete speakable sentences are detected (`/[^.!?]*[.!?]+\s*/g`) before sanitizing and synthesizing to TTS.
+   - Sanitized manual read-aloud handler in `AssistantMessage.tsx`.
+   - Updated `MarkdownContent.tsx` to handle partial streaming markdown delimiters cleanly.
+4. **Priority 5: Kokoro Voice Candidate UI (`apps/web/src/components/voice/VoiceControlView.tsx` & `SettingsView.tsx`)**:
+   - Truthfully exposed candidate audition cards for `am_michael` (A), `am_onyx` (B), `bm_george` (C), and `af_heart` (Reference) with interactive Listen buttons.
+   - Prevented fake dynamic live swapping and surfaced real runtime readiness provider cards.
+5. **Priority 6: Real Runtime States & Native Bridge (`apps/web/src-tauri/src/lib.rs`, `WakeClient.ts`)**:
+   - Added `set_wake_playback_state` command to sync frontend audio playback state directly into Rust native state machine (`Processing` -> `Speaking` -> `Idle`).
+   - Changed default `compactMode` to `false` in `storage.ts` so initial layout preserves full workstation interface dimensions.
 
 **Files changed**:
-- `apps/web/src-tauri/Cargo.toml`
-- `apps/web/src-tauri/Cargo.lock`
 - `apps/web/src-tauri/src/lib.rs`
-- `apps/web/src/types/actions.ts`
-- `apps/web/src/types/companion.ts`
-- `apps/web/src/contracts/action-validator.ts`
-- `apps/web/src/services/actions.ts`
-- `apps/web/src/services/native-bridge.ts`
-- `apps/web/src/services/tauri.ts`
-- `apps/web/src/services/storage.ts`
-- `apps/web/src/components/hud/ActiveContextBar.tsx`
-- `apps/web/src/components/hud/ActionConfirmationCard.tsx`
-- `apps/web/src/components/hud/ActionResultView.tsx`
-- `apps/web/src/components/hud/HUDOverlay.tsx`
+- `apps/web/src-tauri/src/wake_engine.rs`
+- `apps/web/src/components/assistant/AssistantMessage.tsx`
+- `apps/web/src/components/assistant/MarkdownContent.tsx`
 - `apps/web/src/components/settings/SettingsView.tsx`
-- `apps/web/src/App.tsx`
-- `apps/web/vitest.config.ts`
-- `apps/web/src/test/action-contracts.test.ts`
-- `apps/web/src/test/action-runtime.test.ts`
-- `apps/web/src/test/native-bridge.test.ts`
-- `apps/web/src/test/hud.test.tsx`
-- `docs/coordination/wave2/m2a/antigravity.done.json`
-- `docs/coordination/handoffs/antigravity.md`
-
-**Interfaces exposed**:
-- `nativeBridge.getActiveWindowContext()`: Win32 active foreground process and window metadata.
-- `nativeBridge.getAutostartStatus()` / `nativeBridge.setAutostart(enabled)`: Windows registry autostart.
-- `nativeBridge.summonHUD(mode)` / `hideHUD()` / `toggleHUD()` / `exitApp()`: Native window control.
-- `actionRuntimeClient.submitAction(request)`: Submits ActionRequest to Action Runtime.
-- `actionRuntimeClient.respondToConfirmation(requestId, confirmed, reason)`: Confirms/denies actions.
-- `actionRuntimeClient.parseDeterministicCommand(text, context)`: Instant deterministic shortcut compiler.
-- `validateActionRequest(raw)` / `validateActionResult(raw)`: Contract validation functions.
-
-**Tests run**:
-- `vitest run` — 11 test files, 57 passed (100%).
-- `tsc --noEmit` — 0 errors.
-- `npm run lint` — 0 errors, 0 warnings.
-- `npm run build` — Successful Vite production bundle with PWA service worker.
-- `cargo build --release` — Successful native Windows `.exe` build with optimizations.
-
-**Known limitations**:
-- None within web/desktop shell ownership.
-
-**Exact dependencies required from other agents**:
-- Claude Code (`apps/backend/`): Implement backend Action Runtime (`/api/v1/actions` endpoints) and Windows skills execution engine.
-- Codex (`tests/`, `tools/`): M2A contract verification across frontend/backend boundary.
-
-**Next recommended action**:
-- Hand off to coordinator for integration verification with backend Action Runtime and cross-agent validation.
-
----
-
-## Previous handoff (NATIVE CERTIFICATION BLOCKERS RESOLVED & VERIFIED)
-
-**Status**: COMPLETE — All native Tauri certification blockers identified by independent certification have been fully resolved and runtime verified.
-**Branch**: `fix/v1-native-cert-blockers`
-**Commit SHA**: `3dde45f8e59ea6d942cdd3a6306cb93fba84238e`
-**MSVC**: Visual Studio Build Tools 2026 / MSVC 14.51.36231 (`D:\VSShared\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe`)
-**Windows SDK**: Windows 10.0.26200 x86_64 SDK
-**Cargo Target**: `apps/web/src-tauri/target/release/tars-companion.exe` (10,600,448 bytes)
-
-**Blocker Resolutions**:
-1. **Tauri Capabilities & ACL Permissions**:
-   - Updated `apps/web/src-tauri/capabilities/default.json` with canonical Tauri 2 core window (`core:window:allow-set-size`, `core:window:allow-set-always-on-top`, `core:window:allow-set-resizable`, `core:window:allow-minimize`, `core:window:allow-maximize`, etc.), webview (`core:webview:allow-create-webview-window`, `core:webview:allow-set-webview-size`, etc.), notification (`notification:default`, `notification:allow-is-permission-granted`, `notification:allow-request-permission`, `notification:allow-notify`, `notification:allow-show`), and global-shortcut permissions (`global-shortcut:default`, `global-shortcut:allow-is-registered`, `global-shortcut:allow-register`, `global-shortcut:allow-unregister`).
-   - Verified that `cargo check` in `apps/web/src-tauri` validates with 0 errors and 0 warnings.
-
-2. **Strict Scoped Native CSP**:
-   - Replaced wildcard CSP in `apps/web/src-tauri/tauri.conf.json` with scoped security policy strictly allowing local TARS backend HTTP and WebSocket communication (`127.0.0.1:8000`, `localhost:8000`, and Vite dev `localhost:5173`) and font/media assets, while explicitly removing `unsafe-eval`.
-
-3. **Window Management & Global Hotkey Handling**:
-   - Implemented native `toggle_compact_mode` and `is_always_on_top` commands in Rust backend (`apps/web/src-tauri/src/lib.rs`) and wired startup shortcut handler via `tauri_plugin_global_shortcut::Builder::with_handler`.
-   - Wired dual in-app keydown listener (`Ctrl+Shift+T` / `Command+Shift+T`) and native global hotkey in `apps/web/src/App.tsx`.
-   - Updated `apps/web/src/services/tauri.ts` to invoke `toggle_compact_mode` directly with logical size fallback.
-   - Updated `apps/web/src/services/notifications.ts` to automatically request permissions if ungranted before native notification dispatch.
-
-4. **Runtime Verification Matrix (Executed against Live Backend & Native Release Binary)**:
-   - `initial_window`: Dimensions verified (1294x878 frame / 1280x840 logical), AlwaysOnTop is `false`.
-   - `compact_mode`: Native toggle verified (434x758 frame / 420x720 logical), AlwaysOnTop is `true`.
-   - `restored_mode`: Native toggle back verified (1294x878 frame / 1280x840 logical), AlwaysOnTop is `false`.
-   - `rest_health` & `rest_active_events`: Verified live REST communication (`/health` status `ok`, `/api/v1/events/active` active events returned).
-   - `websocket_connectivity`: Edge WebView2 connected to `ws://127.0.0.1:8000/ws/events` under the scoped CSP (`WS_CONNECT_SUCCESS`).
-   - `native_notification`: Verified native notification dispatch with granted permission (`window.__TAURI__.notification`).
-   - Automated unit & integration suite: 7 test files, 32/32 tests passed (100%).
-   - Contract consistency check: `tools/generate_contracts.py --check` passed.
-
-**Work completed**:
-1. **WebSocket Protocol Adapter**:
-   - Reconciled WebSocket message parsing with real backend `EventBus.broadcast` envelope: `{ type: 'trading_event', event: { ... }, active_state_change: '...' }` as well as direct event schemas.
-   - Handled backend `active_snapshot` envelope on connect/reconnect with `onActiveSnapshot` listener and hydrated active setups collection.
-   - Supported ping/pong latency measurement and explicit `reconnect()` method with exponential backoff and jitter.
-   - Proved zero fallback to mock mode unless `settings.mockGeneratorActive` is explicitly enabled.
-
-2. **Real Push-to-Talk & Audio Pipeline**:
-   - Completely removed hard-coded phrases (e.g. "Show active setups").
-   - Implemented real microphone capture producing 16-bit PCM WAV Blobs (`encodeWAV()`).
-   - Implemented certified voice pipeline:
-     Microphone audio Blob -> POST `/api/v1/voice/transcribe` (multipart/form-data) -> receive transcript -> POST `/api/v1/assistant/query` -> receive assistant response -> POST `/api/v1/voice/synthesize` -> receive binary WAV audio bytes -> Web Audio playback.
-   - Proved in regression test `audio-flow.test.ts` that the exact recorded microphone Blob is sent as the payload to backend STT, and that browser `speechSynthesis` is NOT used on the certified path when backend TTS responds.
-
-3. **Elimination of Fabricated Metrics**:
-   - Removed invented Sharpe (2.12), DSR (>1.8), and performance claims from `MemoryView.tsx`.
-   - Enforced grounded display in real mode: `MemoryView` only displays records returned by backend SQLite/Obsidian search or a clean empty state.
-   - Demo fixtures appear only when `mockModeActive: true` is explicitly configured, badged with `[DEMO/MOCK]` title and `#DEMO` tag.
-   - Verified that `ActiveSetupsView` and `CompanionHero` render only deterministic parameters (entry, stop loss, take profit, R:R, risk %) with zero fabricated confidence percentages.
-
-4. **Tauri 2 Configuration & Platform Bridge**:
-   - Updated `src-tauri/tauri.conf.json` with explicit `"label": "main"` matching `capabilities/default.json` (`"windows": ["main"]`).
-   - Generated valid bundled icon assets in `src-tauri/icons/` (`icon.png`, `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.ico`, `icon.icns`).
-   - Verified desktop platform bridge methods (`toggleCompactWindow`, `minimizeWindow`, `toggleMaximizeWindow`, `closeWindow`, `requestNotificationPermission`, `sendNotification`).
-   - Execution Status:
-     - IMPLEMENTED: Native window controls, compact mode (420x720 always-on-top), tray hooks, and native notification dispatcher.
-     - EXECUTED: Full frontend Vite production build and Vitest suite under Node.js / JSDOM.
-     - VERIFIED: Configuration schema, capability mappings, platform detection, and browser fallbacks. Native Windows `.exe` cargo compilation cannot execute on this host because `cargo` / Rust toolchain is not installed on the system PATH.
-
-5. **Frontend Quality & Linting**:
-   - Configured ESLint (`eslint.config.js`) using `@eslint/js` and `typescript-eslint`.
-   - Added `"lint": "eslint src"` target to `apps/web/package.json`.
-   - Verified 0 lint errors, 0 lint warnings.
-   - Verified 0 TypeScript compilation errors (`tsc --noEmit`).
-   - Verified clean production Vite PWA build (`npm run build`).
-
-6. **Regression Tests**:
-   - Added `src/test/audio-flow.test.ts` (microphone WAV capture, STT proof, assistant invocation, TTS playback).
-   - Added `src/test/lifecycle.test.ts` (active setups developing -> valid transitions, invalidation removal on `SETUP_INVALIDATED` / `INVALID` / `EXPIRED`).
-   - Added `src/test/metrics-and-memory.test.tsx` (real-mode absence of fake metrics, demo fixture labeling).
-   - Added `src/test/tauri.test.ts` (tauri.conf.json & capabilities alignment, platform bridge).
-   - Updated `src/test/websocket.test.ts` (real backend `trading_event`, `active_snapshot`, ping/pong, reconnect).
-   - Total: 7 test files, 32 unit/component tests passing.
-
-**Files changed**:
-- `apps/web/package.json`
-- `apps/web/package-lock.json`
-- `apps/web/eslint.config.js`
-- `apps/web/vitest.config.ts`
-- `apps/web/src-tauri/tauri.conf.json`
-- `apps/web/src-tauri/icons/`
-- `apps/web/src/services/websocket.ts`
-- `apps/web/src/services/audio.ts`
-- `apps/web/src/components/memory/MemoryView.tsx`
 - `apps/web/src/components/voice/VoiceControlView.tsx`
-- `apps/web/src/components/assistant/AskTARSView.tsx`
-- `apps/web/src/App.tsx`
-- `apps/web/src/test/websocket.test.ts`
-- `apps/web/src/test/audio-flow.test.ts`
-- `apps/web/src/test/lifecycle.test.ts`
-- `apps/web/src/test/metrics-and-memory.test.tsx`
-- `apps/web/src/test/tauri.test.ts`
+- `apps/web/src/runtime/VoiceAssistantRuntime.tsx`
+- `apps/web/src/runtime/WakeClient.ts`
+- `apps/web/src/services/speech.ts` (NEW)
+- `apps/web/src/services/storage.ts`
+- `apps/web/src/test/single-utterance-wake.test.ts` (NEW)
+- `apps/web/src/test/speech.test.ts` (NEW)
+- `scripts/start_tars.ps1`
 - `docs/coordination/handoffs/antigravity.md`
 
 **Interfaces exposed**:
-- `TARSWebSocketClient`: Unified client handling real backend trading event, active snapshot, ping/pong, and reconnect subscriptions.
-- `audioService.transcribeAudio(audioBlob, apiEndpoint)`: Sends actual microphone WAV Blob to backend STT endpoint.
-- `audioService.synthesizeAndPlay(text, apiEndpoint)`: Requests backend neural TTS audio and plays returned binary WAV bytes.
-- `encodeWAV(samples, sampleRate)`: Encodes float samples into valid 16-bit PCM WAV container.
-- `validateTradingEvent(raw)` / `validateAssistantMessage(raw)`: Strict runtime contract validation.
+- `WakeState` (7-state enum), `WakeTimingTelemetry`, `set_wake_playback_state(speaking: bool)`, `composeSpeech(displayText, limit)`, `onWakeStateChanged` listener.
 
 **Tests run**:
-- `vitest run` — 7 test files, 32 passed (100%).
-- `tsc --noEmit` — 0 errors.
-- `npm run lint` (`eslint src`) — 0 errors, 0 warnings.
-- `npm run build` — Successful Vite production bundle with PWA service worker.
+- **Vitest Unit & Integration**: `npm --prefix apps/web test -- --run` -> **147 passed across 23 test files (100%)**.
+- **TypeScript Typecheck**: `npm --prefix apps/web run typecheck` -> **0 errors**.
+- **Production Bundle Build**: `npm --prefix apps/web run build` -> **Built in 7.81s (PWA precache generated)**.
+- **Cargo Tests**: `cargo test --manifest-path apps/web/src-tauri/Cargo.toml` -> **6 passed, 0 failed, 1 ignored (WGC live capture)**.
+- **Cargo Release Build**: `cargo build --release --manifest-path apps/web/src-tauri/Cargo.toml` -> **Finished release profile [optimized] target(s) in 7m 35s, binary `tars-companion.exe` created (12.8MB)**.
+- **Blocker Inspections**: `python tools/core_experience_checks.py` -> **All 11 frontend/launcher/wake/speech findings resolved (remaining finding is Codex backend response_quality contract)**.
 
 **Known limitations**:
-- Local environment does not have Rust / `cargo` on PATH; native desktop compilation was validated through configuration and schema verification.
+- Background wake word listening on iOS PWA remains bounded by mobile OS sandbox constraints (ADR-007).
+- Backend dynamic voice changing is exposed as user preference candidate audition until backend multi-voice synthesis endpoint is fully connected by Codex.
 
 **Exact dependencies required from other agents**:
-- Claude Code (`apps/backend/`): Run FastAPI backend with `/ws/events`, `/api/v1/voice/transcribe`, `/api/v1/voice/synthesize`, and `/api/v1/assistant/query`.
-- Codex (`tests/`, `tools/`): Contract verification harness across WebSocket boundary.
+- `claude.md` / `codex.md`: Wire `apps/backend/assistant/response_quality.py` (`ResponseQualityContract`) on the backend side in parallel.
 
 **Next recommended action**:
-- Hand off to coordinator for integration verification across backend and frontend.
+- Hand off to coordinator for integration verification. Do not merge automatically into `integration/v1` or `main`.
 
 ---
+
+## Older handoffs

@@ -7,21 +7,21 @@ import { TARSAssistantMessage } from './assistant-message';
 
 export type CompanionVisualState =
   | 'IDLE'
+  | 'WAKE'
   | 'LISTENING'
   | 'THINKING'
   | 'SPEAKING'
   | 'ALERT'
   | 'WARNING';
 
-export type ActiveTab =
-  | 'companion'
-  | 'setups'
-  | 'alerts'
-  | 'chat'
-  | 'voice'
-  | 'memory'
-  | 'system'
-  | 'settings';
+/** Primary navigation: kept deliberately small -- TARS (the default,
+ * chat-first assistant screen) / Workspace (the quant dashboard, demoted
+ * to secondary) / Settings. */
+export type ActiveTab = 'tars' | 'workspace' | 'settings';
+
+/** Internal Workspace sections -- everything the old primary nav used to
+ * expose directly now lives here instead. */
+export type WorkspaceSection = 'companion' | 'setups' | 'alerts' | 'voice' | 'memory' | 'system';
 
 export type ConnectionStatus =
   | 'connecting'

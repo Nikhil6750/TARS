@@ -19,6 +19,17 @@ export interface AutostartInfo {
 }
 
 export class NativeBridgeService {
+  /** Marks the mounted production webview for source-matched launch verification. */
+  public async markFrontendReady(): Promise<void> {
+    if (!isTauri()) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('mark_frontend_ready');
+    } catch (err) {
+      console.warn('[NativeBridge] Failed to mark frontend ready:', err);
+    }
+  }
+
   /**
    * Retrieves the current foreground window context using Win32 API.
    * Grounded fallback provided when running in Web/PWA or mock mode.
@@ -117,6 +128,44 @@ export class NativeBridgeService {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.warn('[NativeBridge] Failed to capture active window:', errMsg);
+      return {
+        capture_id: `cap_err_${Date.now()}`,
+        captured_at: new Date().toISOString(),
+        source: 'active_window',
+        executable: 'unknown.exe',
+        window_title: 'Capture Failed',
+        bounds: { x: 0, y: 0, width: 0, height: 0 },
+        scale_factor: 1.0,
+        dpi: 96,
+        width: 0,
+        height: 0,
+        is_secure_desktop: false,
+        image_format: 'image/bmp',
+        image_data_base64: null,
+        temp_file_path: null,
+        error: errMsg,
+      };
+    }
+  }
+
+  /**
+   * Chart-analysis capture ("Analyze this chart"): hides TARS's own window
+   * first, since plain captureActiveWindow() grabs raw on-screen pixels and
+   * would otherwise capture TARS itself sitting over the chart it's meant
+   * to read. Restores TARS afterward. Use this instead of
+   * captureActiveWindow() for any "analyze what's on screen" flow.
+   */
+  public async captureChartWindow(includeImageData: boolean = true): Promise<ScreenCaptureResult> {
+    if (!isTauri()) {
+      return this.captureActiveWindow(includeImageData);
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<ScreenCaptureResult>('capture_chart_window', { includeImageData });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn('[NativeBridge] Failed to capture chart window:', errMsg);
       return {
         capture_id: `cap_err_${Date.now()}`,
         captured_at: new Date().toISOString(),
@@ -318,9 +367,34 @@ export class NativeBridgeService {
   }
 
   /**
-   * Summons the HUD window, restoring visibility, focusing, and bringing to top.
+   * Sets the native window size and always-on-top mode.
    */
-  public async summonHUD(mode?: 'compact' | 'full' | 'pill'): Promise<void> {
+  public async setWindowSize(width: number, height: number, alwaysOnTop?: boolean): Promise<void> {
+    if (!isTauri()) {
+      return;
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('set_window_size', { width, height, alwaysOnTop });
+    } catch {
+      try {
+        const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        await win.setSize(new LogicalSize(width, height));
+        if (typeof alwaysOnTop === 'boolean') {
+          await win.setAlwaysOnTop(alwaysOnTop);
+        }
+      } catch (innerErr) {
+        console.warn('[NativeBridge] Failed to set window size:', innerErr);
+      }
+    }
+  }
+
+  /**
+   * Summons the HUD or voice panel window, restoring visibility, focusing, and bringing to top.
+   */
+  public async summonHUD(mode?: 'voice' | 'compact' | 'hud' | 'full' | 'workstation' | 'pill'): Promise<void> {
     if (!isTauri()) {
       console.info(`[NativeBridge Mock] Summoned HUD in mode: ${mode || 'default'}`);
       return;
@@ -331,12 +405,22 @@ export class NativeBridgeService {
       await invoke('summon_hud', { mode });
     } catch {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
         const win = getCurrentWindow();
         await win.show();
         await win.unminimize();
+        if (mode === 'full' || mode === 'workstation') {
+          await win.setSize(new LogicalSize(1280, 840));
+          await win.setAlwaysOnTop(false);
+        } else if (mode === 'hud' || mode === 'compact') {
+          await win.setSize(new LogicalSize(440, 740));
+          await win.setAlwaysOnTop(true);
+        } else {
+          // voice mode
+          await win.setSize(new LogicalSize(420, 260));
+          await win.setAlwaysOnTop(true);
+        }
         await win.setFocus();
-        await win.setAlwaysOnTop(true);
       } catch (innerErr) {
         console.warn('[NativeBridge] Failed to summon HUD window:', innerErr);
       }
@@ -368,7 +452,7 @@ export class NativeBridgeService {
   /**
    * Toggles HUD visibility
    */
-  public async toggleHUD(mode?: 'compact' | 'full' | 'pill'): Promise<boolean> {
+  public async toggleHUD(mode?: 'voice' | 'compact' | 'hud' | 'full' | 'workstation' | 'pill'): Promise<boolean> {
     if (!isTauri()) {
       return true;
     }

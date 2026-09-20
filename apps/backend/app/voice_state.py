@@ -13,7 +13,7 @@ import asyncio
 import logging
 
 from app.config import Settings
-from voice.factory import build_stt_provider, build_tts_provider, build_wake_word_provider
+from voice.factory import build_stt_provider, build_tts_provider
 from voice.interfaces import SpeechToTextProvider, TextToSpeechProvider, WakeWordProvider
 from voice.providers.mock import (
     MockSpeechToTextProvider,
@@ -35,7 +35,10 @@ class VoiceProviders:
     async def load(self, settings: Settings) -> None:
         loop = asyncio.get_running_loop()
         try:
-            self.wake_word = await loop.run_in_executor(None, build_wake_word_provider, settings)
+            # Production wake recognition is transcript matching in the turn
+            # controller. Keep the provider interface dormant; do not load or
+            # claim an openWakeWord model that does not exist.
+            self.wake_word = MockWakeWordProvider()
         except Exception:
             logger.exception(
                 "failed to construct wake word provider '%s' — falling back to mock",
@@ -59,8 +62,7 @@ class VoiceProviders:
             )
 
         logger.info(
-            "voice providers ready: wake_word=%s stt=%s tts=%s",
-            self.wake_word.name,
+            "voice providers ready: wake=transcript_matcher stt=%s tts=%s",
             self.stt.name,
             self.tts.name,
         )

@@ -78,26 +78,32 @@ def _enum_visible_windows() -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
 
     def _callback(hwnd: int, _extra: None) -> None:
-        if not win32gui.IsWindowVisible(hwnd):
-            return
-        title = win32gui.GetWindowText(hwnd)
-        if not title.strip():
-            return
         try:
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = win32gui.GetWindowText(hwnd)
+            if not title.strip():
+                return
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                pid = None
+            exe_name = _process_executable_name(pid) if pid else ""
+            windows.append(
+                {
+                    "hwnd": hwnd,
+                    "executable": exe_name,
+                    "window_title": title,
+                    "process_id": pid,
+                }
+            )
         except Exception:
-            pid = None
-        exe_name = _process_executable_name(pid) if pid else ""
-        windows.append(
-            {
-                "hwnd": hwnd,
-                "executable": exe_name,
-                "window_title": title,
-                "process_id": pid,
-            }
-        )
+            return
 
-    win32gui.EnumWindows(_callback, None)
+    try:
+        win32gui.EnumWindows(_callback, None)
+    except Exception:
+        pass
     return windows
 
 
@@ -126,6 +132,7 @@ _DEFAULT_BRIDGE_TIMEOUT = 15.0
 
 class WindowsAppSkill(BaseSkill):
     name = "windows_app"
+    description = "Launch, focus, and enumerate Windows applications; capture the active window/monitors/UI elements."
     capabilities: tuple[str, ...] = (
         "launch",
         "focus",
@@ -137,6 +144,16 @@ class WindowsAppSkill(BaseSkill):
 
     def __init__(self, bridge: FrontendCommandBridge | None = None) -> None:
         self._bridge = bridge
+
+    async def health(self) -> dict[str, Any]:
+        # launch/focus/list_running work with no bridge (pure win32); only
+        # the capture actions need one -- report both facts rather than one
+        # blanket true/false.
+        return {
+            "available": True,
+            "capture_actions_available": self._bridge is not None,
+            "requires_for_capture": "FrontendCommandBridge",
+        }
 
     def classify_risk(self, action: str, arguments: dict[str, Any]) -> RiskLevel:
         if action == "launch":
@@ -288,7 +305,11 @@ class WindowsAppSkill(BaseSkill):
         try:
             if win32gui.IsIconic(hwnd):
                 win32gui.ShowWindow(hwnd, _SW_RESTORE)
-            win32gui.SetForegroundWindow(hwnd)
+            try:
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception:
+                win32gui.BringWindowToTop(hwnd)
+                win32gui.ShowWindow(hwnd, _SW_RESTORE)
         except Exception as exc:
             raise SkillExecutionError(f"failed to focus window for '{target}': {exc}") from exc
 

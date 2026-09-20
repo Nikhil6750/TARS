@@ -30,3 +30,26 @@ def test_cors_origins_wildcard():
 def test_cors_origins_comma_separated_list():
     settings = _settings(cors_allow_origins="http://localhost:5173, http://100.64.0.1:5173")
     assert settings.cors_origins == ["http://localhost:5173", "http://100.64.0.1:5173"]
+
+
+def test_backend_reload_defaults_false_even_in_development():
+    """Regression test: reload must NOT be implicitly driven by tars_env.
+    Uvicorn's --reload spawns requests in a separate Windows child worker
+    that can't run asyncio.create_subprocess_exec, breaking ClaudeCodeProvider
+    entirely -- tars_env=="development" (the normal launcher's default)
+    previously turned reload on implicitly and broke every Claude call."""
+    settings = _settings(tars_env="development")
+    assert settings.tars_backend_reload is False
+
+
+def test_backend_reload_true_requires_explicit_opt_in():
+    settings = _settings(tars_backend_reload=True)
+    assert settings.tars_backend_reload is True
+
+
+def test_backend_reload_env_var_is_read_independently_of_tars_env(monkeypatch):
+    monkeypatch.setenv("TARS_ENV", "development")
+    monkeypatch.setenv("TARS_BACKEND_RELOAD", "true")
+    settings = Settings(_env_file=None)
+    assert settings.tars_env == "development"
+    assert settings.tars_backend_reload is True

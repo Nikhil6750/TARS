@@ -24,6 +24,15 @@ class Settings(BaseSettings):
 
     # ---- General ----
     tars_env: str = "development"
+    # Explicit, separate from tars_env: uvicorn's --reload (WatchFiles-based
+    # file watcher) spawns requests in a distinct child worker process, and
+    # on Windows that child cannot successfully run
+    # asyncio.create_subprocess_exec -- every ClaudeCodeProvider call
+    # (chat and chart analysis alike) fails there. tars_env=="development"
+    # driving reload implicitly meant the normal launcher (which always
+    # runs with the default .env, i.e. development) silently hit this.
+    # Reload is now opt-in only, for manual backend-only development.
+    tars_backend_reload: bool = False
     # Explicit override for the bind address. Leave unset (None) to get the
     # secure-by-default behavior driven by `bind_lan` below — never publicly
     # exposed by default, per AGENTS.md.
@@ -46,6 +55,9 @@ class Settings(BaseSettings):
     # ---- Wake word ----
     wake_word_provider: str = "mock"
     wake_word_phrase: str = "TARS"
+    wake_word_aliases: str = "hey tars,hey tarz,hey stars,tars,jarvis,hey jarvis"
+    wake_acknowledgement: str = "Yeah?"
+    wake_command_timeout_seconds: float = 7.0
     wake_word_model_path: str | None = None
     wake_word_threshold: float = 0.5
 
@@ -78,6 +90,13 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-5"
     claude_code_command: str = "claude"
     claude_code_timeout_seconds: float = 60.0
+    codex_command: str = "codex"
+    codex_timeout_seconds: float = 60.0
+    gemini_command: str = "gemini"
+    gemini_timeout_seconds: float = 60.0
+    # Chart analysis reads an image (Claude's own Read tool) on top of the
+    # ordinary text turn, so it gets a longer allowance than chat replies.
+    chart_analysis_timeout_seconds: float = 120.0
 
     # ---- Memory ----
     obsidian_vault_path: str = "./vault"
@@ -86,6 +105,14 @@ class Settings(BaseSettings):
 
     # ---- Scheduling ----
     tars_timezone: str = "UTC"
+
+    # ---- Agent framework ----
+    # SetupWatchAgent is a read-only, deterministic-state watcher (never
+    # generates trade signals -- see agents/setup_watch_agent.py) that is
+    # safe to run continuously by default; disable it if a quieter dev
+    # environment is preferred.
+    setup_watch_agent_enabled: bool = True
+    setup_watch_agent_interval_seconds: float = 30.0
 
     # ---- Connectivity ----
     # Tailscale Serve is the preferred private path to reach this backend
@@ -140,6 +167,12 @@ class Settings(BaseSettings):
         if raw == "*":
             return ["*"]
         return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+    @property
+    def wake_alias_list(self) -> list[str]:
+        aliases = [alias.strip() for alias in self.wake_word_aliases.split(",") if alias.strip()]
+        primary = f"hey {self.wake_word_phrase.strip()}".strip()
+        return list(dict.fromkeys((primary, *aliases)))
 
 
 @lru_cache

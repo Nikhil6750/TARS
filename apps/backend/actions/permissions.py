@@ -52,6 +52,18 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         "read": RiskLevel.READ_ONLY,
         "read_note": RiskLevel.READ_ONLY,
     },
+    "skills": {
+        "search_skills": RiskLevel.READ_ONLY,
+        "inspect_skill": RiskLevel.READ_ONLY,
+        "list_installed": RiskLevel.READ_ONLY,
+        "use_skill": RiskLevel.READ_ONLY,
+        # Never silently install/update/remove a skill bundle -- explicit
+        # user confirmation required every time, official/trusted source
+        # or not (see skills/skill_registry_skill.py's module docstring).
+        "install_skill": RiskLevel.CONFIRM_REQUIRED,
+        "uninstall_skill": RiskLevel.CONFIRM_REQUIRED,
+        "update_skill": RiskLevel.CONFIRM_REQUIRED,
+    },
     "desktop_control": {
         "inspect_current_window": RiskLevel.READ_ONLY,
         "list_controls": RiskLevel.READ_ONLY,

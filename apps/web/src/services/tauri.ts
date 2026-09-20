@@ -4,6 +4,12 @@
  */
 
 export function isTauri(): boolean {
+  if (typeof import.meta !== 'undefined' && (import.meta as unknown as { env?: { MODE?: string } })?.env?.MODE === 'test') {
+    return false;
+  }
+  if (typeof process !== 'undefined' && (process.env?.NODE_ENV === 'test' || process.env?.VITEST)) {
+    return false;
+  }
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 

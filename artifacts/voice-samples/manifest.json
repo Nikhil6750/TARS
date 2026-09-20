@@ -1,0 +1,38 @@
+{
+  "lines": [
+    "Good morning. I'm ready. What are we working on today?",
+    "I've checked the chart. Price is approaching the previous high, but I wouldn't call this a valid trade yet."
+  ],
+  "speed": 1.0,
+  "subjective_listening_required": true,
+  "note": "Latency/duration are measured; naturalness, warmth, clarity, authority, and conversational quality require user listening.",
+  "candidates": [
+    {
+      "label": "voice_A",
+      "voice": "am_michael",
+      "file": "voice_A.wav",
+      "sample_rate": 24000,
+      "generation_seconds": 3.984,
+      "audio_seconds": 10.057,
+      "real_time_factor": 0.396
+    },
+    {
+      "label": "voice_B",
+      "voice": "am_onyx",
+      "file": "voice_B.wav",
+      "sample_rate": 24000,
+      "generation_seconds": 3.36,
+      "audio_seconds": 9.459,
+      "real_time_factor": 0.355
+    },
+    {
+      "label": "voice_C",
+      "voice": "bm_george",
+      "file": "voice_C.wav",
+      "sample_rate": 24000,
+      "generation_seconds": 3.731,
+      "audio_seconds": 9.907,
+      "real_time_factor": 0.377
+    }
+  ]
+}

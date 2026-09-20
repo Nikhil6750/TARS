@@ -17,6 +17,8 @@ from pipecat.services.tts_service import TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.time import time_now_iso8601
 
+from app.voice_telemetry import VoiceTurnRecorder
+from assistant.response_quality import prepare_speech_text, public_error_message
 from voice.audio_utils import wav_to_pcm16
 from voice.errors import VoiceProviderError
 from voice.interfaces import SpeechToTextProvider, TextToSpeechProvider
@@ -30,9 +32,16 @@ class ProviderBridgeSTTService(SegmentedSTTService):
     entirely by `SegmentedSTTService` — this class only implements
     `run_stt`."""
 
-    def __init__(self, provider: SpeechToTextProvider, **kwargs):
+    def __init__(
+        self,
+        provider: SpeechToTextProvider,
+        *,
+        telemetry: VoiceTurnRecorder | None = None,
+        **kwargs,
+    ):
         super().__init__(sample_rate=provider.sample_rate, **kwargs)
         self._provider = provider
+        self._telemetry = telemetry
 
     @property
     def wants_wav_segments(self) -> bool:
@@ -50,13 +59,21 @@ class ProviderBridgeSTTService(SegmentedSTTService):
     async def run_stt(  # type: ignore[override]
         self, audio: bytes
     ) -> AsyncGenerator[Frame | None, None]:
+        if self._telemetry is not None:
+            await self._telemetry.mark("stt_started")
         try:
             result = await self._provider.transcribe(audio)
         except VoiceProviderError as exc:
             logger.error("STT provider failed: %s", exc)
-            yield ErrorFrame(error=str(exc))
+            if self._telemetry is not None:
+                await self._telemetry.fail("stt")
+            yield ErrorFrame(error=public_error_message("stt"))
             return
+        if self._telemetry is not None:
+            await self._telemetry.mark("stt_completed")
         if result.text:
+            if self._telemetry is not None:
+                await self._telemetry.mark("command_available")
             try:
                 language = Language(result.language) if result.language else None
             except ValueError:
@@ -75,27 +92,43 @@ class ProviderBridgeTTSService(TTSService):
     this yields exactly one audio frame per turn rather than incremental
     chunks."""
 
-    def __init__(self, provider: TextToSpeechProvider, sample_rate: int, **kwargs):
+    def __init__(
+        self,
+        provider: TextToSpeechProvider,
+        sample_rate: int,
+        *,
+        telemetry: VoiceTurnRecorder | None = None,
+        **kwargs,
+    ):
         super().__init__(
             sample_rate=sample_rate, push_start_frame=True, push_stop_frames=True, **kwargs
         )
         self._provider = provider
+        self._telemetry = telemetry
 
     # See run_stt's comment above — same mypy false positive on abstract
     # async-generator method overrides.
     async def run_tts(  # type: ignore[override]
         self, text: str, context_id: str
     ) -> AsyncGenerator[Frame | None, None]:
+        speech_text = prepare_speech_text(text)
+        if self._telemetry is not None:
+            await self._telemetry.mark("tts_synthesis_started")
         try:
             await self.start_ttfb_metrics()
-            result = await self._provider.synthesize(text)
+            result = await self._provider.synthesize(speech_text)
             pcm, sample_rate = wav_to_pcm16(result.audio)
         except VoiceProviderError as exc:
             logger.error("TTS provider failed: %s", exc)
-            yield ErrorFrame(error=str(exc))
+            if self._telemetry is not None:
+                await self._telemetry.fail("tts")
+            yield ErrorFrame(error=public_error_message("tts"))
             return
         finally:
             await self.stop_ttfb_metrics()
+
+        if self._telemetry is not None:
+            await self._telemetry.mark("tts_ready")
 
         yield TTSAudioRawFrame(
             audio=pcm, sample_rate=sample_rate, num_channels=1, context_id=context_id

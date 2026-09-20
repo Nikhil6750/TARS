@@ -12,7 +12,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 
-def test_retrieved_source_id_survives_actual_assistant_grounding_chain(
+def test_normal_fast_path_skips_memory_lookup_while_memory_remains_searchable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source_id = "Research/Provenance.md"
@@ -58,7 +58,7 @@ def test_retrieved_source_id_survives_actual_assistant_grounding_chain(
             while not api.get("/health").is_success:
                 assert time.monotonic() < deadline
                 threading.Event().wait(0.01)
-            app.state.assistant_provider = provider
+            app.state.turn_controller._provider = provider
             response = api.post(
                 "/api/v1/assistant/query",
                 json={
@@ -67,10 +67,12 @@ def test_retrieved_source_id_survives_actual_assistant_grounding_chain(
                 },
             )
             response.raise_for_status()
+            search = api.get("/api/v1/memory/search", params={"q": "AURORA_SOURCE_ANCHOR"})
+            search.raise_for_status()
 
         assert len(provider.requests) == 1
         context = provider.requests[0].system_context
-        assert '"source": "vault"' in context
-        assert f'"source_id": "{source_id}"' in context
+        assert source_id not in context
+        assert any(item["source_id"] == source_id for item in search.json())
     finally:
         get_settings.cache_clear()

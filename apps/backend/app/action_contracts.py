@@ -188,6 +188,7 @@ class Skill(Protocol):
 
     name: str
     capabilities: tuple[str, ...]
+    description: str
 
     def classify_risk(self, action: str, arguments: dict[str, Any]) -> RiskLevel: ...
 
@@ -195,12 +196,25 @@ class Skill(Protocol):
 
     async def execute(self, request: ActionRequest) -> ActionResult: ...
 
+    async def health(self) -> dict[str, Any]: ...
+
 
 class BaseSkill(ABC):
-    """Convenience base class implementing the Skill interface."""
+    """Convenience base class implementing the Skill interface.
+
+    `description`/`health()` complete the "every skill exposes name,
+    description, schema, risk, availability, health" contract from the
+    TARS core spec's Unified Skill system section. `name`/`capabilities`
+    already existed (used by the registry/action runtime for dispatch);
+    `classify_risk` already serves as the per-action "risk" the runtime
+    consults. `description` and `health()` default to something honest and
+    harmless (empty description, "available") so every existing skill stays
+    valid without changes -- concrete skills override either when they have
+    something more specific to say."""
 
     name: str
     capabilities: tuple[str, ...] = ()
+    description: str = ""
 
     @abstractmethod
     def classify_risk(self, action: str, arguments: dict[str, Any]) -> RiskLevel:
@@ -217,6 +231,16 @@ class BaseSkill(ABC):
     async def execute(self, request: ActionRequest) -> ActionResult:
         """Perform the action and return a real ActionResult. Never return
         status=SUCCEEDED without having actually performed the action."""
+
+    async def health(self) -> dict[str, Any]:
+        """Best-effort, side-effect-free availability report -- e.g. "is my
+        required dependency actually wired in", never a live probe that
+        performs an action. Default: unconditionally available, appropriate
+        for skills with no optional live dependency (filesystem, terminal).
+        Skills wrapping an optional dependency (a FrontendCommandBridge, a
+        MemoryService, ...) should override this to report per-dependency
+        availability -- see skills/trading.py's override for the pattern."""
+        return {"available": True}
 
     def _result(
         self,

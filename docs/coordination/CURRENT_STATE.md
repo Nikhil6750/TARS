@@ -6,6 +6,27 @@ shared/read-only, see [AGENTS.md](../../AGENTS.md)).
 
 ## Stage
 
+**OVERNIGHT TARS INTEGRATION (COMPLETE).**
+Three parallel overnight streams -- `feature/overnight-tars-core` (TARS
+Orchestrator, Trading Intelligence foundation, bounded Agent framework,
+memory/performance work), `feature/overnight-voice-native` (voice-first
+floating panel, local VAD/wake pipeline, native window handling), and
+`feature/overnight-agent-runtime` (a durable, provider-neutral LLM-decision-
+loop job runtime) -- merged into `feature/overnight-integration` via three
+explicit `--no-ff` merges, preserving full unsquashed history. Pushed to
+`origin/feature/overnight-integration`. Not yet merged into `integration/v1`
+or `main`.
+
+The tars-core and agent-runtime streams both independently built an
+"agents" concept at `apps/backend/agents/` with real collisions (files,
+routes, an app.state slot name, a test filename). Resolved by renaming
+agent-runtime's package to `apps/backend/agent_runtime/` (router at
+`/api/v1/agent-runtime`, `app.state.agent_job_runtime`) since the two are
+genuinely different systems, not duplicates -- see
+`docs/coordination/overnight/claude.done.json` for the full reconciliation
+detail and final validation results (backend: 403 pytest passed, ruff/mypy
+clean; frontend: 118 vitest passed, TypeScript build clean).
+
 **WAVE 2A (M2A) RELEASE INTEGRATION (COMPLETE).**
 Certified Wave 2A candidate `bbfd4903af5edb59b453baf9f844de73aad78d09`
 (`feature/wave2-m2a-integration` — the merged and integration-fixed

@@ -29,10 +29,12 @@ describe('Tauri 2 Configuration & Service Compatibility', () => {
     expect(tauriConfig.app.windows.length).toBeGreaterThan(0);
     const mainWindow = tauriConfig.app.windows[0];
     expect(mainWindow.label).toBe('main');
-    expect(mainWindow.width).toBe(1280);
-    expect(mainWindow.height).toBe(840);
-    expect(mainWindow.minWidth).toBe(380);
-    expect(mainWindow.minHeight).toBe(480);
+    // Native desktop assistant window configuration
+    expect(mainWindow.width).toBe(1100);
+    expect(mainWindow.height).toBe(780);
+    expect(mainWindow.minWidth).toBe(480);
+    expect(mainWindow.minHeight).toBe(520);
+    expect(mainWindow.visible).toBe(true);
 
     // Capabilities
     expect(defaultCap.windows).toContain('main');

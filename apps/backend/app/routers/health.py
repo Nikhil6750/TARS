@@ -31,5 +31,7 @@ async def health(
         assistant_provider=settings.assistant_provider,
         stt_provider=settings.stt_provider,
         tts_provider=settings.tts_provider,
-        wake_word_provider=settings.wake_word_provider,
+        # Production wake recognition is transcript matching owned by the
+        # turn controller. The configured wake adapter remains dormant.
+        wake_word_provider="transcript_matcher",
     )

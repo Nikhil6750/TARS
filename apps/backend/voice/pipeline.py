@@ -25,10 +25,12 @@ from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPI
 from pipecat.workers.runner import WorkerRunner
 
 from actions.runtime import ActionRuntime
+from app.voice_telemetry import VoiceTraceStore, VoiceTurnRecorder
 from assistant.router import AssistantRouter
 from voice.interfaces import SpeechToTextProvider, TextToSpeechProvider
 from voice.pipecat_bridge import AssistantBridgeProcessor
 from voice.pipecat_services import ProviderBridgeSTTService, ProviderBridgeTTSService
+from voice.telemetry import VoiceAudioTelemetryProcessor
 
 logger = logging.getLogger("tars.voice.pipeline")
 
@@ -42,6 +44,7 @@ def build_voice_pipeline(
     assistant_router: AssistantRouter,
     conversation_id: str,
     action_runtime: ActionRuntime | None = None,
+    voice_trace_store: VoiceTraceStore | None = None,
 ) -> PipelineWorker:
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
@@ -55,24 +58,30 @@ def build_voice_pipeline(
     )
 
     vad = VADProcessor(vad_analyzer=SileroVADAnalyzer())
-    stt = ProviderBridgeSTTService(provider=stt_provider)
+    telemetry = (
+        VoiceTurnRecorder(voice_trace_store, conversation_id)
+        if voice_trace_store is not None
+        else None
+    )
+    audio_telemetry = VoiceAudioTelemetryProcessor(telemetry) if telemetry is not None else None
+    stt = ProviderBridgeSTTService(provider=stt_provider, telemetry=telemetry)
     bridge = AssistantBridgeProcessor(
         assistant_router=assistant_router,
         conversation_id=conversation_id,
         action_runtime=action_runtime,
+        telemetry=telemetry,
     )
-    tts = ProviderBridgeTTSService(provider=tts_provider, sample_rate=TTS_OUTPUT_SAMPLE_RATE)
+    tts = ProviderBridgeTTSService(
+        provider=tts_provider,
+        sample_rate=TTS_OUTPUT_SAMPLE_RATE,
+        telemetry=telemetry,
+    )
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            vad,
-            stt,
-            bridge,
-            tts,
-            transport.output(),
-        ]
-    )
+    processors = [transport.input(), vad]
+    if audio_telemetry is not None:
+        processors.append(audio_telemetry)
+    processors.extend((stt, bridge, tts, transport.output()))
+    pipeline = Pipeline(processors)
 
     return PipelineWorker(pipeline, params=PipelineParams(), name=f"tars-voice-{conversation_id}")
 
@@ -84,13 +93,20 @@ async def run_voice_session(
     assistant_router: AssistantRouter,
     conversation_id: str,
     action_runtime: ActionRuntime | None = None,
+    voice_trace_store: VoiceTraceStore | None = None,
 ) -> None:
     """Runs one voice session to completion (until the client disconnects or
     the pipeline ends). Intended to be awaited from inside the FastAPI
     WebSocket route handler, after `websocket.accept()`-equivalent setup —
     `FastAPIWebsocketTransport` manages the accept/close handshake itself."""
     worker = build_voice_pipeline(
-        websocket, stt_provider, tts_provider, assistant_router, conversation_id, action_runtime
+        websocket,
+        stt_provider,
+        tts_provider,
+        assistant_router,
+        conversation_id,
+        action_runtime,
+        voice_trace_store,
     )
     runner = WorkerRunner()
     await runner.add_workers(worker)
