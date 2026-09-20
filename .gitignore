@@ -26,6 +26,9 @@ target/
 src-tauri/gen/
 apps/web/src-tauri/gen/
 
+# Temporary physical-audio root-cause captures (TARS_VOICE_DEBUG_CAPTURE=1)
+artifacts/voice-debug/
+
 # Local model weights / voice model artifacts (faster-whisper, Fish Speech, Kokoro, openWakeWord)
 *.onnx
 *.gguf

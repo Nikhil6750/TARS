@@ -5,6 +5,8 @@ import { UserMessage } from './UserMessage';
 import { AssistantMessage } from './AssistantMessage';
 import { EmptyState } from './EmptyState';
 import { Composer } from './Composer';
+import { VoiceStatusPill } from './VoiceStatusPill';
+import { ManualListenButton } from './ManualListenButton';
 
 interface ConversationViewProps {
   messages: TARSAssistantMessage[];
@@ -13,6 +15,9 @@ interface ConversationViewProps {
   companionState: CompanionVisualState;
   isListening: boolean;
   onTogglePushToTalk: () => void;
+  manualListeningEnabled: boolean;
+  manualListeningBusy?: boolean;
+  onToggleManualListening: () => void;
   onSendMessage: (text: string, inputMode?: 'text' | 'voice') => void;
   onOpenWorkspace: () => void;
   onSpeak?: (text: string) => void;
@@ -25,6 +30,9 @@ export const ConversationView: React.FC<ConversationViewProps> = ({
   companionState,
   isListening,
   onTogglePushToTalk,
+  manualListeningEnabled,
+  manualListeningBusy,
+  onToggleManualListening,
   onSendMessage,
   onOpenWorkspace,
   onSpeak,
@@ -45,6 +53,22 @@ export const ConversationView: React.FC<ConversationViewProps> = ({
 
   return (
     <div className="w-full h-full flex flex-col overflow-hidden relative bg-white">
+      {/* Minimal voice status pill, sourced from real backend Gemini state
+          (see App.tsx's gemini-status poll) -- visible on this screen
+          without opening any other panel. */}
+      <VoiceStatusPill state={companionState} />
+
+      {/* Manual listening toggle -- the ONE button that turns TARS's
+          native mic (GeminiLiveLoop) on/off. Directly under the status
+          pill, always visible on this screen, never in HUDOverlay. */}
+      <div className="absolute top-11 right-4 z-30">
+        <ManualListenButton
+          enabled={manualListeningEnabled}
+          busy={manualListeningBusy}
+          onToggle={onToggleManualListening}
+        />
+      </div>
+
       {/* Scrollable Conversation Center Area */}
       <div
         ref={scrollContainerRef}

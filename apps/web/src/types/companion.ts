@@ -8,9 +8,12 @@ import { TARSAssistantMessage } from './assistant-message';
 export type CompanionVisualState =
   | 'IDLE'
   | 'WAKE'
+  | 'VOICE_OFF'
   | 'LISTENING'
+  | 'HEARING'
   | 'THINKING'
   | 'SPEAKING'
+  | 'DISCONNECTED'
   | 'ALERT'
   | 'WARNING';
 

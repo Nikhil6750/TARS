@@ -1,6 +1,7 @@
 """Capability-, task-, health-, and latency-aware assistant provider routing."""
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from dataclasses import dataclass
@@ -59,6 +60,7 @@ CAPABILITIES: dict[str, frozenset[ProviderTaskType]] = {
     "claude_code": frozenset(ProviderTaskType),
     "codex": frozenset(ProviderTaskType),
     "gemini": frozenset(ProviderTaskType),
+    "gemini_fast": frozenset(ProviderTaskType),
     "anthropic_api": frozenset(ProviderTaskType),
     "ollama": frozenset(
         {
@@ -71,15 +73,138 @@ CAPABILITIES: dict[str, frozenset[ProviderTaskType]] = {
     "mock": frozenset({ProviderTaskType.SIMPLE, ProviderTaskType.FOLLOW_UP, ProviderTaskType.GENERAL}),
 }
 
+# gemini_fast (direct Gemini Flash text API, no CLI subprocess) is ranked
+# first for ordinary conversation -- SIMPLE/FOLLOW_UP/GENERAL/REASONING --
+# because Claude Code/Codex CLI startup + turn latency (~4s/~16s, measured)
+# is too slow for a voice assistant that should feel immediate.
+# REASONING is included deliberately, not an oversight: it's the bucket an
+# ordinary "explain X"/"compare X"/"what's the tradeoff" question lands in
+# (see _REASONING above) -- physically confirmed "Explain Docker
+# containers" and "Explain that more simply" (both explicit examples of
+# ordinary conversation this pass targets) classify as REASONING, not
+# SIMPLE. It is deliberately NOT preferred for CODING/DEBUGGING/
+# TRADING_EPISTEMICS: those are genuinely specialized tasks (writing code,
+# debugging, trading epistemics) and stay on Claude/Codex as COMPLEX_TASK
+# providers, unchanged. classify_provider_task() checks DEBUGGING/CODING/
+# TRADING_EPISTEMICS before REASONING, so a request matching one of those
+# still gets classified correctly even if it also contains a REASONING
+# keyword like "explain" or "analyze".
 TASK_PREFERENCES: dict[ProviderTaskType, tuple[str, ...]] = {
-    ProviderTaskType.SIMPLE: ("ollama", "claude_code", "codex", "gemini", "anthropic_api", "mock"),
-    ProviderTaskType.REASONING: ("claude_code", "codex", "anthropic_api", "gemini", "ollama"),
+    ProviderTaskType.SIMPLE: ("gemini_fast", "ollama", "claude_code", "codex", "gemini", "anthropic_api", "mock"),
+    ProviderTaskType.REASONING: ("gemini_fast", "claude_code", "codex", "anthropic_api", "gemini", "ollama"),
     ProviderTaskType.CODING: ("codex", "claude_code", "gemini", "anthropic_api"),
     ProviderTaskType.DEBUGGING: ("codex", "claude_code", "gemini", "anthropic_api"),
     ProviderTaskType.TRADING_EPISTEMICS: ("claude_code", "codex", "anthropic_api", "gemini"),
-    ProviderTaskType.FOLLOW_UP: ("claude_code", "codex", "ollama", "gemini", "anthropic_api", "mock"),
-    ProviderTaskType.GENERAL: ("ollama", "claude_code", "codex", "gemini", "anthropic_api", "mock"),
+    ProviderTaskType.FOLLOW_UP: ("gemini_fast", "claude_code", "codex", "ollama", "gemini", "anthropic_api", "mock"),
+    ProviderTaskType.GENERAL: ("gemini_fast", "ollama", "claude_code", "codex", "gemini", "anthropic_api", "mock"),
 }
+
+# Width of a "reliability tier" bucket for SIMPLE/GENERAL ranking (see
+# rank() below) -- providers whose failure_rate falls in the same 20-point
+# band are ranked by latency, not by the raw float difference between them,
+# so an occasional transient failure doesn't permanently outrank a
+# meaningfully faster provider that is still comparably reliable.
+_RELIABILITY_TIER_WIDTH = 0.20
+
+# Hard wall-clock ceiling per provider ATTEMPT, enforced by the router
+# regardless of what timeout (if any) the provider's own adapter uses
+# internally -- necessary because a provider's own internal timeout can be
+# per-chunk rather than total (physically observed: a claude_code call
+# stayed alive for 195 seconds because its internal 60s timeout only
+# bounded the gap between individual streamed lines, never the whole
+# call). gemini_fast/claude_code get the short budgets a latency-sensitive
+# voice turn actually needs; any provider not listed here (codex -- "only
+# final fallback" -- ollama, gemini, anthropic_api, mock) gets the generous
+# default below, which is still a hard, finite bound, never indefinite.
+PROVIDER_TIMEOUT_SECONDS: dict[str, float] = {
+    "gemini_fast": 5.0,
+    "claude_code": 8.0,
+}
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 30.0
+
+
+def _timeout_for(provider_id: str) -> float:
+    return PROVIDER_TIMEOUT_SECONDS.get(provider_id, DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+
+
+# Circuit breaker tuning: distinct from ProviderHealthTracker's long-window
+# success rate (used for ranking above) -- this tracks REPEATED RECENT
+# failures specifically, so a provider that is failing right now (e.g. a
+# live rate limit) is skipped quickly without permanently punishing one
+# old, isolated failure the way counting all history ever would.
+CIRCUIT_FAILURE_THRESHOLD = 3
+CIRCUIT_FAILURE_WINDOW_SECONDS = 120.0
+CIRCUIT_COOLDOWN_SECONDS = 60.0
+
+
+class _CircuitBreaker:
+    """In-memory, per-process circuit breaker. Opens (skips) a provider
+    after CIRCUIT_FAILURE_THRESHOLD failures within CIRCUIT_FAILURE_WINDOW_SECONDS,
+    for CIRCUIT_COOLDOWN_SECONDS, then lets it be tried again -- "temporarily
+    skip it, then retry after cooldown," not a permanent demotion."""
+
+    def __init__(self) -> None:
+        self._recent_failures: dict[str, list[float]] = {}
+        self._open_until: dict[str, float] = {}
+
+    def record_success(self, provider_id: str) -> None:
+        self._recent_failures.pop(provider_id, None)
+        self._open_until.pop(provider_id, None)
+
+    def record_failure(self, provider_id: str) -> None:
+        now = time.monotonic()
+        failures = [
+            t
+            for t in self._recent_failures.get(provider_id, ())
+            if now - t < CIRCUIT_FAILURE_WINDOW_SECONDS
+        ]
+        failures.append(now)
+        self._recent_failures[provider_id] = failures
+        if len(failures) >= CIRCUIT_FAILURE_THRESHOLD:
+            self._open_until[provider_id] = now + CIRCUIT_COOLDOWN_SECONDS
+
+    def is_open(self, provider_id: str) -> bool:
+        until = self._open_until.get(provider_id)
+        return until is not None and time.monotonic() < until
+
+
+async def _bounded_stream(agen, timeout: float, provider_name: str):
+    """Wraps an async generator with a hard TOTAL wall-clock deadline
+    (not per-chunk) -- see PROVIDER_TIMEOUT_SECONDS above for why a
+    provider's own internal per-chunk timeout isn't sufficient on its own.
+    Cancels the underlying generator's task the moment the deadline is
+    exceeded so the caller can fail over to the next candidate immediately
+    rather than waiting for the provider to give up on its own."""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _drain() -> None:
+        try:
+            async for event in agen:
+                queue.put_nowait(("event", event))
+            queue.put_nowait(("done", None))
+        except Exception as exc:  # noqa: BLE001 -- surfaced to the consumer below
+            queue.put_nowait(("error", exc))
+
+    drain_task = asyncio.create_task(_drain())
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssistantProviderError(f"{provider_name} exceeded {timeout}s timeout")
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except TimeoutError as exc:
+                raise AssistantProviderError(f"{provider_name} exceeded {timeout}s timeout") from exc
+            if kind == "event":
+                yield payload
+            elif kind == "error":
+                raise payload
+            else:
+                return
+    finally:
+        if not drain_task.done():
+            drain_task.cancel()
 
 
 @dataclass(frozen=True)
@@ -124,6 +249,7 @@ class RoutedAssistantProvider(AssistantProvider):
         self._trace_store = trace_store
         self._health = ProviderHealthTracker(trace_store) if trace_store is not None else None
         self._fixed_order = fixed_order
+        self._circuit = _CircuitBreaker()
         self.last_decision: ProviderRouteDecision | None = None
 
     async def _ordered_candidates(self, request: AssistantRequest) -> list[AssistantProvider]:
@@ -171,10 +297,32 @@ class RoutedAssistantProvider(AssistantProvider):
             failure_rate = 1.0 - stats.success_rate
             latency = stats.p50_ms if stats.p50_ms is not None else float("inf")
             if task_type in (ProviderTaskType.SIMPLE, ProviderTaskType.GENERAL):
-                return (unhealthy, failure_rate, latency, preference)
+                # Bucketed, not raw, failure_rate: sorting on the exact float
+                # meant one stale recorded failure (e.g. a single transient
+                # API blip minutes or hours ago) permanently outranked a
+                # provider with a real multi-second latency advantage --
+                # physically observed with gemini_fast (93% success, ~3.4s
+                # p50) losing every ordinary-conversation turn to codex
+                # (100% success, ~10s p50) after exactly one recorded
+                # failure, defeating the entire point of ranking gemini_fast
+                # first for latency-sensitive SIMPLE/GENERAL turns. Providers
+                # within the same reliability tier (bucket width below) are
+                # treated as equally reliable and broken by latency instead;
+                # a genuinely worse track record (a full tier down) still
+                # loses regardless of latency.
+                reliability_tier = float(int(failure_rate / _RELIABILITY_TIER_WIDTH))
+                return (unhealthy, reliability_tier, latency, preference)
             return (unhealthy, preference, failure_rate, latency)
 
         capable.sort(key=rank)
+        # Circuit-open providers (repeated RECENT failures -- see
+        # _CircuitBreaker) are pushed to the end, not removed outright: a
+        # provider currently failing a lot should be tried last, but if
+        # every candidate is circuit-open it's still better to attempt the
+        # least-recently-failing one than to fail the whole turn with zero
+        # attempts. Stable sort preserves the health-based order above
+        # within each open/closed group.
+        capable.sort(key=lambda provider: self._circuit.is_open(provider.name))
         self.last_decision = ProviderRouteDecision(
             task_type=task_type,
             ordered_provider_ids=tuple(provider.name for provider in capable),
@@ -187,8 +335,23 @@ class RoutedAssistantProvider(AssistantProvider):
         failures: list[AssistantProviderError] = []
         for index, provider in enumerate(candidates):
             started = time.monotonic()
+            timeout = _timeout_for(provider.name)
             try:
-                reply = await provider.respond(request)
+                try:
+                    reply = await asyncio.wait_for(provider.respond(request), timeout=timeout)
+                except TimeoutError as exc:
+                    raise AssistantProviderError(
+                        f"{provider.name} exceeded {timeout}s router timeout"
+                    ) from exc
+                if not reply.text.strip():
+                    # A CLI provider can exit 0 with no usable result text
+                    # (observed physically, not hypothetical) without ever
+                    # raising -- treat that exactly like a real failure so
+                    # it falls over to the next candidate instead of being
+                    # accepted as a successful empty answer.
+                    raise AssistantProviderError(
+                        f"{provider.name} returned an empty response"
+                    )
             except AssistantProviderError as exc:
                 failures.append(exc)
                 await self._record_attempt(
@@ -214,11 +377,22 @@ class RoutedAssistantProvider(AssistantProvider):
         candidates = await self._ordered_candidates(request)
         for index, provider in enumerate(candidates):
             started = time.monotonic()
-            emitted = False
+            timeout = _timeout_for(provider.name)
+            emitted_text = ""
+            is_last = index == len(candidates) - 1
             try:
                 stream = getattr(provider, "respond_stream", None)
                 if stream is None:
-                    reply = await provider.respond(request)
+                    try:
+                        reply = await asyncio.wait_for(provider.respond(request), timeout=timeout)
+                    except TimeoutError as exc:
+                        raise AssistantProviderError(
+                            f"{provider.name} exceeded {timeout}s router timeout"
+                        ) from exc
+                    if not reply.text.strip():
+                        raise AssistantProviderError(
+                            f"{provider.name} returned an empty response"
+                        )
                     await self._record_attempt(
                         request=request,
                         provider_id=provider.name,
@@ -227,9 +401,24 @@ class RoutedAssistantProvider(AssistantProvider):
                     yield {"type": "delta", "text": reply.text}
                     yield {"type": "complete", "text": reply.text, "provider": reply.provider}
                     return
-                async for event in stream(request):
-                    emitted = emitted or bool(event.get("text"))
+                async for event in _bounded_stream(stream(request), timeout, provider.name):
+                    if event.get("type") == "delta":
+                        emitted_text += str(event.get("text") or "")
+                    elif event.get("type") == "complete":
+                        emitted_text = str(event.get("text") or emitted_text)
                     yield event
+                if not emitted_text.strip():
+                    # Same silent-empty-success gap as above, but for the
+                    # streaming adapter path (what normal-conversation
+                    # voice/text turns actually use) -- a provider whose
+                    # stream ends with no usable text was never flagged as
+                    # a failure before this check, so it never fell over to
+                    # a healthy alternate provider. Physically observed:
+                    # "Explain Docker containers" silently produced no
+                    # text, and the caller had no signal to retry elsewhere.
+                    raise AssistantProviderError(
+                        f"{provider.name} completed with no usable response text"
+                    )
                 await self._record_attempt(
                     request=request,
                     provider_id=provider.name,
@@ -243,9 +432,13 @@ class RoutedAssistantProvider(AssistantProvider):
                     started=started,
                     error=type(exc).__name__,
                 )
-                if emitted:
+                if emitted_text.strip():
+                    # Real partial content already reached the caller --
+                    # switching providers now would append a second,
+                    # unrelated answer after it, so surface the error
+                    # instead of silently retrying elsewhere.
                     raise
-                if index == len(candidates) - 1:
+                if is_last:
                     raise AssistantProviderError(
                         f"All {len(candidates)} capable assistant providers failed"
                     ) from exc
@@ -258,6 +451,10 @@ class RoutedAssistantProvider(AssistantProvider):
         started: float,
         error: str | None = None,
     ) -> None:
+        if error is not None:
+            self._circuit.record_failure(provider_id)
+        else:
+            self._circuit.record_success(provider_id)
         if self._trace_store is None:
             return
         await self._trace_store.record(

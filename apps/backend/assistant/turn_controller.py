@@ -177,11 +177,15 @@ _ACTION = re.compile(
     re.IGNORECASE,
 )
 _TIME = re.compile(
-    r"^\s*(?:what(?:'s|\s+is)\s+the\s+time|what\s+time\s+is\s+it|tell\s+me\s+the\s+time)\??\s*$",
+    r"^\s*(?:what(?:'?s|\s+is)\s+the\s+time(?:\s+(?:right\s+now|currently|today))?|"
+    r"what\s+time\s+is\s+it(?:\s+(?:right\s+now|currently|today))?|"
+    r"tell\s+me\s+the\s+time)\??\s*$",
     re.IGNORECASE,
 )
 _DATE = re.compile(
-    r"^\s*(?:what(?:'s|\s+is)\s+(?:the\s+)?date|what\s+day\s+is\s+it|tell\s+me\s+the\s+date)\??\s*$",
+    r"^\s*(?:what(?:'?s|\s+is)\s+(?:the\s+|today'?s\s+)?date(?:\s+(?:today|currently))?|"
+    r"what\s+day\s+is\s+it(?:\s+today)?|"
+    r"tell\s+me\s+the\s+date)\??\s*$",
     re.IGNORECASE,
 )
 _DETERMINISTIC_STATE = re.compile(
@@ -197,14 +201,21 @@ class TurnIntentRouter:
 
     def classify(self, text: str) -> TurnIntent:
         value = text.strip()
+        # Narrow, anchored deterministic patterns are checked first: when
+        # they match at all, they're unambiguous local pattern matches with
+        # no LLM/tool/research involved, so they should win over the
+        # broader heuristics below. Physically observed: "what is today's
+        # date" contains _RESEARCH's own "today's" trigger (meant for
+        # "today's news" style queries) and was being misrouted to
+        # NORMAL_CONVERSATION's Claude Code path before this reordering.
+        if _TIME.match(value) or _DATE.match(value) or _ACTION.match(value):
+            return TurnIntent.DETERMINISTIC
         if _CHART.search(value):
             return TurnIntent.CHART_ANALYSIS
         if _TRADING_RESEARCH.search(value):
             return TurnIntent.TRADING_RESEARCH
         if _RESEARCH.search(value):
             return TurnIntent.RESEARCH
-        if _TIME.match(value) or _DATE.match(value) or _ACTION.match(value):
-            return TurnIntent.DETERMINISTIC
         if _DETERMINISTIC_STATE.search(value):
             return TurnIntent.DETERMINISTIC
         if _TOOL.match(value) or _ADVANCED_COMMAND.search(value):
@@ -463,8 +474,20 @@ class AssistantTurnController:
         await recorder.mark("stt_completed")
         transcript = transcription.text.strip()
         await recorder.annotate(transcript=transcript)
-        match = None if pending is not None else self._wake_matcher.match(transcript)
-        if pending is not None:
+        # Diagnostic-only: VOICE_MODE=continuous skips wake matching entirely
+        # so mic/STT/response correctness can be verified independent of
+        # wake-phrase recognition. Every non-empty recognized utterance
+        # becomes the command directly. Default is "wake" (unchanged).
+        continuous_mode = pending is None and self._settings.voice_mode == "continuous"
+        match = None if (pending is not None or continuous_mode) else self._wake_matcher.match(
+            transcript
+        )
+        if continuous_mode:
+            normalized_transcript = normalize_transcript(transcript)
+            command = normalized_transcript
+            wake_match = "continuous_mode" if command else None
+            wake_alias_matched = None
+        elif pending is not None:
             wake_match = "two_stage_command"
             wake_alias_matched = pending.wake_alias
             command = normalize_transcript(transcript)
@@ -483,9 +506,13 @@ class AssistantTurnController:
         await recorder.annotate(normalized_transcript=normalized_transcript)
 
         if wake_match is None:
-            await recorder.fail(
-                "wake_match", reason=f"transcript did not match any wake alias: {transcript!r}"[:500]
+            fail_stage = "stt" if continuous_mode else "wake_match"
+            fail_reason = (
+                "empty transcript in continuous mode"
+                if continuous_mode
+                else f"transcript did not match any wake alias: {transcript!r}"[:500]
             )
+            await recorder.fail(fail_stage, reason=fail_reason)
             return await self._complete_without_execution(
                 AssistantResponse(
                     turn_id=turn_id,
@@ -505,7 +532,7 @@ class AssistantTurnController:
             wake_alias_matched=wake_alias_matched,
             command_extracted=bool(command),
         )
-        if pending is None:
+        if pending is None and not continuous_mode:
             await recorder.mark("wake_detected")
             await self._publish(
                 TurnEvent(turn_id=turn_id, type="state", state=TurnState.WAKE_DETECTED)
@@ -783,20 +810,39 @@ class AssistantTurnController:
             for row in history_rows
             if row["role"] in ("user", "assistant")
         ]
+        voice_addendum = (
+            "This turn will be spoken aloud to the user; keep the answer to 1-4 short "
+            "sentences unless they ask for more detail.\n\n"
+            if input_mode is InputMode.voice
+            else ""
+        )
         request = AssistantRequest(
             text=text,
             conversation_id=conversation_id,
             system_context=(
                 "This is the normal-conversation fast path. Answer directly without tools, "
-                "research, chart analysis, or invented trading facts.\n\n" + QUALITY_SYSTEM_PROMPT
+                "research, chart analysis, or invented trading facts.\n\n"
+                + voice_addendum
+                + QUALITY_SYSTEM_PROMPT
             ),
             history=history,
         )
-        accumulated = ""
         provider_name = self._provider.name
         provider_started = time.monotonic()
         trace_started_at = datetime.now(UTC).isoformat()
         stream = getattr(self._provider, "respond_stream", None)
+
+        # A flaky/empty response from one CLI provider is handled by
+        # self._provider itself (RoutedAssistantProvider falls over to a
+        # healthy alternate provider within this single call -- see
+        # provider_router.py) rather than by retrying the same provider
+        # again here. Retrying the same flaky provider a second time was
+        # tried before and rejected: it wastes a full CLI round-trip on
+        # exactly the calls most likely to fail again, and does nothing
+        # when a provider is genuinely down rather than just occasionally
+        # empty. A still-empty result after the router's own fallback means
+        # every capable provider genuinely failed.
+        accumulated = ""
         try:
             if callable(stream):
                 async for event in stream(request):

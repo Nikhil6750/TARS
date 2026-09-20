@@ -19,9 +19,11 @@ interface AppHeaderProps {
 const STATE_LABEL: Partial<Record<CompanionVisualState, { text: string; dotColor: string }>> = {
   IDLE: { text: 'Ready', dotColor: 'bg-emerald-500' },
   LISTENING: { text: 'Listening...', dotColor: 'bg-emerald-500 animate-pulse' },
+  HEARING: { text: 'Hearing you...', dotColor: 'bg-teal-400 animate-pulse' },
   THINKING: { text: 'Thinking...', dotColor: 'bg-slate-700 animate-pulse' },
   SPEAKING: { text: 'Speaking...', dotColor: 'bg-slate-800' },
   WAKE: { text: 'Waking up...', dotColor: 'bg-emerald-500' },
+  DISCONNECTED: { text: 'Voice disconnected', dotColor: 'bg-orange-500 animate-pulse' },
   ALERT: { text: 'Alert', dotColor: 'bg-amber-500' },
   WARNING: { text: 'Warning', dotColor: 'bg-rose-500' },
 };

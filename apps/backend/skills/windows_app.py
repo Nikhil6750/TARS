@@ -19,6 +19,7 @@ must surface as FAILED here, never as a fabricated SUCCEEDED.
 """
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -47,11 +48,78 @@ except ImportError as exc:  # pragma: no cover - exercised only off-Windows
         "Install it via apps/backend/requirements.txt (`pip install pywin32`)."
     ) from exc
 
+logger = logging.getLogger("tars.skills.windows_app")
+
 _SW_RESTORE = win32con.SW_RESTORE
 # PROCESS_QUERY_LIMITED_INFORMATION -- least-privilege access right that
 # still allows reading the process's image path; works even for processes
 # owned by other users, unlike PROCESS_QUERY_INFORMATION on some builds.
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+# shell:appsFolder enumeration walks every installed app (Store/MSIX plus
+# classic Start Menu entries) via COM and was physically measured to cost
+# 1.7-3s under real system load (vs. sub-100ms with little else running) --
+# far too slow to repeat on every "open X". The installed app set doesn't
+# change mid-session, so the whole listing is enumerated at most once per
+# process lifetime and cached; every lookup after that (any target, found
+# or not) is an in-memory scan, effectively free. `warm_appsfolder_cache()`
+# lets the app trigger that one-time cost proactively at startup, off the
+# request path entirely.
+_appsfolder_listing_cache: list[tuple[str, str]] | None = None
+
+
+def _load_appsfolder_listing() -> list[tuple[str, str]]:
+    global _appsfolder_listing_cache
+    if _appsfolder_listing_cache is not None:
+        return _appsfolder_listing_cache
+
+    listing: list[tuple[str, str]] = []
+    try:
+        import win32com.client
+
+        shell = win32com.client.Dispatch("Shell.Application")
+        namespace = shell.NameSpace("shell:appsFolder")
+        if namespace is not None:
+            for item in namespace.Items():
+                name = str(item.Name or "")
+                if not name:
+                    continue
+                aumid = item.ExtendedProperty("System.AppUserModel.ID")
+                if aumid:
+                    listing.append((name.lower(), str(aumid)))
+    except Exception:
+        logger.exception("_load_appsfolder_listing: shell:appsFolder enumeration failed")
+
+    _appsfolder_listing_cache = listing
+    return listing
+
+
+def warm_appsfolder_cache() -> None:
+    """Pay the one-time shell:appsFolder enumeration cost proactively
+    (call from a background thread at startup) so the first real "open X"
+    voice command during a session doesn't have to pay it inline."""
+    _load_appsfolder_listing()
+
+
+def _resolve_appsfolder_target(target: str) -> str | None:
+    """Best-effort AUMID (Application User Model ID) lookup for a bare
+    launch target that isn't a plain PATH executable. Many real installed
+    apps -- confirmed on this machine for Calculator, Notepad, and
+    TradingView -- are Store/MSIX-packaged and only resolvable through the
+    same `shell:appsFolder` namespace the Start Menu's own search uses, not
+    `shutil.which()`. Matches by exact display name first, then a
+    case-insensitive substring. Returns None on no match (never raises --
+    this augments, never replaces, the PATH check)."""
+    target_lower = target.strip().lower()
+    listing = _load_appsfolder_listing()
+    for name_lower, aumid in listing:
+        if name_lower == target_lower:
+            return aumid
+    for name_lower, aumid in listing:
+        if target_lower in name_lower:
+            return aumid
+    return None
 
 
 def _process_executable_name(pid: int) -> str:
@@ -206,8 +274,11 @@ class WindowsAppSkill(BaseSkill):
             raise SkillValidationError(
                 f"bare launch target must not contain path separators or '..': '{target}'"
             )
-        if shutil.which(target) is None:
-            raise SkillValidationError(f"'{target}' was not found on PATH")
+        if shutil.which(target) is not None:
+            return
+        if _resolve_appsfolder_target(target) is not None:
+            return
+        raise SkillValidationError(f"'{target}' was not found on PATH or as an installed app")
 
     async def execute(self, request: ActionRequest) -> ActionResult:
         started = datetime.now(UTC)
@@ -266,13 +337,26 @@ class WindowsAppSkill(BaseSkill):
     async def _execute_launch(self, request: ActionRequest, started: datetime) -> ActionResult:
         target = request.arguments["target"].strip()
         path = Path(target)
+        resolved_via = "absolute_path"
+        aumid: str | None = None
         if path.is_absolute():
             argv = [str(path)]
         else:
             resolved = shutil.which(target)
-            if resolved is None:
-                raise SkillExecutionError(f"'{target}' was not found on PATH")
-            argv = [resolved]
+            if resolved is not None:
+                resolved_via = "path"
+                argv = [resolved]
+            else:
+                aumid = _resolve_appsfolder_target(target)
+                if aumid is None:
+                    raise SkillExecutionError(f"'{target}' was not found on PATH or as an installed app")
+                # Store/MSIX-packaged apps have no PATH executable to spawn
+                # directly; `explorer.exe shell:appsFolder\<AUMID>` is the
+                # standard, non-elevated way to activate one from a plain
+                # subprocess (physically verified: Calculator's real
+                # CalculatorApp process starts this way on this machine).
+                resolved_via = "appsFolder"
+                argv = ["explorer.exe", f"shell:appsFolder\\{aumid}"]
 
         try:
             process = subprocess.Popen(argv, shell=False)  # noqa: S603
@@ -284,7 +368,12 @@ class WindowsAppSkill(BaseSkill):
             ActionStatus.SUCCEEDED,
             f"Launched '{target}' (pid {process.pid}).",
             risk_level=RiskLevel.LOW_RISK,
-            data={"target": target, "pid": process.pid},
+            data={
+                "target": target,
+                "pid": process.pid,
+                "resolved_via": resolved_via,
+                "aumid": aumid,
+            },
             started_at=started,
         )
 

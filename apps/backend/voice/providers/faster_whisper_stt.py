@@ -41,7 +41,15 @@ class FasterWhisperSTTProvider(SpeechToTextProvider):
 
         samples = np.frombuffer(pcm_audio, dtype=np.int16).astype(np.float32) / PCM16_SCALE
         try:
-            segments, info = self._model.transcribe(samples, language=None)
+            # Short spoken commands give the language auto-detector almost
+            # nothing to work with -- it has misidentified real English
+            # speech as Japanese in physical testing. Forcing English and
+            # disabling cross-segment conditioning (which otherwise lets one
+            # bad segment bias/hallucinate the next) are both specific to
+            # this already-VAD-segmented, English-only voice-command use.
+            segments, info = self._model.transcribe(
+                samples, language="en", condition_on_previous_text=False
+            )
             text = " ".join(segment.text.strip() for segment in segments).strip()
         except Exception as exc:
             raise VoiceProviderError(f"faster-whisper transcription failed: {exc}") from exc

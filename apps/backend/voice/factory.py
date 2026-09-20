@@ -46,6 +46,14 @@ def build_tts_provider(settings: Settings) -> TextToSpeechProvider:
     provider = settings.tts_provider.lower()
     if provider == "mock":
         return MockTextToSpeechProvider()
+    if provider == "elevenlabs":
+        from voice.providers.elevenlabs_tts import ElevenLabsTTSProvider
+
+        return ElevenLabsTTSProvider(
+            api_key=settings.elevenlabs_api_key,
+            voice_id=settings.elevenlabs_voice_id,
+            model_id=settings.elevenlabs_model_id,
+        )
     if provider == "kokoro":
         from voice.providers.kokoro_tts import KokoroTTSProvider
 

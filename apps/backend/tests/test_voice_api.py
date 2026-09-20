@@ -67,6 +67,62 @@ def test_transcribe_rejects_invalid_audio(client):
     assert resp.status_code == 422
 
 
+def test_manual_listening_endpoints_404_when_gemini_live_not_active(client):
+    """conftest.py's client fixture always sets GEMINI_LIVE_ENABLED=false
+    (never opens a real mic in tests), so app.state.gemini_live_loop is
+    None -- the manual-listening endpoints must say so explicitly (404),
+    not silently no-op, so the frontend can distinguish "off" from "not
+    available here"."""
+    assert client.app.state.gemini_live_loop is None
+    assert client.post("/api/v1/voice/manual-listening/start").status_code == 404
+    assert client.post("/api/v1/voice/manual-listening/stop").status_code == 404
+    assert client.get("/api/v1/voice/gemini-status").json()["enabled"] is False
+
+
+def test_manual_listening_start_stop_endpoints_drive_the_real_loop(client):
+    """Attaches a real (unstarted -- no thread, no PyAudio) GeminiLiveLoop
+    to app.state, the same object type app/main.py wires in when Gemini
+    Live is actually enabled, and drives it purely through the REST
+    endpoints the frontend button calls -- proving the HTTP layer
+    correctly reaches GeminiLiveLoop.start_manual_listening()/
+    stop_manual_listening() and that gemini-status reflects the change."""
+    import asyncio
+
+    from app.config import Settings
+    from voice.gemini_live_loop import GeminiLiveLoop
+
+    loop = GeminiLiveLoop(
+        settings=Settings(),
+        controller=client.app.state.turn_controller,
+        event_loop=asyncio.new_event_loop(),
+        voice_providers=client.app.state.voice_providers,
+    )
+    loop._turn_phase = "listening"
+    client.app.state.gemini_live_loop = loop
+
+    status_before = client.get("/api/v1/voice/gemini-status").json()
+    assert status_before["enabled"] is True
+    assert status_before["manual_listening_enabled"] is False
+
+    start_resp = client.post("/api/v1/voice/manual-listening/start")
+    assert start_resp.status_code == 200
+    assert start_resp.json() == {"manual_listening_enabled": True, "state": "listening"}
+    assert loop._manual_listening_enabled is True
+
+    status_on = client.get("/api/v1/voice/gemini-status").json()
+    assert status_on["manual_listening_enabled"] is True
+    assert status_on["state"] == "listening"
+
+    stop_resp = client.post("/api/v1/voice/manual-listening/stop")
+    assert stop_resp.status_code == 200
+    assert stop_resp.json() == {"manual_listening_enabled": False, "state": "voice_off"}
+    assert loop._manual_listening_enabled is False
+
+    status_off = client.get("/api/v1/voice/gemini-status").json()
+    assert status_off["manual_listening_enabled"] is False
+    assert status_off["state"] == "voice_off"
+
+
 def test_canonical_utterance_runs_stt_wake_and_one_assistant_turn(client):
     _wait_for_voice_ready(client)
     stt = _WakeSentenceSTT("Hey TARS, explain polymorphism")

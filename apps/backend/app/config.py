@@ -60,13 +60,27 @@ class Settings(BaseSettings):
     wake_command_timeout_seconds: float = 7.0
     wake_word_model_path: str | None = None
     wake_word_threshold: float = 0.5
+    # "wake" (default): every utterance must contain a wake alias before its
+    # tail (or the next utterance, two-stage) is executed as a command.
+    # "continuous": every non-empty recognized utterance is executed
+    # directly, no wake phrase required -- for isolating STT/pipeline
+    # correctness from wake-matching correctness during physical testing.
+    voice_mode: str = "wake"
+
+    # ---- Gemini Live (primary realtime voice path) ----
+    # GEMINI_API_KEY / GOOGLE_API_KEY are read directly from the process
+    # environment only (voice/gemini_live_loop.py), never through Settings
+    # or .env, per the explicit "API key from environment only" requirement
+    # for this integration -- never written here or to .env.example.
+    gemini_live_enabled: bool = False
+    gemini_live_model: str = "gemini-2.5-flash-native-audio-preview-09-2025"
 
     # ---- VAD ----
     vad_provider: str = "silero"
 
     # ---- STT ----
     stt_provider: str = "mock"
-    faster_whisper_model: str = "base"
+    faster_whisper_model: str = "base.en"
     faster_whisper_device: str = "cpu"
     faster_whisper_compute_type: str = "int8"
     openai_api_key: str | None = None
@@ -81,6 +95,16 @@ class Settings(BaseSettings):
     kokoro_voice: str = "af_heart"
     kokoro_lang: str = "en-us"
     fish_audio_api_key: str | None = None
+    # ElevenLabs realtime streaming TTS -- the premium/default connected
+    # voice when configured; SAPI/Kokoro remain the offline fallback chain
+    # (see voice/gemini_live_loop.py's FAST_TTS priority). Absence of either
+    # key/voice ID here is not an error: every consumer treats this
+    # provider as simply unavailable and falls through, same as every other
+    # optional voice provider in this file.
+    elevenlabs_api_key: str | None = None
+    elevenlabs_voice_id: str | None = None
+    elevenlabs_model_id: str = "eleven_flash_v2_5"
+    elevenlabs_tts_enabled: bool = True
 
     # ---- Assistant ----
     assistant_provider: str = "mock"
@@ -94,6 +118,13 @@ class Settings(BaseSettings):
     codex_timeout_seconds: float = 60.0
     gemini_command: str = "gemini"
     gemini_timeout_seconds: float = 60.0
+    # FAST_CONVERSATION: direct Gemini Flash text API (google-genai SDK,
+    # no CLI subprocess) -- the default provider for ordinary voice
+    # conversation, ranked ahead of claude_code/codex for SIMPLE/FOLLOW_UP/
+    # GENERAL task types only (see provider_router.py). Uses the same
+    # GEMINI_API_KEY/GOOGLE_API_KEY already read from the environment for
+    # Gemini Live.
+    gemini_fast_model: str = "gemini-3.5-flash"
     # Chart analysis reads an image (Claude's own Read tool) on top of the
     # ordinary text turn, so it gets a longer allowance than chat replies.
     chart_analysis_timeout_seconds: float = 120.0

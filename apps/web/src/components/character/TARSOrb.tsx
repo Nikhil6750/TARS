@@ -71,8 +71,10 @@ export const TARSOrb: React.FC<TARSOrbProps> = ({
   const isIdle = state === 'IDLE';
   const isWake = state === 'WAKE';
   const isListening = state === 'LISTENING';
+  const isHearing = state === 'HEARING';
   const isThinking = state === 'THINKING';
   const isSpeaking = state === 'SPEAKING';
+  const isDisconnected = state === 'DISCONNECTED';
   const isAlert = state === 'ALERT';
   const isWarning = state === 'WARNING';
 
@@ -97,6 +99,13 @@ export const TARSOrb: React.FC<TARSOrbProps> = ({
     glowOpacity = 0.4 + smoothVolume * 0.5;
     glowColor = 'rgba(0, 255, 128, 0.6)';
     auraColor = '#00ff80';
+  } else if (isHearing) {
+    // Real speech detected (server-side VAD ACTIVITY_START) -- a visibly
+    // stronger, faster-breathing pulse than idle Listening.
+    scale = 1.08 + smoothVolume * 0.22;
+    glowOpacity = 0.6 + smoothVolume * 0.4;
+    glowColor = 'rgba(45, 255, 196, 0.85)';
+    auraColor = '#2dffc4';
   } else if (isThinking) {
     scale = 1.03;
     glowOpacity = 0.55;
@@ -107,6 +116,11 @@ export const TARSOrb: React.FC<TARSOrbProps> = ({
     glowOpacity = 0.45 + smoothVolume * 0.45;
     glowColor = 'rgba(0, 229, 255, 0.65)';
     auraColor = '#00e5ff';
+  } else if (isDisconnected) {
+    scale = 1.0;
+    glowOpacity = 0.6;
+    glowColor = 'rgba(255, 138, 0, 0.65)';
+    auraColor = '#ff8a00';
   } else if (isAlert) {
     scale = 1.05;
     glowOpacity = 0.65;
@@ -139,7 +153,9 @@ export const TARSOrb: React.FC<TARSOrbProps> = ({
         style={{
           background: `radial-gradient(circle, ${glowColor} 0%, rgba(3, 6, 10, 0) 70%)`,
           opacity: glowOpacity,
-          transform: `scale(${isWake ? 1.4 : isListening || isSpeaking ? 1.1 + smoothVolume * 0.2 : 1.0})`,
+          transform: `scale(${
+            isWake ? 1.4 : isListening || isHearing || isSpeaking ? 1.1 + smoothVolume * 0.2 : 1.0
+          })`,
           transition: 'transform 0.25s ease-out, opacity 0.25s ease-out',
         }}
       />
@@ -151,6 +167,8 @@ export const TARSOrb: React.FC<TARSOrbProps> = ({
             ? 'animate-[spin_8s_linear_infinite]'
             : isSpeaking
             ? 'animate-[spin_24s_linear_infinite]'
+            : isHearing
+            ? 'animate-[spin_20s_linear_infinite]'
             : isListening
             ? 'animate-[spin_40s_linear_infinite]'
             : 'animate-[spin_60s_linear_infinite]'
@@ -176,8 +194,8 @@ export const TARSOrb: React.FC<TARSOrbProps> = ({
         <line x1="2" y1="100" x2="10" y2="100" stroke={auraColor} strokeWidth="1.5" strokeOpacity="0.8" />
         <line x1="190" y1="100" x2="198" y2="100" stroke={auraColor} strokeWidth="1.5" strokeOpacity="0.8" />
 
-        {/* Audio Reactivity Waveform Arc Ring (Active during Listening / Speaking) */}
-        {(isListening || isSpeaking) && (
+        {/* Audio Reactivity Waveform Arc Ring (Active during Listening / Hearing / Speaking) */}
+        {(isListening || isHearing || isSpeaking) && (
           <circle
             cx="100"
             cy="100"
@@ -278,8 +296,17 @@ export const TARSOrb: React.FC<TARSOrbProps> = ({
             style={{ opacity: 0.3 + smoothVolume * 0.7 }}
           />
         )}
+        {isHearing && (
+          <div
+            className="absolute inset-0 rounded-full bg-teal-400/20 pointer-events-none mix-blend-color-dodge animate-pulse transition-opacity duration-150"
+            style={{ opacity: 0.5 + smoothVolume * 0.5, animationDuration: '900ms' }}
+          />
+        )}
         {isThinking && (
           <div className="absolute inset-0 rounded-full bg-purple-500/15 pointer-events-none mix-blend-color-dodge animate-pulse" />
+        )}
+        {isDisconnected && (
+          <div className="absolute inset-0 rounded-full bg-orange-500/20 pointer-events-none mix-blend-color-dodge animate-pulse" />
         )}
         {isWarning && (
           <div className="absolute inset-0 rounded-full bg-rose-500/20 pointer-events-none mix-blend-color-dodge animate-pulse" />
@@ -302,8 +329,10 @@ export const TARSOrb: React.FC<TARSOrbProps> = ({
         {isIdle && '● TARS IDLE'}
         {isWake && '⚡ WAKING'}
         {isListening && `🎙️ LISTENING ${smoothVolume > 0.05 ? '●' : '...'}`}
+        {isHearing && '👂 HEARING YOU'}
         {isThinking && '🧠 ANALYZING...'}
         {isSpeaking && '🔊 TRANSMITTING'}
+        {isDisconnected && '🔌 DISCONNECTED'}
         {isAlert && '⚠️ ALERT'}
         {isWarning && '🛑 RISK DETECTED'}
       </div>

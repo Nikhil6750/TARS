@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -71,6 +72,20 @@ MAX_BODY_BYTES = 16 * 1_048_576
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_tracing("tars-backend", settings.otel_exporter_otlp_endpoint)
+
+    # Windows-only: pay the ~1-3s shell:appsFolder enumeration cost now, off
+    # the request path, so the first physical "open X" (voice or text) for
+    # a Store/MSIX-packaged app (Calculator, TradingView, ...) doesn't have
+    # to wait on it inline -- see skills/windows_app.py's
+    # warm_appsfolder_cache(). Best-effort: swallow failures on non-Windows
+    # or if pywin32 isn't importable, since app-launch just falls back to
+    # the normal (slower, first-call-only) lazy resolution in that case.
+    try:
+        from skills.windows_app import warm_appsfolder_cache
+
+        asyncio.create_task(asyncio.to_thread(warm_appsfolder_cache))
+    except ImportError:
+        pass
 
     from app.readiness import (
         NOT_CONFIGURED_MESSAGE,
@@ -334,9 +349,83 @@ async def lifespan(app: FastAPI):
         voice_trace_store=app.state.voice_trace_store,
     )
 
+    # Backend-owned continuous microphone loop -- the single production
+    # automatic-listening owner. Exactly one of these ever starts, never
+    # both: Gemini Live (voice/gemini_live_loop.py) is primary when enabled
+    # and a real API key is present; otherwise the local
+    # SpeechRecognition+faster-whisper loop (voice/voice_loop.py) is the
+    # OFFLINE_FALLBACK. Mock STT (every test run, any machine without these
+    # optional packages installed) must never try to open a real
+    # microphone -- both branches are gated accordingly. Starts only once
+    # providers finish loading.
+    app.state.voice_loop = None
+    app.state.gemini_live_loop = None
+    voice_loop_start_task: asyncio.Task | None = None
+
+    gemini_api_key_present = bool(
+        os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    )
+    if settings.gemini_live_enabled and gemini_api_key_present:
+        try:
+            from voice.gemini_live_loop import GeminiLiveLoop
+
+            gemini_live_loop = GeminiLiveLoop(
+                settings=settings,
+                controller=app.state.turn_controller,
+                event_loop=asyncio.get_running_loop(),
+                voice_providers=voice_providers,
+            )
+            app.state.gemini_live_loop = gemini_live_loop
+
+            async def _start_gemini_live_when_ready() -> None:
+                await voice_providers.ready.wait()
+                gemini_live_loop.start()
+
+            voice_loop_start_task = asyncio.create_task(_start_gemini_live_when_ready())
+        except ImportError as exc:
+            logger.warning(
+                "Gemini Live dependencies not installed (%s) -- falling back to the "
+                "local OFFLINE_FALLBACK voice loop",
+                exc,
+            )
+    elif settings.gemini_live_enabled and not gemini_api_key_present:
+        logger.warning(
+            "GEMINI_LIVE_ENABLED=true but no GEMINI_API_KEY/GOOGLE_API_KEY in the "
+            "environment -- falling back to the local OFFLINE_FALLBACK voice loop"
+        )
+
+    if app.state.gemini_live_loop is None and settings.stt_provider == "faster_whisper":
+        try:
+            from voice.voice_loop import VoiceLoop
+
+            voice_loop = VoiceLoop(
+                settings=settings,
+                controller=app.state.turn_controller,
+                event_loop=asyncio.get_running_loop(),
+            )
+            app.state.voice_loop = voice_loop
+
+            async def _start_voice_loop_when_ready() -> None:
+                await voice_providers.ready.wait()
+                voice_loop.start()
+
+            voice_loop_start_task = asyncio.create_task(_start_voice_loop_when_ready())
+        except ImportError as exc:
+            logger.warning(
+                "VoiceLoop dependencies not installed (%s) -- automatic microphone "
+                "loop disabled; push-to-talk/native capture remain available",
+                exc,
+            )
+
     try:
         yield
     finally:
+        if voice_loop_start_task is not None:
+            voice_loop_start_task.cancel()
+        if app.state.voice_loop is not None:
+            app.state.voice_loop.stop()
+        if app.state.gemini_live_loop is not None:
+            app.state.gemini_live_loop.stop()
         voice_load_task.cancel()
         if settings.setup_watch_agent_enabled:
             await agent_runtime.stop_continuous("setup_watch_agent")

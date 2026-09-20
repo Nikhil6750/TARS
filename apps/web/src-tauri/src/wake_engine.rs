@@ -158,13 +158,47 @@ pub fn set_playback_speaking(speaking: bool, app: &AppHandle) {
 
 fn run(app: AppHandle) -> Result<(), String> {
     let host = cpal::default_host();
+    eprintln!("[wake_engine] audio host: {:?}", host.id());
+
+    // Diagnostic-only: enumerate every input device once so a mis-selected
+    // device (Stereo Mix, a webcam mic, a virtual cable, ...) is visible in
+    // the log rather than silently assumed. This does not change selection.
+    match host.input_devices() {
+        Ok(devices) => {
+            // cpal 0.18 dropped `Device::name()` in favor of `Display`.
+            let names: Vec<String> = devices.map(|d| d.to_string()).collect();
+            eprintln!(
+                "[wake_engine] available input devices ({}): {:?}",
+                names.len(),
+                names
+            );
+        }
+        Err(err) => eprintln!("[wake_engine] could not enumerate input devices: {err}"),
+    }
+
+    // This asks the OS for its current default recording device (the same
+    // one shown under Windows Settings > Sound > Input) -- never an
+    // arbitrary first device from the enumeration above.
     let device = host
         .default_input_device()
         .ok_or_else(|| "no default input (microphone) device found".to_string())?;
+    let device_name = device.to_string();
+
     let supported = device
         .default_input_config()
         .map_err(|e| format!("no usable input config: {e}"))?;
     let sample_format = supported.sample_format();
+    let supported_sample_rate = supported.sample_rate(); // cpal::SampleRate is a `u32` alias
+    let supported_channels = supported.channels();
+    let supported_buffer_size = supported.buffer_size().clone();
+    eprintln!(
+        "[wake_engine] selected input device (Windows default recording device): \"{device_name}\""
+    );
+    eprintln!(
+        "[wake_engine] negotiated input config: sample_format={:?} sample_rate={} channels={} supported_buffer_size={:?}",
+        sample_format, supported_sample_rate, supported_channels, supported_buffer_size
+    );
+
     let config: cpal::StreamConfig = supported.into();
     let sample_rate = config.sample_rate;
     let channels = config.channels as usize;

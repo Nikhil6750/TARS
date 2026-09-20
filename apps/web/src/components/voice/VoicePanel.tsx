@@ -2,7 +2,14 @@ import React, { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { CompanionVisualState } from '../../types/companion';
 
-export type VoicePanelStatus = 'LISTENING' | 'THINKING' | 'SPEAKING' | 'IDLE';
+export type VoicePanelStatus =
+  | 'LISTENING'
+  | 'HEARING'
+  | 'THINKING'
+  | 'SPEAKING'
+  | 'IDLE'
+  | 'CONNECTING'
+  | 'ERROR';
 
 interface VoicePanelProps {
   status: VoicePanelStatus;
@@ -14,9 +21,12 @@ interface VoicePanelProps {
 
 const STATUS_LABEL: Record<VoicePanelStatus, string> = {
   LISTENING: 'Listening',
+  HEARING: 'Hearing you',
   THINKING: 'Thinking',
   SPEAKING: 'Speaking',
   IDLE: 'Say "Hey TARS"',
+  CONNECTING: 'Connecting...',
+  ERROR: 'Disconnected',
 };
 
 /**
@@ -47,7 +57,10 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
       const height = canvas.height;
       ctx.clearRect(0, 0, width, height);
 
-      const targetVol = status === 'LISTENING' || status === 'SPEAKING' ? Math.max(0.08, audioVolume) : 0.04;
+      const targetVol =
+        status === 'LISTENING' || status === 'HEARING' || status === 'SPEAKING'
+          ? Math.max(0.08, audioVolume)
+          : 0.04;
       smoothedVolRef.current += (targetVol - smoothedVolRef.current) * 0.25;
       const currentVol = smoothedVolRef.current;
 
@@ -73,6 +86,9 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
         } else if (status === 'THINKING') {
           gradient.addColorStop(0, 'rgba(14, 165, 233, 0.95)');
           gradient.addColorStop(1, 'rgba(2, 132, 199, 0.5)');
+        } else if (status === 'HEARING') {
+          gradient.addColorStop(0, 'rgba(45, 255, 196, 0.95)');
+          gradient.addColorStop(1, 'rgba(13, 148, 136, 0.55)');
         } else if (status === 'LISTENING') {
           gradient.addColorStop(0, 'rgba(16, 185, 129, 0.95)');
           gradient.addColorStop(1, 'rgba(5, 150, 105, 0.5)');
@@ -111,8 +127,12 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
                 ? 'text-purple-400'
                 : status === 'THINKING'
                 ? 'text-cyan-400'
+                : status === 'HEARING'
+                ? 'text-teal-300'
                 : status === 'LISTENING'
                 ? 'text-emerald-400'
+                : status === 'ERROR'
+                ? 'text-orange-400'
                 : 'text-slate-500'
             }`}
           >
@@ -139,7 +159,7 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
         {displayText ? (
           <div className="whitespace-pre-wrap">
             {displayText}
-            {(status === 'THINKING' || status === 'LISTENING') && (
+            {(status === 'THINKING' || status === 'LISTENING' || status === 'HEARING') && (
               <span className="inline-block w-1.5 h-3 bg-cyan-400 animate-pulse ml-0.5 align-middle" />
             )}
           </div>
@@ -156,6 +176,9 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
 export function toVoicePanelStatus(state: CompanionVisualState): VoicePanelStatus {
   if (state === 'SPEAKING') return 'SPEAKING';
   if (state === 'THINKING') return 'THINKING';
-  if (state === 'LISTENING' || state === 'WAKE') return 'LISTENING';
+  if (state === 'HEARING') return 'HEARING';
+  if (state === 'LISTENING') return 'LISTENING';
+  if (state === 'WAKE') return 'CONNECTING';
+  if (state === 'DISCONNECTED' || state === 'WARNING' || state === 'ALERT') return 'ERROR';
   return 'IDLE';
 }

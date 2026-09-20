@@ -46,6 +46,8 @@ describe('OpenJarvis-Style TARS UI Redesign', () => {
           companionState="IDLE"
           isListening={false}
           onTogglePushToTalk={vi.fn()}
+          manualListeningEnabled={false}
+          onToggleManualListening={vi.fn()}
           onSendMessage={onSendMessage}
           onOpenWorkspace={vi.fn()}
         />
@@ -54,6 +56,49 @@ describe('OpenJarvis-Style TARS UI Redesign', () => {
       expect(screen.getByPlaceholderText('Ask TARS...')).toBeInTheDocument();
       expect(screen.getByText('Analyze current chart')).toBeInTheDocument();
       expect(screen.getByText(/TARS provides general information/i)).toBeInTheDocument();
+    });
+
+    it('shows Start Listening when manual listening is off and calls the toggle handler on click', () => {
+      const onToggleManualListening = vi.fn();
+      render(
+        <ConversationView
+          messages={[]}
+          streamingAnswer=""
+          companionState="VOICE_OFF"
+          isListening={false}
+          onTogglePushToTalk={vi.fn()}
+          manualListeningEnabled={false}
+          onToggleManualListening={onToggleManualListening}
+          onSendMessage={vi.fn()}
+          onOpenWorkspace={vi.fn()}
+        />
+      );
+
+      expect(screen.getByText('Voice Off')).toBeInTheDocument();
+      const button = screen.getByTitle('Start Listening');
+      expect(screen.getByText('Start Listening')).toBeInTheDocument();
+      fireEvent.click(button);
+      expect(onToggleManualListening).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows Stop Listening when manual listening is on', () => {
+      render(
+        <ConversationView
+          messages={[]}
+          streamingAnswer=""
+          companionState="LISTENING"
+          isListening={false}
+          onTogglePushToTalk={vi.fn()}
+          manualListeningEnabled={true}
+          onToggleManualListening={vi.fn()}
+          onSendMessage={vi.fn()}
+          onOpenWorkspace={vi.fn()}
+        />
+      );
+
+      expect(screen.getByText('Listening')).toBeInTheDocument();
+      expect(screen.getByTitle('Stop Listening')).toBeInTheDocument();
+      expect(screen.getByText('Stop Listening')).toBeInTheDocument();
     });
   });
 

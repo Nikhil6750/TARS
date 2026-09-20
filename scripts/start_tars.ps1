@@ -304,6 +304,16 @@ if (-not $cargoCmd) {
 $env:CARGO_TARGET_DIR = Join-Path $WebDir 'src-tauri\target'
 $env:TARS_BACKEND_URL = "http://127.0.0.1:$BackendPort"
 
+# The backend owns continuous automatic listening whenever real voice is
+# configured (Gemini Live primary, or the local VoiceLoop OFFLINE_FALLBACK
+# via STT_PROVIDER=faster_whisper) -- the native app's own CPAL mic loop
+# must stay off in that case so there is never more than one automatic
+# microphone owner. Manual/dev runs of the native app alone (no backend
+# voice loop) keep it enabled.
+$geminiLiveEnabled = [System.Environment]::GetEnvironmentVariable('GEMINI_LIVE_ENABLED')
+$backendOwnsVoice = ($sttProvider -eq 'faster_whisper') -or ($geminiLiveEnabled -eq 'true')
+$env:TARS_NATIVE_MIC_ENABLED = if ($backendOwnsVoice) { '0' } else { '1' }
+
 $provenanceFile = Join-Path $WebDir 'src-tauri\target\release\.tars-build-provenance.json'
 $currentFingerprint = Get-SourceFingerprint -WebDir $WebDir
 

@@ -1364,7 +1364,24 @@ pub fn run() {
             // tauri.conf.json `visible: false`); this is what lets TARS
             // run as a true background/tray app rather than a dashboard
             // that happens to also listen.
-            wake_engine::start(app.handle().clone());
+            //
+            // Skipped when the backend owns continuous listening instead
+            // (Gemini Live or the local VoiceLoop OFFLINE_FALLBACK) --
+            // there must never be two automatic microphone owners
+            // competing for the same device. The launcher sets this to
+            // "0" whenever it starts a backend-owned voice loop; default
+            // stays enabled for manual/dev runs of the native app alone.
+            let native_mic_enabled = std::env::var("TARS_NATIVE_MIC_ENABLED")
+                .map(|value| value != "0")
+                .unwrap_or(true);
+            if native_mic_enabled {
+                wake_engine::start(app.handle().clone());
+            } else {
+                eprintln!(
+                    "[wake_engine] native microphone loop disabled (TARS_NATIVE_MIC_ENABLED=0) -- \
+                     backend voice loop owns the microphone"
+                );
+            }
 
             // Non-intrusive background chart observation (TARS Alexa-Speed
             // Phase C): polls a discovered chart window via

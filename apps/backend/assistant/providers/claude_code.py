@@ -264,6 +264,8 @@ class ClaudeCodeProvider(AssistantProvider):
                 try:
                     line = await asyncio.wait_for(process.stdout.readline(), timeout=self._timeout)
                 except TimeoutError as exc:
+                    process.kill()
+                    await process.wait()
                     raise AssistantProviderError(
                         f"Claude Code CLI produced no output for {self._timeout}s and was killed"
                     ) from exc
@@ -325,6 +327,16 @@ class ClaudeCodeProvider(AssistantProvider):
             process.kill()
             await process.wait()
             raise
+        finally:
+            # Safety net for asyncio.CancelledError specifically: it is a
+            # BaseException (not Exception, since Python 3.8), so the
+            # `except Exception` above never sees it -- this is the path a
+            # caller-side timeout/cancellation (e.g. provider_router.py's
+            # per-provider router timeout) actually takes, and without this
+            # the CLI subprocess would be orphaned rather than killed the
+            # moment its caller gives up on it.
+            if process.returncode is None:
+                process.kill()
 
 
 def _claude_subprocess_env() -> dict[str, str]:

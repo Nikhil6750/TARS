@@ -31,3 +31,24 @@ openwakeword==0.6.0
 # in tests/test_voice_end_to_end_real.py's real STT<->TTS round trip. Not a
 # runtime dependency of any provider adapter itself.
 scipy==1.17.0
+
+# Raw microphone capture (voice/mic_device.py, Float32Microphone in both
+# voice/voice_loop.py and voice/gemini_live_loop.py). PyAudio wraps
+# PortAudio, which exposes the same OS-processed WASAPI endpoint CPAL used
+# natively (not a raw/unprocessed device), so audio quality is unchanged
+# from the prior native-Rust capture.
+PyAudio==0.2.14
+# speech_recognition.Recognizer's phrase-boundary detection -- used only by
+# the prior local voice_loop.py primary path, now superseded by Gemini
+# Live's server-side VAD (voice/gemini_live_loop.py). Still installed
+# because voice_loop.py itself hasn't been deleted yet -- DELETE-LATER,
+# see docs/coordination/handoffs/codex.md's Gemini Live voice-reset audit.
+SpeechRecognition==3.17.0
+
+# Realtime primary voice path: Gemini Live API (streaming mic audio in,
+# server-side VAD/turn detection, native audio out). The local
+# SpeechRecognition+faster-whisper primary path above is superseded by
+# this -- faster-whisper remains installed as OFFLINE_FALLBACK only (see
+# voice/providers/faster_whisper_stt.py). Requires GEMINI_API_KEY (or
+# GOOGLE_API_KEY) in the environment.
+google-genai==2.19.0

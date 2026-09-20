@@ -29,10 +29,13 @@ export const TARSCharacter: React.FC<TARSCharacterProps> = ({
   // Theme color palette based on companion state
   const stateColorMap: Record<CompanionVisualState, { primary: string; glow: string; label: string }> = {
     IDLE: { primary: '#00f0ff', glow: 'rgba(0, 240, 255, 0.35)', label: 'READY' },
+    VOICE_OFF: { primary: '#9ca3af', glow: 'rgba(156, 163, 175, 0.3)', label: 'VOICE OFF' },
     WAKE: { primary: '#38bdf8', glow: 'rgba(56, 189, 248, 0.8)', label: 'WAKING UP' },
     LISTENING: { primary: '#00ff66', glow: 'rgba(0, 255, 102, 0.45)', label: 'LISTENING' },
+    HEARING: { primary: '#2dffc4', glow: 'rgba(45, 255, 196, 0.55)', label: 'HEARING YOU' },
     THINKING: { primary: '#a855f7', glow: 'rgba(168, 85, 247, 0.45)', label: 'ANALYZING' },
     SPEAKING: { primary: '#00f0ff', glow: 'rgba(0, 240, 255, 0.5)', label: 'TRANSMITTING' },
+    DISCONNECTED: { primary: '#ff8a00', glow: 'rgba(255, 138, 0, 0.5)', label: 'DISCONNECTED' },
     ALERT: { primary: '#ffb700', glow: 'rgba(255, 183, 0, 0.45)', label: 'SETUP ALERT' },
     WARNING: { primary: '#ff3366', glow: 'rgba(255, 51, 102, 0.55)', label: 'RISK DETECTED' },
   };
@@ -40,10 +43,10 @@ export const TARSCharacter: React.FC<TARSCharacterProps> = ({
   const { primary, glow, label } = stateColorMap[state] || stateColorMap.IDLE;
 
   // Compute segment heights & translations dynamically
-  const isListening = state === 'LISTENING';
+  const isListening = state === 'LISTENING' || state === 'HEARING';
   const isThinking = state === 'THINKING';
   const isSpeaking = state === 'SPEAKING';
-  const isWarning = state === 'WARNING' || state === 'ALERT';
+  const isWarning = state === 'WARNING' || state === 'ALERT' || state === 'DISCONNECTED';
 
   // Volume scale
   const vol = Math.max(0.05, Math.min(1.0, audioVolume));

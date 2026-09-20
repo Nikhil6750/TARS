@@ -69,6 +69,14 @@ export const App: React.FC = () => {
   const [isListening, setIsListening] = useState(false);
   const [audioVolume, setAudioVolume] = useState(0);
 
+  // Manual listening mode (Gemini Live native mic, separate from the
+  // browser-based push-to-talk above) -- the ONE authoritative source is
+  // the backend's manual_listening_enabled flag, read from the same
+  // gemini-status poll below and never guessed/derived locally. Defaults
+  // to false, matching the backend's own default-off-on-start behavior.
+  const [manualListeningEnabled, setManualListeningEnabled] = useState(false);
+  const [manualListeningBusy, setManualListeningBusy] = useState(false);
+
   // Text streaming in as assistant reply arrives
   const [streamingAnswer, setStreamingAnswer] = useState('');
   const [analysisProgress, setAnalysisProgress] = useState<string | undefined>(undefined);
@@ -88,6 +96,67 @@ export const App: React.FC = () => {
     document.title = 'TARS Ready';
     void nativeBridge.markFrontendReady();
   }, []);
+
+  // Drives the central TARSOrb + top-right status dot from REAL Gemini
+  // Live backend state -- never invented locally. Only active while
+  // Gemini reports itself enabled (the single automatic mic owner in that
+  // mode); does not touch companionState when Gemini isn't the voice
+  // owner (e.g. the local VoiceLoop OFFLINE_FALLBACK), so those paths and
+  // unrelated features (chart analysis, trading alerts) keep working
+  // exactly as before.
+  useEffect(() => {
+    const base = settings.apiEndpoint?.replace(/\/$/, '');
+    if (!base) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`${base}/api/v1/voice/gemini-status`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled || !data.enabled) return;
+        // Backend authority: the frontend never guesses/derives this --
+        // it only ever reflects what the backend just reported.
+        setManualListeningEnabled(Boolean(data.manual_listening_enabled));
+        switch (data.state) {
+          case 'starting':
+            setCompanionState('WAKE');
+            break;
+          case 'voice_off':
+            setCompanionState('VOICE_OFF');
+            break;
+          case 'listening':
+            setCompanionState(data.connected && data.mic_streaming ? 'LISTENING' : 'WAKE');
+            break;
+          case 'user_speaking':
+            setCompanionState(data.connected && data.mic_streaming ? 'HEARING' : 'WAKE');
+            break;
+          case 'processing':
+            setCompanionState('THINKING');
+            break;
+          case 'speaking':
+            setCompanionState('SPEAKING');
+            break;
+          case 'stopped':
+            setCompanionState(data.error ? 'DISCONNECTED' : 'IDLE');
+            break;
+        }
+      } catch {
+        // Backend unreachable -- leave whatever state was last known.
+      }
+    };
+
+    void poll();
+    // 300ms, not 750ms: the status pill is what tells the user whether
+    // TARS is still busy, so it needs to flip to Thinking/Speaking fast
+    // enough that they don't start repeating themselves before it catches
+    // up with a state change the backend already made.
+    const interval = setInterval(() => void poll(), 300);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [settings.apiEndpoint]);
 
   const cancelAutoHide = useCallback(() => {
     if (autoHideTimerRef.current !== null) {
@@ -714,6 +783,38 @@ export const App: React.FC = () => {
     }
   };
 
+  // Manual Listening Mode Handler -- the "Start Listening"/"Stop
+  // Listening" button in ConversationView. Separate from push-to-talk
+  // above: this toggles GeminiLiveLoop's native mic (the one continuous
+  // microphone owner), not a second browser-mic recording session. The
+  // backend's manual_listening_enabled flag (synced via the gemini-status
+  // poll effect) is the only source of truth; this handler only requests
+  // a change and lets the poll (or the response body, applied
+  // immediately below for a snappier button) confirm it actually took.
+  const handleToggleManualListening = useCallback(async () => {
+    const base = settings.apiEndpoint?.replace(/\/$/, '');
+    if (!base || manualListeningBusy) return;
+    const endpoint = manualListeningEnabled
+      ? '/api/v1/voice/manual-listening/stop'
+      : '/api/v1/voice/manual-listening/start';
+    setManualListeningBusy(true);
+    try {
+      const res = await fetch(`${base}${endpoint}`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setManualListeningEnabled(Boolean(data.manual_listening_enabled));
+      }
+      // Non-OK (e.g. 404 -- Gemini Live isn't the active mic owner here)
+      // is left for the next gemini-status poll to reconcile rather than
+      // guessed at here.
+    } catch {
+      // Backend unreachable -- leave state as last known; the poll effect
+      // will reconcile once it's reachable again.
+    } finally {
+      setManualListeningBusy(false);
+    }
+  }, [settings.apiEndpoint, manualListeningEnabled, manualListeningBusy]);
+
   // Send Chat Message via real backend endpoint with streaming
   const handleSendMessage = async (text: string, inputMode: 'text' | 'voice' = 'text') => {
     cancelAutoHide();
@@ -822,6 +923,7 @@ export const App: React.FC = () => {
       <VoiceAssistantRuntime
         visible={appMode === 'voice'}
         onModeChange={setAppMode}
+        apiEndpoint={settings.apiEndpoint}
       />
 
       {/* Main OpenJarvis-Style Desktop Application Shell */}
@@ -848,6 +950,9 @@ export const App: React.FC = () => {
               companionState={companionState}
               isListening={isListening}
               onTogglePushToTalk={handleTogglePushToTalk}
+              manualListeningEnabled={manualListeningEnabled}
+              manualListeningBusy={manualListeningBusy}
+              onToggleManualListening={handleToggleManualListening}
               onSendMessage={handleSendMessage}
               onOpenWorkspace={() => setActiveTab('workspace')}
               onSpeak={(text) => {

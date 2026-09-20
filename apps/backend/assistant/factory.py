@@ -110,7 +110,19 @@ def _route_cli_pool(
         candidates.append(alternate)
     if settings.ollama_model:
         candidates.append(OllamaProvider(settings.ollama_base_url, settings.ollama_model))
-    return RoutedAssistantProvider(candidates, trace_store=trace_store, fixed_order=True)
+    # gemini_fast (direct Gemini Flash API, no CLI subprocess) is ranked
+    # ahead of claude_code/codex for ordinary conversation -- see
+    # provider_router.py's TASK_PREFERENCES. fixed_order is False (not
+    # True, as this pool used before gemini_fast existed) so that per-task
+    # preference actually governs which candidate goes first: gemini_fast
+    # for SIMPLE/FOLLOW_UP/GENERAL, codex/claude_code (unchanged) for
+    # CODING/DEBUGGING/REASONING/TRADING_EPISTEMICS.
+    from assistant.providers.gemini_fast import GeminiFastConversationProvider
+
+    gemini_fast = GeminiFastConversationProvider(model=settings.gemini_fast_model)
+    if gemini_fast.is_available:
+        candidates.append(gemini_fast)
+    return RoutedAssistantProvider(candidates, trace_store=trace_store, fixed_order=False)
 
 
 def build_chart_assistant_provider(settings: Settings) -> AssistantProvider:

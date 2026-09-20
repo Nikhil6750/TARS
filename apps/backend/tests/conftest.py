@@ -13,6 +13,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("TTS_PROVIDER", "mock")
     monkeypatch.setenv("WAKE_WORD_PROVIDER", "mock")
     monkeypatch.setenv("OBSIDIAN_VAULT_PATH", str(tmp_path / "vault"))
+    # Tests must never try to open a real Gemini Live session -- .env may
+    # legitimately have GEMINI_LIVE_ENABLED=true for real runs, which
+    # pydantic-settings would otherwise load as a base layer here too.
+    monkeypatch.setenv("GEMINI_LIVE_ENABLED", "false")
 
     from app.config import get_settings
 
