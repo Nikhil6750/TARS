@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import uuid
 
 import anyio
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from events.core import NormalizedEvent
+from voice.gemini_live import GeminiLiveVoiceSession, TarsTools
 from voice.session import LatencyMetrics, VoiceSessionController, VoiceState
 import os
 
@@ -102,11 +105,20 @@ async def realtime(websocket: WebSocket):
             await websocket.send_json(await outgoing.get())
 
     try:
-        await asyncio.wait_for(voice.ready.wait(), 5)
+        settings = get_settings()
+        use_gemini = (settings.voice_provider.lower() == "gemini_live"
+                      and time.monotonic() >= getattr(state, "gemini_unavailable_until", 0))
+        fallback_reason = None
+        if settings.voice_provider.lower() == "gemini_live" and not use_gemini:
+            fallback_reason = getattr(state, "gemini_unavailable_reason", "Gemini Live unavailable")
+        elif use_gemini and not settings.gemini_api_key and not getattr(state, "gemini_connect_override", None):
+            use_gemini, fallback_reason = False, "GEMINI_API_KEY is not set"
+        if not use_gemini:
+            await asyncio.wait_for(voice.ready.wait(), 5)
         if getattr(state, "realtime_session", None) is not None:
             await websocket.close(code=1013, reason="A voice session is already active")
             return
-        if voice.stt.name == "mock" or voice.tts.name == "mock":
+        if not use_gemini and (voice.stt.name == "mock" or voice.tts.name == "mock"):
             await websocket.send_json({"type": "provider_status", "providers": {
                 "stt": "DEGRADED", "tts": "DEGRADED"},
                 "detail": "Real local voice providers are not ready"})
@@ -115,16 +127,30 @@ async def realtime(websocket: WebSocket):
         vad = SileroStreamingVAD()
         if not hasattr(state, "realtime_metrics"):
             state.realtime_metrics = LatencyMetrics()
-        engine = None
-        model_dir = os.path.expanduser(get_settings().sherpa_model_dir)
-        if SherpaPartialEngine.available(model_dir):
-            engine = await asyncio.to_thread(SherpaPartialEngine, model_dir)
-        session = VoiceSessionController(state.turn_controller, voice, emit, vad,
-                                         metrics=state.realtime_metrics, partial_engine=engine,
-                                         context_provider=lambda: voice_context(state))
-        state.realtime_session = session
-        sender = asyncio.create_task(send())
-        await session.start()
+        if use_gemini:
+            session = GeminiLiveVoiceSession(
+                TarsTools(state, uuid.uuid4().hex), emit, vad, model=settings.gemini_live_model,
+                idle_seconds=settings.gemini_live_idle_seconds, metrics=state.realtime_metrics,
+                connect=getattr(state, "gemini_connect_override", None))
+            state.realtime_session = session
+            sender = asyncio.create_task(send())
+            await session.start()
+        else:
+            engine = None
+            model_dir = os.path.expanduser(settings.sherpa_model_dir)
+            if SherpaPartialEngine.available(model_dir):
+                engine = await asyncio.to_thread(SherpaPartialEngine, model_dir)
+            session = VoiceSessionController(state.turn_controller, voice, emit, vad,
+                                             metrics=state.realtime_metrics, partial_engine=engine,
+                                             context_provider=lambda: voice_context(state))
+            state.realtime_session = session
+            sender = asyncio.create_task(send())
+            await session.start()
+            if fallback_reason:
+                # Truthful: the UI must know it is on the local fallback and why.
+                await session.send("provider_status", providers=session.provider_status.copy(),
+                                   voice_provider="LOCAL_STREAMING",
+                                   detail=f"Using LOCAL_STREAMING voice: {fallback_reason}")
         while True:
             # Missing capture is an honest microphone disconnect, not CONNECTED forever.
             message = await asyncio.wait_for(websocket.receive(), 5)
@@ -132,6 +158,11 @@ async def realtime(websocket: WebSocket):
                 break
             if sender.done():
                 await sender
+            if getattr(session, "fatal", None):
+                state.gemini_unavailable_until = time.monotonic() + 120
+                state.gemini_unavailable_reason = f"Gemini Live failed: {session.fatal}"
+                await asyncio.sleep(0.3)  # let the truthful status event flush
+                break
             if message.get("bytes") is not None:
                 await session.push_audio(message["bytes"])
             elif message.get("text"):

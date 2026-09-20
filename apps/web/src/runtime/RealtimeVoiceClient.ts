@@ -1,3 +1,4 @@
+import { PcmStreamPlayer } from '../services/pcm-player';
 import { audioService } from '../services/audio';
 import { loadSettings } from '../services/storage';
 import { isTauri } from '../services/tauri';
@@ -11,6 +12,8 @@ export interface VoiceEvent {
   text?: string;
   audio?: string;
   sequence?: number;
+  sample_rate?: number;
+  voice_provider?: string;
   response?: { display_text: string };
   providers?: Record<string, string>;
   detail?: string;
@@ -18,6 +21,7 @@ export interface VoiceEvent {
 
 /** Audio transport/renderer only. The server owns every conversational state. */
 export class RealtimeVoiceClient {
+  private pcm = new PcmStreamPlayer();
   private socket: WebSocket | null = null;
   private unlisten: Array<() => void> = [];
   private retry: ReturnType<typeof setTimeout> | null = null;
@@ -92,6 +96,10 @@ export class RealtimeVoiceClient {
       this.activeTurn = event.turn_id ?? this.activeTurn;
     }
     this.listener(event);
+    if (event.type === 'audio_pcm' && event.audio) {
+      if (event.turn_id === this.activeTurn || !this.activeTurn) { this.activeTurn = event.turn_id ?? this.activeTurn; this.pcm.play(event.audio, event.sample_rate ?? 24000); }
+      return;
+    }
     if (event.type === 'audio_chunk' && event.audio) {
       if (this.queue.length >= 4) { this.socket?.close(); this.flush(); return; }
       this.queue.push(event);
@@ -129,6 +137,7 @@ export class RealtimeVoiceClient {
     this.epoch++;
     this.queue = [];
     this.playing = false;
+    this.pcm.stop();
     audioService.stopSpeaking();
   }
 

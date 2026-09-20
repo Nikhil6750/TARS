@@ -247,6 +247,7 @@ def test_duplex_websocket_partial_final_barge_in_and_disconnect(monkeypatch):
 
     monkeypatch.setattr(realtime, "SileroStreamingVAD", lambda: lambda pcm: pcm[0] != 0)
     monkeypatch.setattr(realtime.SherpaPartialEngine, "available", classmethod(lambda cls, d: False))
+    monkeypatch.setattr(realtime, "get_settings", lambda: SimpleNamespace(voice_provider="local_streaming", gemini_api_key="", sherpa_model_dir=""))
     app = FastAPI()
     ready = asyncio.Event()
     ready.set()
@@ -374,3 +375,46 @@ def test_echo_of_own_speech_never_announces_a_barge_in_but_real_words_do():
     assert "speech_started" not in own and "final_transcript" not in own
     real = asyncio.run(scenario(["Stop", "Stop what", "Stop what about gold"] + ["Stop what about gold"] * 50))
     assert "speech_started" in real and "final_transcript" in real
+
+
+def _router_app(monkeypatch, provider, key, connect=None):
+    from fastapi import FastAPI
+
+    from app.routers import realtime
+
+    monkeypatch.setattr(realtime, "SileroStreamingVAD", lambda: lambda pcm: pcm[0] != 0)
+    monkeypatch.setattr(realtime.SherpaPartialEngine, "available", classmethod(lambda cls, d: False))
+    monkeypatch.setattr(realtime, "get_settings", lambda: SimpleNamespace(
+        voice_provider=provider, gemini_api_key=key, gemini_live_model="gemini-3.8-live",
+        gemini_live_idle_seconds=30.0, sherpa_model_dir=""))
+    app = FastAPI()
+    ready = asyncio.Event()
+    ready.set()
+    app.state.voice_providers = SimpleNamespace(stt=STT(), tts=TTS(), ready=ready)
+    app.state.turn_controller = Turns()
+    if connect:
+        app.state.gemini_connect_override = connect
+    app.include_router(realtime.router)
+    return app
+
+
+def test_router_uses_gemini_live_when_configured_and_keyed(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    app = _router_app(monkeypatch, "gemini_live", "k", connect=lambda: None)
+    with TestClient(app) as client, client.websocket_connect("/api/v1/voice/realtime") as ws:
+        ws.send_bytes(bytes(1024))
+        seen = [ws.receive_json() for _ in range(3)]
+        assert any(e.get("voice_provider") == "GEMINI_LIVE" for e in seen)
+        assert app.state.realtime_session.voice_provider == "GEMINI_LIVE"
+
+
+def test_router_falls_back_to_local_truthfully_without_key(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    app = _router_app(monkeypatch, "gemini_live", "")
+    with TestClient(app) as client, client.websocket_connect("/api/v1/voice/realtime") as ws:
+        ws.send_bytes(bytes(1024))
+        seen = [ws.receive_json() for _ in range(4)]
+        fallback = [e for e in seen if e.get("voice_provider") == "LOCAL_STREAMING"]
+        assert fallback and "GEMINI_API_KEY is not set" in fallback[0]["detail"]

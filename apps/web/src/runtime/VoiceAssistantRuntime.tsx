@@ -20,6 +20,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
   const [volume, setVolume] = useState(0);
   const [error, setError] = useState('');
   const [stateLabel, setStateLabel] = useState('IDLE');
+  const [voiceProvider, setVoiceProvider] = useState('');
   const [monitors, setMonitors] = useState<MonitorStatus | null>(null);
   const [alert, setAlert] = useState<TarsAlert | null>(null);
   const modeRef = useRef(onModeChange);
@@ -48,8 +49,9 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
         setAnswer(previous => previous + (event.text ?? ''));
       } else if (event.type === 'response_complete' && event.response) {
         setAnswer(event.response.display_text);
-      } else if (event.type === 'provider_status' && event.detail) {
-        setError(event.detail);
+      } else if (event.type === 'provider_status') {
+        if (event.voice_provider) setVoiceProvider(event.voice_provider);
+        if (event.detail && /unavailable|failed|lost|LOCAL/i.test(event.detail)) setError(event.detail);
       } else if (event.type === 'metrics') {
         console.info('[TARS voice latency]', event);
       }
@@ -82,6 +84,6 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
     <VoicePanel status={toVoicePanelStatus(status)} audioVolume={volume}
       transcript={transcript} streamedAnswer={error || answer}
       onDismiss={() => void windowLifecycle.hide()}
-      stateLabel={stateLabel} monitors={monitors} alert={alert} />
+      stateLabel={voiceProvider ? `${stateLabel} · ${voiceProvider === 'GEMINI_LIVE' ? 'GEMINI' : 'LOCAL'}` : stateLabel} monitors={monitors} alert={alert} />
   </div>;
 };
