@@ -360,7 +360,8 @@ class LocalStreamingTTS:
 
     def __init__(self, provider: TextToSpeechProvider,
                  on_audio_chunk: Callable[[SynthesisResult], Awaitable[None]],
-                 on_complete: Callable[[], Awaitable[None]]):
+                 on_complete: Callable[[], Awaitable[None]], on_synth_started=None):
+        self.on_synth_started = on_synth_started
         self.provider = provider
         self.on_audio_chunk, self.on_complete = on_audio_chunk, on_complete
         self.generation = 0
@@ -373,6 +374,8 @@ class LocalStreamingTTS:
             if generation != self.generation:
                 return
             stream = getattr(self.provider, "synthesize_stream", None)
+            if self.on_synth_started:
+                self.on_synth_started()
             if callable(stream):
                 iterator = stream(text)
                 try:

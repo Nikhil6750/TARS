@@ -112,6 +112,8 @@ async def main():
     print(" speech end -> first audio chunk sent:", d("speech1_end", "first_audio_at"))
     print(" barge-in speech start -> interrupt event:", d("speech2_start", "interrupt_evt"))
     print(" second final transcript at:", s.get("final2"))
+    import urllib.request
+    print(" backend latest_ms:", json.load(urllib.request.urlopen("http://127.0.0.1:8000/api/v1/voice/realtime/diagnostics"))["latest_ms"])
 
 
 asyncio.run(main())

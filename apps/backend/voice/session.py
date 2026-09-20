@@ -39,6 +39,9 @@ class LatencyMetrics:
         "speech_ended_to_agent_request_started": ("speech_ended", "agent_request_started"),
         "agent_request_started_to_first_token": ("agent_request_started", "first_token"),
         "first_token_to_first_tts_audio": ("first_token", "first_tts_audio"),
+        "first_token_to_first_speech_chunk": ("first_token", "first_speech_chunk"),
+        "first_speech_chunk_to_first_tts_audio": ("first_speech_chunk", "first_tts_audio"),
+        "first_speech_chunk_to_synth_started": ("first_speech_chunk", "tts_synth_started"),
         "speech_ended_to_first_audible_audio": ("speech_ended", "first_audible_audio"),
         "barge_in_detected_to_playback_stopped": ("barge_in_detected", "playback_stopped"),
     }
@@ -254,7 +257,8 @@ class VoiceSessionController:
             if not self.audio_pending:
                 await self.transition(VoiceState.LISTENING)
 
-        tts = LocalStreamingTTS(self.voice.tts, audio_chunk, complete)
+        tts = LocalStreamingTTS(self.voice.tts, audio_chunk, complete,
+                                on_synth_started=lambda: self.metrics.mark(turn_id, "tts_synth_started"))
         self.tts = tts
         async def synthesize():
             try:
@@ -284,6 +288,7 @@ class VoiceSessionController:
                         await self.send("delta", text=event.text)
                         for chunk in chunker.feed(event.text):
                             self.spoken.append(chunk)
+                            self.metrics.mark(turn_id, "first_speech_chunk")
                             await queue.put(chunk)
                     elif event.type == "complete" and event.response:
                         response = event.response

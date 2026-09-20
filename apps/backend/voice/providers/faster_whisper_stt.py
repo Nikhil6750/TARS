@@ -49,6 +49,9 @@ class FasterWhisperSTTProvider(SpeechToTextProvider):
                 segments, info = self._model.transcribe(
                     samples, language="en", beam_size=1, condition_on_previous_text=False,
                     hotwords="TARS, EURUSD, XAUUSD, gold",
+                    # Bound decoding: on silence/noise Whisper can hallucinate for 20+ s and hold the
+                    # inference lock, stalling every real turn behind it.
+                    max_new_tokens=128, temperature=0.0, without_timestamps=True,
                 )
                 text = " ".join(segment.text.strip() for segment in segments).strip()
         except Exception as exc:
