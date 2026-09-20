@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { VoicePanel, toVoicePanelStatus } from '../components/voice/VoicePanel';
 import { nativeBridge } from '../services/native-bridge';
 import { CompanionVisualState } from '../types/companion';
+import { ALERT_EVENT, fetchMonitorStatus, MonitorStatus, TarsAlert } from '../services/monitors';
 import { realtimeVoiceClient } from './RealtimeVoiceClient';
+import { isTauri } from '../services/tauri';
 import { windowLifecycle } from './WindowLifecycle';
 
 interface VoiceAssistantRuntimeProps {
@@ -17,6 +19,9 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
   const [answer, setAnswer] = useState('');
   const [volume, setVolume] = useState(0);
   const [error, setError] = useState('');
+  const [stateLabel, setStateLabel] = useState('IDLE');
+  const [monitors, setMonitors] = useState<MonitorStatus | null>(null);
+  const [alert, setAlert] = useState<TarsAlert | null>(null);
   const modeRef = useRef(onModeChange);
   modeRef.current = onModeChange;
   useEffect(() => {
@@ -31,6 +36,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
           ASSISTANT_SPEAKING: 'SPEAKING', INTERRUPTING: 'LISTENING', ERROR: 'IDLE',
         };
         setStatus(map[event.state ?? ''] ?? 'IDLE');
+        setStateLabel(event.state ?? 'IDLE');
         if (event.state === 'ERROR') setError(event.detail ?? 'A voice provider is unavailable.');
         else setError('');
       } else if (event.type === 'speech_started') {
@@ -50,10 +56,32 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
     }, setVolume);
     return () => { realtimeVoiceClient.stop(); windowLifecycle.stop(); };
   }, []);
+  useEffect(() => {
+    // Hotkey registration failures are visible, not silent (Rust records each outcome).
+    if (!isTauri()) return;
+    void import('@tauri-apps/api/core').then(async ({ invoke }) => {
+      const status = await invoke<{ shortcut: string; registered: boolean; error?: string }[]>('get_hotkey_status');
+      const failed = status.filter(item => !item.registered);
+      if (failed.length) {
+        setAlert({ title: 'Hotkey unavailable', replay: false, at: Date.now(),
+          summary: `${failed.map(item => item.shortcut).join(', ')} could not be registered (in use by another app?). Use the tray icon instead.` });
+      }
+    }).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => { const next = await fetchMonitorStatus(); if (alive) setMonitors(next); };
+    void poll();
+    const timer = window.setInterval(poll, 2000);
+    const onAlert = (e: Event) => setAlert((e as CustomEvent<TarsAlert>).detail);
+    window.addEventListener(ALERT_EVENT, onAlert);
+    return () => { alive = false; window.clearInterval(timer); window.removeEventListener(ALERT_EVENT, onAlert); };
+  }, []);
   if (!visible) return null;
   return <div className="fixed inset-0 h-screen w-screen">
     <VoicePanel status={toVoicePanelStatus(status)} audioVolume={volume}
       transcript={transcript} streamedAnswer={error || answer}
-      onDismiss={() => void windowLifecycle.hide()} />
+      onDismiss={() => void windowLifecycle.hide()}
+      stateLabel={stateLabel} monitors={monitors} alert={alert} />
   </div>;
 };

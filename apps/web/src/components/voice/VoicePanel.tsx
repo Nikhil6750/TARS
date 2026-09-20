@@ -1,6 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import { X } from 'lucide-react';
 import { CompanionVisualState } from '../../types/companion';
+import { MonitorStatus, TarsAlert } from '../../services/monitors';
+import { MonitorStrip } from './MonitorStrip';
 
 export type VoicePanelStatus = 'LISTENING' | 'THINKING' | 'SPEAKING' | 'IDLE';
 
@@ -10,6 +12,10 @@ interface VoicePanelProps {
   transcript: string;
   streamedAnswer: string;
   onDismiss: () => void;
+  /** Raw backend voice state (IDLE..ERROR), shown verbatim so the UI reflects backend truth. */
+  stateLabel?: string;
+  monitors?: MonitorStatus | null;
+  alert?: TarsAlert | null;
 }
 
 const STATUS_LABEL: Record<VoicePanelStatus, string> = {
@@ -29,6 +35,9 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
   transcript,
   streamedAnswer,
   onDismiss,
+  stateLabel,
+  monitors,
+  alert,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number | null>(null);
@@ -116,7 +125,7 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
                 : 'text-slate-500'
             }`}
           >
-            {STATUS_LABEL[status]}
+            {stateLabel ? stateLabel.replace('_', ' ') : STATUS_LABEL[status]}
           </span>
         </div>
         <button
@@ -133,6 +142,8 @@ export const VoicePanel: React.FC<VoicePanelProps> = ({
       <div className="mt-2 h-10 w-full bg-[#080a10] border border-slate-800/60 rounded-lg overflow-hidden shrink-0">
         <canvas ref={canvasRef} width={344} height={40} className="w-full h-full block" />
       </div>
+
+      {(monitors !== undefined || alert) && <MonitorStrip status={monitors ?? null} alert={alert ?? null} />}
 
       {/* Transcript / streamed answer */}
       <div className="mt-2 flex-1 min-h-0 overflow-y-auto custom-scrollbar text-xs leading-relaxed text-slate-200">

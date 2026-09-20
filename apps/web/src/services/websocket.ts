@@ -9,6 +9,8 @@ import { TARSAssistantMessage } from '../types/assistant-message';
 import { ConnectionStatus, CompanionVisualState } from '../types/companion';
 import { validateTradingEvent, validateAssistantMessage } from '../contracts/validator';
 import { sendNotification } from './notifications';
+import { publishAlert } from './monitors';
+import { nativeBridge } from './native-bridge';
 
 export type TradingEventListener = (event: TARSTradingEvent) => void;
 export type ActiveSnapshotListener = (events: TARSTradingEvent[]) => void;
@@ -184,10 +186,21 @@ export class TARSWebSocketClient {
       if (event && typeof event.title === 'string' && typeof event.summary === 'string'
         && ['NOTIFY', 'ANALYZE', 'SPEAK'].includes(String(msg.decision))) {
         void sendNotification({ title: event.title, body: event.summary });
+        publishAlert({ title: event.title, summary: event.summary, replay: (event.payload as { replay?: boolean } | undefined)?.replay === true, at: Date.now() });
+        // Surface the compact assistant so the alert is visible and a spoken follow-up is one sentence away.
+        void nativeBridge.summonHUD('voice');
       }
       return;
     }
-    if (msg.type === 'provider_status' || msg.type === 'event_analysis') return;
+    if (msg.type === 'event_analysis') {
+      const event = msg.event as Record<string, unknown> | undefined;
+      if (event && typeof event.title === 'string' && typeof msg.analysis === 'string') {
+        publishAlert({ title: event.title, summary: String(event.summary ?? ''), analysis: msg.analysis,
+          replay: (event.payload as { replay?: boolean } | undefined)?.replay === true, at: Date.now() });
+      }
+      return;
+    }
+    if (msg.type === 'provider_status') return;
 
     // Heartbeat pong handling from real backend
     if (msg.type === 'pong') {

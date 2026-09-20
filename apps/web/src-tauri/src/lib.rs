@@ -14,6 +14,20 @@ mod capture_wgc;
 mod chart_watcher;
 
 static CAPTURE_COUNTER: AtomicUsize = AtomicUsize::new(1);
+/// Global-shortcut registration outcome, observable by the UI (never silently swallowed).
+static HOTKEY_STATUS: std::sync::Mutex<Vec<(String, Option<String>)>> = std::sync::Mutex::new(Vec::new());
+
+#[tauri::command]
+fn get_hotkey_status() -> Vec<serde_json::Value> {
+    HOTKEY_STATUS
+        .lock()
+        .map(|v| {
+            v.iter()
+                .map(|(k, e)| serde_json::json!({ "shortcut": k, "registered": e.is_none(), "error": e }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 static LAST_EXTERNAL_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 #[cfg(target_os = "windows")]
@@ -1260,6 +1274,7 @@ pub fn run() {
             exit_app,
             get_active_window_context,
             get_monitors_geometry,
+            get_hotkey_status,
             capture_active_window,
             capture_chart_window,
             capture_screen_region,
@@ -1353,17 +1368,28 @@ pub fn run() {
             // Register global shortcuts
             #[cfg(desktop)]
             {
-                let _ = app.global_shortcut().register(summon_space_setup);
-                let _ = app.global_shortcut().register(summon_t_setup);
-                let _ = app.global_shortcut().register(ptt_setup);
+                for (label, shortcut) in [
+                    ("Ctrl+Shift+Space", summon_space_setup),
+                    ("Ctrl+Shift+T", summon_t_setup),
+                    ("Ctrl+Shift+V", ptt_setup),
+                ] {
+                    let result = app.global_shortcut().register(shortcut);
+                    if let Err(e) = &result {
+                        eprintln!("[TARS][hotkey] failed to register {label}: {e}");
+                    }
+                    if let Ok(mut status) = HOTKEY_STATUS.lock() {
+                        status.push((label.to_string(), result.err().map(|e| e.to_string())));
+                    }
+                }
             }
 
             // Start listening for "Hey TARS" immediately, on its own
             // background thread -- independent of whether any window is
-            // ever shown. The main window itself starts hidden (see
-            // tauri.conf.json `visible: false`); this is what lets TARS
-            // run as a true background/tray app rather than a dashboard
-            // that happens to also listen.
+            // ever shown. The main window is created visible on launch
+            // (tauri.conf.json `visible: true`, which start_tars.ps1 relies on
+            // to verify the native page loaded); closing it hides to the tray
+            // and TARS keeps running, so it is a background/tray app after
+            // first launch rather than a dashboard that happens to also listen.
             wake_engine::start(app.handle().clone());
 
             // Non-intrusive background chart observation (TARS Alexa-Speed
