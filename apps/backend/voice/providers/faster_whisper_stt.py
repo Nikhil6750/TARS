@@ -15,6 +15,14 @@ from voice.interfaces import SpeechToTextProvider, TranscriptionResult
 PCM16_SCALE = 32768.0
 
 
+_HOTWORDS = {"tars", "eurusd", "xauusd", "gold"}
+
+
+def _is_hotword_echo(text: str) -> bool:
+    words = [w.strip(".,!?").lower() for w in text.split()]
+    return bool(words) and all(w in _HOTWORDS for w in words) and len(words) >= 3
+
+
 class FasterWhisperSTTProvider(SpeechToTextProvider):
     name = "faster_whisper"
     sample_rate = 16000
@@ -52,8 +60,12 @@ class FasterWhisperSTTProvider(SpeechToTextProvider):
                     # Bound decoding: on silence/noise Whisper can hallucinate for 20+ s and hold the
                     # inference lock, stalling every real turn behind it.
                     max_new_tokens=128, temperature=0.0, without_timestamps=True,
+                    # Silence/noise must yield nothing, never the hotwords echoed back.
+                    vad_filter=True, no_speech_threshold=0.6,
                 )
                 text = " ".join(segment.text.strip() for segment in segments).strip()
         except Exception as exc:
             raise VoiceProviderError(f"faster-whisper transcription failed: {exc}") from exc
+        if _is_hotword_echo(text):
+            text = ""
         return TranscriptionResult(text=text, language=info.language if info else None)
