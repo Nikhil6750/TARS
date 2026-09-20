@@ -17,6 +17,31 @@ from voice.streaming import SherpaPartialEngine, SileroStreamingVAD
 router = APIRouter(tags=["realtime"])
 
 
+async def voice_context(state) -> str:
+    """Grounding for a spoken turn: live/replay quote, next calendar event, TradingView
+    state and the latest alert. Only facts TARS actually has; absent sources say so."""
+    parts = []
+    monitors = getattr(state, "monitors", None)
+    if monitors is not None:
+        try:
+            status = await monitors.status()
+            quote = status.get("quote")
+            if quote:
+                parts.append(f"{quote['symbol']} bid {quote['bid']} ask {quote['ask']} (source: {quote['source']})")
+            else:
+                parts.append(f"No live quote (MT5 {status['mt5']['state']})")
+            nxt = status["calendar"].get("next")
+            if nxt:
+                parts.append(f"next high/medium-impact event: {nxt['currency']} {nxt['event']} at {nxt['at']}"
+                             + (" (DEMO REPLAY)" if nxt.get("replay") else ""))
+            parts.append(f"TradingView chart monitor: {status['tradingview']['state']}")
+        except Exception:
+            pass
+    alert = recent_alert_context(state)
+    head = ("[TARS live context: " + "; ".join(parts) + ". Use only these facts; say when data is missing.]") if parts else ""
+    return (head + " " + alert).strip()
+
+
 def recent_alert_context(state) -> str:
     """One-line context of the latest actionable alert (last 10 min) so a spoken
     follow-up like "what does that mean for EURUSD?" is grounded in it."""
@@ -96,7 +121,7 @@ async def realtime(websocket: WebSocket):
             engine = await asyncio.to_thread(SherpaPartialEngine, model_dir)
         session = VoiceSessionController(state.turn_controller, voice, emit, vad,
                                          metrics=state.realtime_metrics, partial_engine=engine,
-                                         context_provider=lambda: recent_alert_context(state))
+                                         context_provider=lambda: voice_context(state))
         state.realtime_session = session
         sender = asyncio.create_task(send())
         await session.start()

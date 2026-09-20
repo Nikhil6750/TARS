@@ -270,7 +270,7 @@ def test_duplex_websocket_partial_final_barge_in_and_disconnect(monkeypatch):
             final = receive_until(ws, "final_transcript")
             audio = receive_until(ws, "audio_chunk")
             assert final["turn_id"] == audio["turn_id"] == partial["turn_id"]
-            for _ in range(4):
+            for _ in range(8):
                 ws.send_bytes(b"\x01\x00" * 512)
             interrupt = receive_until(ws, "interrupt")
             assert interrupt["previous_turn_id"] == audio["turn_id"]
@@ -300,7 +300,7 @@ def test_streaming_partial_engine_emits_live_partials_and_whisper_final():
         engine = Engine()
         stt = IncrementalWhisperSTT(STT(), emit, lambda pcm: pcm[0] != 0, partial_engine=engine)
         await stt.start()
-        for _ in range(12):
+        for _ in range(26):
             await stt.push_audio(bytes([1, 0]) * 512)
         for _ in range(30):
             await stt.push_audio(bytes(1024))
@@ -312,3 +312,26 @@ def test_streaming_partial_engine_emits_live_partials_and_whisper_final():
     assert "partial_transcript" in events and "final_transcript" in events
     assert events.index("partial_transcript") < events.index("speech_ended") < events.index("final_transcript")
     assert resets == 1
+
+
+def test_short_noise_blip_is_discarded_without_a_final_decode():
+    async def scenario():
+        events = []
+
+        async def emit(ev):
+            events.append(ev["type"])
+
+        from voice.streaming import IncrementalWhisperSTT
+        stt = IncrementalWhisperSTT(STT(), emit, lambda pcm: pcm[0] != 0)
+        await stt.start()
+        for _ in range(9):  # ~0.29 s blip: confirmed (192 ms) but under the 0.4 s voiced floor
+            await stt.push_audio(bytes([1, 0]) * 512)
+        for _ in range(30):
+            await stt.push_audio(bytes(1024))
+        await asyncio.sleep(0.2)
+        await stt.stop()
+        return events
+
+    events = asyncio.run(scenario())
+    assert "speech_discarded" in events
+    assert "final_transcript" not in events and "speech_ended" not in events

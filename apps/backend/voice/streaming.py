@@ -60,7 +60,7 @@ class SileroStreamingVAD:
             None, {"input": audio, "h": self.h, "c": self.c}
         )
         self.context = samples[-64:].reshape(1, -1)
-        return float(out.reshape(-1)[-1]) >= 0.55
+        return float(out.reshape(-1)[-1]) >= 0.6
 
 
 class SherpaPartialEngine:
@@ -133,6 +133,7 @@ class IncrementalWhisperSTT:
         self.last_text = ""
         self.stable = 0
         self.speech_frames = 0
+        self.voiced = 0.0
         self._requests: deque[tuple[int, bytes, bool]] = deque(maxlen=2)
         self._wake = asyncio.Event()
         self._worker: asyncio.Task | None = None
@@ -171,13 +172,15 @@ class IncrementalWhisperSTT:
             self.preroll.append(chunk)
             self.speech_frames = self.speech_frames + 1 if speech else 0
             if not self.active:
-                # 96ms confirmation prevents single-frame noise from stealing a turn.
-                if self.speech_frames < 3:
+                # 192ms confirmation: room noise / echo blips must not steal a turn or
+                # interrupt the assistant.
+                if self.speech_frames < 6:
                     continue
                 self.utterance += 1
                 self.active = True
                 self.audio = bytearray(b"".join(self.preroll))
                 self.duration, self.silence = 0.0, 0.0
+                self.voiced = 0.0
                 self.last_text, self.stable = "", 0
                 self.next_partial = self.partial_interval
                 self.text_changed_at = 0.0
@@ -191,6 +194,8 @@ class IncrementalWhisperSTT:
                     await self._engine_feed(chunk)
             self.duration += 0.032
             self.silence = 0.0 if speech else self.silence + 0.032
+            if speech:
+                self.voiced += 0.032
             if self.partial_engine:
                 # Stable = unchanged for 250 ms of audio (streaming text updates per chunk).
                 self.stable = 1 if self.duration - self.text_changed_at >= 0.25 and self.last_text else 0
@@ -206,9 +211,15 @@ class IncrementalWhisperSTT:
                 await self.emit({"type": "speech_resumed", "utterance": self.utterance})
             if self.silence >= endpoint or self.duration >= 20.0:
                 self.active = False
-                await self.on_speech_ended({"utterance": self.utterance,
-                                           "at": time.perf_counter() - self.silence})
-                self._request(final=True)
+                # Noise gate: too little voiced audio (or nothing recognisable by the streaming
+                # engine on a short blip) is not a turn. Skipping the final decode also keeps
+                # 1s+ whisper decodes from queueing behind noise.
+                if self.voiced < 0.4 or (self.partial_engine and not self.last_text and self.voiced < 1.0):
+                    await self.emit({"type": "speech_discarded", "utterance": self.utterance})
+                else:
+                    await self.on_speech_ended({"utterance": self.utterance,
+                                               "at": time.perf_counter() - self.silence})
+                    self._request(final=True)
                 self.audio.clear()
                 self.preroll.clear()
 
@@ -236,6 +247,8 @@ class IncrementalWhisperSTT:
             self._wake.clear()
             while self._requests:
                 utterance, pcm, final = self._requests.popleft()
+                if utterance != self.utterance:
+                    continue  # superseded before we started decoding
                 try:
                     result = await asyncio.wait_for(self.provider.transcribe(pcm), 15)
                     if utterance != self.utterance:

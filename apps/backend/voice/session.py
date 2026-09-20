@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import logging
 import statistics
 import time
@@ -91,6 +92,7 @@ class VoiceSessionController:
         self.audio_pending: set[int] = set()
         self.audio_credit = asyncio.Semaphore(2)
         self.audio_sequence = 0
+        self.seq = 0
         self.tts_done = False
         self._interrupted: set[str] = set()
         self.history: deque[dict] = deque(maxlen=300)
@@ -100,7 +102,8 @@ class VoiceSessionController:
                                 "tts": "DISCONNECTED", "assistant": "DISCONNECTED"}
 
     async def send(self, type_: str, **payload):
-        event = {"type": type_, "turn_id": self.turn_id,
+        self.seq += 1
+        event = {"type": type_, "turn_id": self.turn_id, "seq": self.seq, "ts": time.time(),
                  "generation": self.generation, **payload}
         # Diagnostic metadata only; never retain audio blobs.
         if type_ not in {"delta", "metrics"}:
@@ -183,6 +186,9 @@ class VoiceSessionController:
             await self.transition(VoiceState.ENDPOINTING)
         elif kind == "speech_resumed":
             await self.transition(VoiceState.USER_SPEAKING)
+        elif kind == "speech_discarded":
+            self.utterance = 0
+            await self.transition(VoiceState.LISTENING)
         elif kind == "speech_ended":
             self.metrics.mark(self.turn_id, kind, event["at"])
             await self.send(kind)
@@ -252,6 +258,8 @@ class VoiceSessionController:
             self.metrics.mark(turn_id, "agent_request_started")
             async with asyncio.timeout(120):
                 context = self.context_provider() if self.context_provider else ""
+                if inspect.isawaitable(context):
+                    context = await context
                 async for event in self.turns.stream_text(
                     (context + " " + text) if context else text, turn_id=turn_id, conversation_id=self.session_id,
                     input_mode=InputMode.voice, speak=False
