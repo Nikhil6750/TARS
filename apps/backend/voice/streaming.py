@@ -112,12 +112,28 @@ class SherpaPartialEngine:
         return (result if isinstance(result, str) else result.text).strip().lower().capitalize()
 
 
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def is_echo(candidate: str, reference: str) -> bool:
+    """True when what the mic heard is (mostly) TARS's own current speech."""
+    heard, spoken = _words(candidate), set(_words(reference))
+    if not heard or not spoken:
+        return False
+    return sum(w in spoken for w in heard) / len(heard) >= 0.6
+
+
 class IncrementalWhisperSTT:
     name = "incremental_faster_whisper"
 
     def __init__(self, provider: SpeechToTextProvider, emit: Callback,
                  vad: Callable[[bytes], bool], *, partial_interval: float = 0.48,
-                 partial_engine: "SherpaPartialEngine | None" = None):
+                 partial_engine: "SherpaPartialEngine | None" = None,
+                 busy: Callable[[], bool] | None = None,
+                 echo_reference: Callable[[], str] | None = None):
+        self.busy, self.echo_reference = busy, echo_reference
+        self.announced = True
         self.provider, self.emit, self.vad = provider, emit, vad
         self.partial_interval = partial_interval
         self.partial_engine = partial_engine
@@ -184,7 +200,11 @@ class IncrementalWhisperSTT:
                 self.last_text, self.stable = "", 0
                 self.next_partial = self.partial_interval
                 self.text_changed_at = 0.0
-                await self.on_speech_started({"utterance": self.utterance})
+                # While TARS speaks/thinks, the mic mostly hears TARS itself (no AEC). A barge-in is
+                # only announced once recognised words are NOT an echo of TARS's own speech.
+                self.announced = not (self.busy and self.busy())
+                if self.announced:
+                    await self.on_speech_started({"utterance": self.utterance})
                 if self.partial_engine:
                     self.partial_engine.reset()
                     await self._engine_feed(b"".join(self.preroll))
@@ -196,6 +216,9 @@ class IncrementalWhisperSTT:
             self.silence = 0.0 if speech else self.silence + 0.032
             if speech:
                 self.voiced += 0.032
+            if self.active and not self.announced and not self.partial_engine and self.voiced >= 0.8:
+                self.announced = True
+                await self.on_speech_started({"utterance": self.utterance})
             if self.partial_engine:
                 # Stable = unchanged for 250 ms of audio (streaming text updates per chunk).
                 self.stable = 1 if self.duration - self.text_changed_at >= 0.25 and self.last_text else 0
@@ -214,7 +237,13 @@ class IncrementalWhisperSTT:
                 # Noise gate: too little voiced audio (or nothing recognisable by the streaming
                 # engine on a short blip) is not a turn. Skipping the final decode also keeps
                 # 1s+ whisper decodes from queueing behind noise.
-                if self.voiced < 0.4 or (self.partial_engine and not self.last_text and self.voiced < 1.0):
+                if not self.announced and not self.partial_engine and self.voiced >= 0.8:
+                    # no streaming engine to vet the words: a long-enough utterance is a barge-in
+                    self.announced = True
+                    await self.on_speech_started({"utterance": self.utterance})
+                if not self.announced:
+                    await self.emit({"type": "speech_discarded", "utterance": self.utterance, "silent": True})
+                elif self.voiced < 0.4 or (self.partial_engine and not self.last_text and self.voiced < 1.0):
                     await self.emit({"type": "speech_discarded", "utterance": self.utterance})
                 else:
                     await self.on_speech_ended({"utterance": self.utterance,
@@ -233,6 +262,13 @@ class IncrementalWhisperSTT:
             return
         if text and text != self.last_text:
             self.last_text, self.text_changed_at = text, self.duration
+            if not self.announced:
+                reference = self.echo_reference() if self.echo_reference else ""
+                if len(_words(text)) >= 2 and not is_echo(text, reference):
+                    self.announced = True
+                    await self.on_speech_started({"utterance": self.utterance})
+                else:
+                    return
             await self.on_partial_transcript({"utterance": self.utterance, "text": text})
 
     def _request(self, *, final: bool):

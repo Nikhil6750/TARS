@@ -270,7 +270,7 @@ def test_duplex_websocket_partial_final_barge_in_and_disconnect(monkeypatch):
             final = receive_until(ws, "final_transcript")
             audio = receive_until(ws, "audio_chunk")
             assert final["turn_id"] == audio["turn_id"] == partial["turn_id"]
-            for _ in range(8):
+            for _ in range(30):
                 ws.send_bytes(b"\x01\x00" * 512)
             interrupt = receive_until(ws, "interrupt")
             assert interrupt["previous_turn_id"] == audio["turn_id"]
@@ -335,3 +335,42 @@ def test_short_noise_blip_is_discarded_without_a_final_decode():
     events = asyncio.run(scenario())
     assert "speech_discarded" in events
     assert "final_transcript" not in events and "speech_ended" not in events
+
+
+def test_echo_of_own_speech_never_announces_a_barge_in_but_real_words_do():
+    from voice.streaming import is_echo
+    assert is_echo("what is happening with", "Here is what is happening with EURUSD right now")
+    assert not is_echo("stop what about gold", "Here is what is happening with EURUSD right now")
+
+    class Engine:
+        def __init__(self, texts):
+            self.texts = iter(texts)
+
+        def reset(self):
+            pass
+
+        def feed(self, pcm):
+            return next(self.texts, "")
+
+    async def scenario(texts):
+        events = []
+
+        async def emit(ev):
+            events.append(ev["type"])
+
+        from voice.streaming import IncrementalWhisperSTT
+        stt = IncrementalWhisperSTT(STT(), emit, lambda pcm: pcm[0] != 0, partial_engine=Engine(texts),
+                                    busy=lambda: True, echo_reference=lambda: "here is what is happening with eurusd")
+        await stt.start()
+        for _ in range(26):
+            await stt.push_audio(bytes([1, 0]) * 512)
+        for _ in range(30):
+            await stt.push_audio(bytes(1024))
+        await asyncio.sleep(0.2)
+        await stt.stop()
+        return events
+
+    own = asyncio.run(scenario(["What is", "What is happening", "What is happening with"] + ["What is happening with"] * 50))
+    assert "speech_started" not in own and "final_transcript" not in own
+    real = asyncio.run(scenario(["Stop", "Stop what", "Stop what about gold"] + ["Stop what about gold"] * 50))
+    assert "speech_started" in real and "final_transcript" in real

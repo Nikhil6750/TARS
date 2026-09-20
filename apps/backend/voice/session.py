@@ -97,7 +97,10 @@ class VoiceSessionController:
         self._interrupted: set[str] = set()
         self.history: deque[dict] = deque(maxlen=300)
         self._matcher = WakePhraseMatcher(wake_aliases or ["hey tars", "tars"])
-        self.stt = IncrementalWhisperSTT(voice.stt, self.on_stt, vad, partial_engine=partial_engine)
+        self.spoken: deque[str] = deque(maxlen=6)
+        self.quiet_until = 0.0
+        self.stt = IncrementalWhisperSTT(voice.stt, self.on_stt, vad, partial_engine=partial_engine,
+                                         busy=self._busy, echo_reference=lambda: " ".join(self.spoken))
         self.provider_status = {"microphone": "DISCONNECTED", "stt": "DISCONNECTED",
                                 "tts": "DISCONNECTED", "assistant": "DISCONNECTED"}
 
@@ -113,6 +116,8 @@ class VoiceSessionController:
     async def transition(self, state: VoiceState):
         if self.closed or self.state == state:
             return
+        if state is VoiceState.LISTENING and self.state is VoiceState.ASSISTANT_SPEAKING:
+            self.quiet_until = time.monotonic() + 1.2  # speaker tail still reaches the mic
         self.state = state
         await self.send("state", state=state.value)
 
@@ -122,6 +127,10 @@ class VoiceSessionController:
         asyncio.create_task(self._warm())
         await self.transition(VoiceState.LISTENING)
         await self.send("provider_status", providers=self.provider_status.copy())
+
+    def _busy(self) -> bool:
+        return (self.state in {VoiceState.THINKING, VoiceState.ASSISTANT_SPEAKING}
+                or bool(self.audio_pending) or time.monotonic() < self.quiet_until)
 
     async def _warm(self):
         try:
@@ -188,7 +197,8 @@ class VoiceSessionController:
             await self.transition(VoiceState.USER_SPEAKING)
         elif kind == "speech_discarded":
             self.utterance = 0
-            await self.transition(VoiceState.LISTENING)
+            if not event.get("silent"):
+                await self.transition(VoiceState.LISTENING)
         elif kind == "speech_ended":
             self.metrics.mark(self.turn_id, kind, event["at"])
             await self.send(kind)
@@ -211,6 +221,7 @@ class VoiceSessionController:
                 self.response_task = asyncio.create_task(self._respond(text, self.generation, self.turn_id))
 
     async def _respond(self, text: str, generation: int, turn_id: str):
+        self.spoken.clear()
         queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=8)
         chunker = SpeechChunker()
         saw_delta = False
@@ -271,6 +282,7 @@ class VoiceSessionController:
                         self.metrics.mark(turn_id, "first_token")
                         await self.send("delta", text=event.text)
                         for chunk in chunker.feed(event.text):
+                            self.spoken.append(chunk)
                             await queue.put(chunk)
                     elif event.type == "complete" and event.response:
                         response = event.response
@@ -281,6 +293,7 @@ class VoiceSessionController:
                         if not saw_delta:
                             self.metrics.mark(turn_id, "first_token")
                         for chunk in chunker.feed("" if saw_delta else response.speech_text, final=True):
+                            self.spoken.append(chunk)
                             await queue.put(chunk)
                         await self.send("response_complete", response=response.model_dump(mode="json"))
             await queue.put(None)
