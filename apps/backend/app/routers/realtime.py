@@ -167,7 +167,11 @@ async def realtime(websocket: WebSocket):
                 await session.push_audio(message["bytes"])
             elif message.get("text"):
                 data = json.loads(message["text"])
-                if data.get("type") == "interrupt":
+                if data.get("type") == "wake" and hasattr(session, "wake"):
+                    await session.wake()
+                elif data.get("type") == "confirm_action" and hasattr(session, "ui_confirm"):
+                    await session.ui_confirm(bool(data.get("approve")))
+                elif data.get("type") == "interrupt":
                     await session.interrupt()
                     await session.transition(VoiceState.USER_SPEAKING if session.stt.active else VoiceState.LISTENING)
                 else:

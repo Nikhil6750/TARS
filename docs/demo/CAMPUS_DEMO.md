@@ -21,7 +21,7 @@ Use **headphones** — the mic path has no acoustic echo cancellation (an echo g
 5. Follow up by voice: "What does that mean for EURUSD?" — the turn carries the alert and market context.
 
 ## Checks
-- `python tools/verify_tray_lifecycle.py` — close-to-tray + hotkey (Ctrl+Shift+Space) against the running app.
+- `python tools/verify_orb_live.py [--voice]` — orb window, click-through, hotkey, expand/collapse against the running app (start it with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222).
 - `python tools/realtime_e2e_ws.py` — real backend timing with synthetic speech (stop the desktop app first).
 - `python tools/realtime_voice_test.py` — the human microphone test (reference for PASS).
 

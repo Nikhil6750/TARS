@@ -555,6 +555,14 @@ class GeminiLiveVoiceSession:
         finally:
             self._tool_tasks.pop(call.id, None)
         self.metrics.latest[f"tool_{name}_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        # UI-only signals (orb state, confirmation card). They never influence Gemini or the tools.
+        status = result.get("status") if isinstance(result, dict) else None
+        await self.send("tool_result", name=name, status=status or ("FAILED" if "error" in result else "DONE"))
+        desktop = getattr(self.tools, "desktop", None)
+        if status == "NEEDS_CONFIRMATION" and desktop is not None and desktop.pending:
+            await self.send("confirmation_pending", text=desktop.pending["describe"])
+        elif name in ("confirm_pending_action", "cancel_pending_action"):
+            await self.send("confirmation_cleared")
         self._last_activity = time.monotonic()
         live = self._live
         if live is None:
@@ -574,6 +582,21 @@ class GeminiLiveVoiceSession:
         self._muted = self._first_audio or self.state is VoiceState.ASSISTANT_SPEAKING
         self._first_audio, self._assistant_text = False, ""
         await self.send("interrupt", previous_turn_id=previous, status="interrupted")
+
+    async def wake(self):
+        """Orb click: open the Gemini session now instead of waiting for speech (no-op if already open)."""
+        self._last_activity = time.monotonic()
+        if self._live is None and not (self._open_task and not self._open_task.done()) and not self.closed:
+            self._open_task = asyncio.create_task(self._open())
+
+    async def ui_confirm(self, approve: bool):
+        """The user clicked Yes/No on the orb's confirmation card. Still executes through ActionRuntime."""
+        desktop = getattr(self.tools, "desktop", None)
+        if desktop is None or not desktop.pending:
+            return
+        result = await desktop.ui_confirm(approve)
+        await self.send("tool_result", name="confirm_pending_action", status=result.get("status"))
+        await self.send("confirmation_cleared")
 
     async def playback(self, message: dict):
         return None  # Gemini output plays client-side without acks; nothing to reconcile

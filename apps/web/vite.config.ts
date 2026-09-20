@@ -11,6 +11,9 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
+      // Registered manually in main.tsx and never inside the Tauri desktop app: a precaching
+      // service worker served a stale UI bundle after rebuilds.
+      injectRegister: false,
       includeAssets: ['favicon.ico', 'robots.txt', 'apple-touch-icon.png', 'icons/*.png', 'icons/*.svg'],
       manifest: {
         name: 'TARS Trading Companion',

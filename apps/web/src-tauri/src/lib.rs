@@ -14,6 +14,179 @@ mod capture_wgc;
 mod chart_watcher;
 
 static CAPTURE_COUNTER: AtomicUsize = AtomicUsize::new(1);
+
+// ---- Orb companion window ------------------------------------------------------------------
+// One window ("main") in two layouts: ORB (small, transparent, borderless, always on top) and
+// WORKSPACE (the full opaque app). Interactive rectangles of the orb UI are reported by the
+// frontend; a light poller makes every other transparent pixel click-through.
+const ORB_W: f64 = 260.0;
+const ORB_H: f64 = 230.0;
+static ORB_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Interactive regions in logical px relative to the window: (x, y, w, h).
+static ORB_HIT_REGIONS: std::sync::Mutex<Vec<(f64, f64, f64, f64)>> = std::sync::Mutex::new(Vec::new());
+static ORB_LAST_POS: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+
+fn orb_default_position(app: &tauri::AppHandle, window: &tauri::WebviewWindow) -> (i32, i32) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let pos = monitor.position();
+        let size = monitor.size();
+        let x = pos.x + size.width as i32 - ((ORB_W + 24.0) * scale) as i32;
+        let y = pos.y + size.height as i32 - ((ORB_H + 90.0) * scale) as i32;
+        return (x, y);
+    }
+    (100, 100)
+}
+
+/// Keep the orb reachable: its centre must lie inside some monitor, otherwise fall back to the default corner.
+fn orb_clamp_position(app: &tauri::AppHandle, window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let cx = x + (ORB_W * scale / 2.0) as i32;
+    let cy = y + (70.0 * scale) as i32;
+    if let Ok(monitors) = app.available_monitors() {
+        for m in monitors {
+            let p = m.position();
+            let sz = m.size();
+            if cx >= p.x && cx < p.x + sz.width as i32 && cy >= p.y && cy < p.y + sz.height as i32 {
+                return (x, y);
+            }
+        }
+    }
+    orb_default_position(app, window)
+}
+
+fn enter_orb(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("Main window not found")?;
+    ORB_MODE.store(true, Ordering::SeqCst);
+    let _ = window.unminimize();
+    let _ = window.set_resizable(false);
+    let _ = window.set_min_size(Some(tauri::LogicalSize::new(ORB_W, ORB_H)));
+    window.set_size(tauri::LogicalSize::new(ORB_W, ORB_H)).map_err(|e| e.to_string())?;
+    let _ = window.set_shadow(false);
+    let _ = window.set_skip_taskbar(true);
+    window.set_always_on_top(true).map_err(|e| e.to_string())?;
+    let saved = ORB_LAST_POS.lock().ok().and_then(|g| *g);
+    let (x, y) = match saved {
+        Some((sx, sy)) => orb_clamp_position(app, &window, sx, sy),
+        None => orb_default_position(app, &window),
+    };
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    // Never steal focus for the orb: it is a presence, not a dialog.
+    window.show().map_err(|e| e.to_string())?;
+    let _ = app.emit("tars://summon-hud", "voice");
+    Ok(())
+}
+
+fn enter_workspace(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("Main window not found")?;
+    if ORB_MODE.load(Ordering::SeqCst) {
+        if let Ok(p) = window.outer_position() {
+            if let Ok(mut g) = ORB_LAST_POS.lock() {
+                *g = Some((p.x, p.y));
+            }
+        }
+    }
+    ORB_MODE.store(false, Ordering::SeqCst);
+    let _ = window.set_ignore_cursor_events(false);
+    let _ = window.unminimize();
+    let _ = window.set_always_on_top(false);
+    let _ = window.set_skip_taskbar(false);
+    let _ = window.set_shadow(true);
+    let _ = window.set_resizable(true);
+    let _ = window.set_min_size(Some(tauri::LogicalSize::new(480.0, 520.0)));
+    window.set_size(tauri::LogicalSize::new(1100.0, 780.0)).map_err(|e| e.to_string())?;
+    let _ = window.center();
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
+    let _ = app.emit("tars://summon-hud", "workstation");
+    Ok(())
+}
+
+/// Hotkey / tray: workspace open -> focus it; otherwise show/pulse the orb. Never hides, never duplicates.
+fn summon_smart(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("Main window not found")?;
+    let visible = window.is_visible().unwrap_or(false);
+    if visible && !ORB_MODE.load(Ordering::SeqCst) {
+        let _ = window.unminimize();
+        return window.set_focus().map_err(|e| e.to_string());
+    }
+    enter_orb(app)
+}
+
+#[tauri::command]
+fn orb_start_drag(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("Main window not found")?;
+    window.start_dragging().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn orb_get_position(app: tauri::AppHandle) -> Result<(i32, i32), String> {
+    let window = app.get_webview_window("main").ok_or("Main window not found")?;
+    let p = window.outer_position().map_err(|e| e.to_string())?;
+    if ORB_MODE.load(Ordering::SeqCst) {
+        if let Ok(mut g) = ORB_LAST_POS.lock() {
+            *g = Some((p.x, p.y));
+        }
+    }
+    Ok((p.x, p.y))
+}
+
+#[tauri::command]
+fn orb_set_saved_position(x: i32, y: i32) {
+    if let Ok(mut g) = ORB_LAST_POS.lock() {
+        *g = Some((x, y));
+    }
+}
+
+#[tauri::command]
+fn orb_set_hit_regions(regions: Vec<(f64, f64, f64, f64)>) {
+    if let Ok(mut g) = ORB_HIT_REGIONS.lock() {
+        *g = regions;
+    }
+}
+
+#[tauri::command]
+fn orb_is_orb_mode() -> bool {
+    ORB_MODE.load(Ordering::SeqCst)
+}
+
+fn start_orb_hit_test(app: tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    std::thread::spawn(move || {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut ignoring = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let Some(window) = app.get_webview_window("main") else { continue };
+            let want_ignore = if ORB_MODE.load(Ordering::SeqCst) && window.is_visible().unwrap_or(false) {
+                let regions = ORB_HIT_REGIONS.lock().map(|g| g.clone()).unwrap_or_default();
+                if regions.is_empty() {
+                    false
+                } else {
+                    let mut pt = POINT { x: 0, y: 0 };
+                    let ok = unsafe { GetCursorPos(&mut pt) } != 0;
+                    match (ok, window.outer_position()) {
+                        (true, Ok(pos)) => {
+                            let scale = window.scale_factor().unwrap_or(1.0);
+                            let rx = (pt.x - pos.x) as f64 / scale;
+                            let ry = (pt.y - pos.y) as f64 / scale;
+                            !regions.iter().any(|(x, y, w, h)| rx >= *x && rx <= x + w && ry >= *y && ry <= y + h)
+                        }
+                        _ => false,
+                    }
+                }
+            } else {
+                false
+            };
+            if want_ignore != ignoring {
+                ignoring = want_ignore;
+                let _ = window.set_ignore_cursor_events(ignoring);
+            }
+        }
+    });
+}
+
 /// Global-shortcut registration outcome, observable by the UI (never silently swallowed).
 static HOTKEY_STATUS: std::sync::Mutex<Vec<(String, Option<String>)>> = std::sync::Mutex::new(Vec::new());
 
@@ -373,35 +546,17 @@ fn summon_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<(), Str
         }
     }
 
-    if let Some(window) = app.get_webview_window("main") {
-        window.show().map_err(|e| e.to_string())?;
-        window.unminimize().map_err(|e| e.to_string())?;
-        let requested_mode = mode.unwrap_or("voice");
-        let (width, height, always_on_top) = if requested_mode == "voice" {
-            (420.0, 260.0, true)
-        } else {
-            (1100.0, 780.0, false)
+    if app.get_webview_window("main").is_some() {
+        return match mode.unwrap_or("voice") {
+            "voice" | "compact" | "hud" | "pill" => enter_orb(app),
+            _ => enter_workspace(app),
         };
-        window.set_size(tauri::LogicalSize::new(width, height)).map_err(|e| e.to_string())?;
-        window.set_always_on_top(always_on_top).map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-        let _ = app.emit("tars://summon-hud", requested_mode);
-        return Ok(());
     }
     Err("Main window not found".into())
 }
 
 fn show_main_impl(app: &tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        window.show().map_err(|e| e.to_string())?;
-        window.unminimize().map_err(|e| e.to_string())?;
-        window.set_size(tauri::LogicalSize::new(1100.0, 780.0)).map_err(|e| e.to_string())?;
-        window.set_always_on_top(false).map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-        let _ = app.emit("tars://summon-hud", "workstation");
-        return Ok(());
-    }
-    Err("Main window not found".into())
+    enter_workspace(app)
 }
 
 fn hide_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
@@ -412,19 +567,10 @@ fn hide_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
     Err("Main window not found".into())
 }
 
-fn toggle_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<bool, String> {
-    if let Some(window) = app.get_webview_window("main") {
-        let is_visible = window.is_visible().unwrap_or(false);
-        if is_visible {
-            let _ = hide_hud_impl(app);
-            Ok(false)
-        } else {
-            let _ = summon_hud_impl(app, mode);
-            Ok(true)
-        }
-    } else {
-        Err("Main window not found".into())
-    }
+fn toggle_hud_impl(app: &tauri::AppHandle, _mode: Option<&str>) -> Result<bool, String> {
+    // The orb is a persistent presence: the hotkey/tray summon it, they never hide it.
+    summon_smart(app)?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -1275,6 +1421,11 @@ pub fn run() {
             get_active_window_context,
             get_monitors_geometry,
             get_hotkey_status,
+            orb_start_drag,
+            orb_get_position,
+            orb_set_saved_position,
+            orb_set_hit_regions,
+            orb_is_orb_mode,
             capture_active_window,
             capture_chart_window,
             capture_screen_region,
@@ -1296,7 +1447,12 @@ pub fn run() {
             // M2A/M2B Background persistence (Close-to-tray)
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                if !ORB_MODE.load(Ordering::SeqCst) {
+                    // Closing the workspace returns to the orb; TARS keeps running.
+                    let _ = enter_orb(&window.app_handle());
+                } else {
+                    let _ = window.hide();
+                }
             }
         })
         .setup(move |app| {
@@ -1390,6 +1546,17 @@ pub fn run() {
             // to verify the native page loaded); closing it hides to the tray
             // and TARS keeps running, so it is a background/tray app after
             // first launch rather than a dashboard that happens to also listen.
+            start_orb_hit_test(app.handle().clone());
+            let _ = enter_orb(app.handle());
+            {
+                // The first layout pass can land before the native window is fully realised (always-on-top
+                // was observed not to stick); re-apply once shortly after startup.
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                    let _ = enter_orb(&handle);
+                });
+            }
             wake_engine::start(app.handle().clone());
 
             // Non-intrusive background chart observation (TARS Alexa-Speed

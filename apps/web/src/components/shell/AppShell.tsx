@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { Sidebar, ChatSessionMeta } from './Sidebar';
 import { AppHeader } from './AppHeader';
+import { SystemStatusBar } from './SystemStatusBar';
 import { ActiveTab, CompanionVisualState, ConnectionStatus, WorkspaceSection } from '../../types/companion';
 
 interface AppShellProps {
@@ -56,6 +57,8 @@ export const AppShell: React.FC<AppShellProps> = ({
         companionState={companionState}
         connectionStatus={connectionStatus}
       />
+
+      <SystemStatusBar />
 
       {/* Main Content Split: Left Sidebar + Center View */}
       <div className="flex-1 min-h-0 overflow-hidden relative flex">

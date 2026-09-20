@@ -1,4 +1,5 @@
 import { PcmStreamPlayer } from '../services/pcm-player';
+import { audioLevels } from '../orb/audioLevels';
 import { audioService } from '../services/audio';
 import { loadSettings } from '../services/storage';
 import { isTauri } from '../services/tauri';
@@ -14,7 +15,9 @@ export interface VoiceEvent {
   sequence?: number;
   sample_rate?: number;
   voice_provider?: string;
-  response?: { display_text: string };
+  connected?: boolean;
+  name?: string;
+  status?: string;  response?: { display_text: string };
   providers?: Record<string, string>;
   detail?: string;
 }
@@ -22,6 +25,8 @@ export interface VoiceEvent {
 /** Audio transport/renderer only. The server owns every conversational state. */
 export class RealtimeVoiceClient {
   private pcm = new PcmStreamPlayer();
+  private muted = false;
+  private provider = '';
   private socket: WebSocket | null = null;
   private unlisten: Array<() => void> = [];
   private retry: ReturnType<typeof setTimeout> | null = null;
@@ -37,6 +42,7 @@ export class RealtimeVoiceClient {
   async start(listener: (event: VoiceEvent) => void, onLevel: (level: number) => void) {
     if (!isTauri() || !this.stopped) return;
     this.stopped = false;
+    audioLevels.setAssistantReader(() => this.pcm.level());
     const lifecycle = ++this.lifecycle;
     this.listener = listener;
     const { listen } = await import('@tauri-apps/api/event');
@@ -44,14 +50,14 @@ export class RealtimeVoiceClient {
     const handles = await Promise.all([
       listen<number[]>('tars://microphone-pcm', ({ payload }) => {
         const ws = this.socket;
-        if (ws?.readyState !== WebSocket.OPEN) return;
+        if (ws?.readyState !== WebSocket.OPEN || this.muted) return;
         if (ws.bufferedAmount > 32000) { ws.close(); return; }
         const bytes = new ArrayBuffer(payload.length * 2);
         const view = new DataView(bytes);
         payload.forEach((value, i) => view.setInt16(i * 2, value, true));
         ws.send(bytes);
       }),
-      listen<number>('tars://wake-audio-level', ({ payload }) => onLevel(payload)),
+      listen<number>('tars://wake-audio-level', ({ payload }) => { audioLevels.pushMic(this.muted ? 0 : payload); onLevel(payload); }),
       listen<string>('tars://microphone-status', ({ payload }) => {
         listener({ type: 'provider_status', providers: { microphone: payload } });
         if (payload !== 'CONNECTED') this.socket?.close();
@@ -68,6 +74,7 @@ export class RealtimeVoiceClient {
     const socket = new WebSocket(`${url}/api/v1/voice/realtime`);
     this.socket = socket;
     this.generation = -1;
+    socket.onopen = () => { if (this.socket === socket) this.listener({ type: 'connection', connected: true }); };
     socket.onmessage = ({ data }) => {
       if (this.socket !== socket || this.stopped) return;
       try { this.accept(JSON.parse(String(data)) as VoiceEvent); }
@@ -76,6 +83,7 @@ export class RealtimeVoiceClient {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.flush();
+      this.listener({ type: 'connection', connected: false });
       this.listener({ type: 'state', state: 'ERROR', detail: 'Voice disconnected; reconnecting' });
       if (!this.stopped) this.retry = setTimeout(() => this.connect(), 1500);
     };
@@ -94,6 +102,11 @@ export class RealtimeVoiceClient {
       if (event.generation < this.generation) return;
       this.generation = event.generation;
       this.activeTurn = event.turn_id ?? this.activeTurn;
+    }
+    if (event.voice_provider) this.provider = event.voice_provider;
+    if (event.type === 'state') {
+      // Local fallback plays WAV clips with no amplitude tap: use a modest fixed level while it speaks.
+      audioLevels.setAssistantFallback(event.state === 'ASSISTANT_SPEAKING' && this.provider !== 'GEMINI_LIVE' ? 0.4 : 0);
     }
     this.listener(event);
     if (event.type === 'audio_pcm' && event.audio) {
@@ -150,6 +163,22 @@ export class RealtimeVoiceClient {
     this.socket?.close();
     this.socket = null;
     this.flush();
+  }
+
+  /** Orb click: ask the backend to open the voice session now. */
+  wake() {
+    this.send({ type: 'wake' });
+  }
+
+  /** Yes/No on the orb's confirmation card. The backend still confirms through ActionRuntime. */
+  confirmAction(approve: boolean) {
+    this.send({ type: 'confirm_action', approve });
+  }
+
+  /** Mute the microphone stream and stop any assistant audio (client-side gate). */
+  setMuted(muted: boolean) {
+    this.muted = muted;
+    if (muted) this.flush();
   }
 
   interrupt() {

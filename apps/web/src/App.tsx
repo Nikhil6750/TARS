@@ -42,7 +42,7 @@ export const App: React.FC = () => {
   const [companionState, setCompanionState] = useState<CompanionVisualState>('IDLE');
 
   // Surface mode: 'workstation' is the primary desktop companion UI
-  const [appMode, setAppMode] = useState<'voice' | 'workstation'>('workstation');
+  const [appMode, setAppMode] = useState<'voice' | 'workstation'>(isTauri() ? 'voice' : 'workstation');
 
   // Multi-session chat management
   const [sessions, setSessions] = useState<StoredChatSession[]>(() => {
@@ -125,7 +125,8 @@ export const App: React.FC = () => {
 
   // Handle Compact Window Mode for Tauri
   useEffect(() => {
-    toggleCompactWindow(settings.compactMode);
+    // The desktop window is managed by the orb/workspace layouts in Rust; only the web build resizes.
+    if (!isTauri()) toggleCompactWindow(settings.compactMode);
   }, [settings.compactMode]);
 
   // Active session messages helper
@@ -784,6 +785,11 @@ export const App: React.FC = () => {
     handleIncomingTradingEvent(evt);
   };
 
+  // Transparent window only in orb mode; the workspace paints its own opaque background.
+  useEffect(() => {
+    document.documentElement.dataset.mode = appMode === 'voice' ? 'orb' : 'workspace';
+  }, [appMode]);
+
   // Global Shortcuts for summoning voice panel
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -828,6 +834,7 @@ export const App: React.FC = () => {
       <VoiceAssistantRuntime
         visible={appMode === 'voice'}
         onModeChange={setAppMode}
+        onOpenSection={() => setActiveTab('settings')}
       />
 
       {/* Main OpenJarvis-Style Desktop Application Shell */}

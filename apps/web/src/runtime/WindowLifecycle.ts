@@ -44,7 +44,7 @@ export class WindowLifecycle {
 
   private handleKeyDown = (event: KeyboardEvent): void => {
     if (event.key === 'Escape') {
-      void this.hide();
+      void this.summon('voice'); // workspace -> orb; a no-op pulse when already the orb
     }
   };
 

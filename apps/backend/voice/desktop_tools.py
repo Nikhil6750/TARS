@@ -225,6 +225,22 @@ class DesktopTools:
         self._remember(pending["describe"], state)
         return {"status": state, "summary": result.summary, "data": _trim(result.data or {})}
 
+    async def ui_confirm(self, approve: bool) -> dict:
+        """Human clicked Yes/No in the app UI: same ActionRuntime confirm call, no transcript needed."""
+        if not approve:
+            return await self.cancel_pending_action()
+        pending, self.pending = self.pending, None
+        if not pending:
+            return {"status": "NOT_FOUND", "summary": "Nothing was waiting for confirmation."}
+        try:
+            result = await asyncio.wait_for(self.state.action_runtime.confirm(UUID(pending["id"]), pending["token"], True), 45)
+        except Exception as exc:
+            self._remember(pending["describe"], "FAILED")
+            return {"status": "FAILED", "summary": f"Confirmation failed: {type(exc).__name__}"}
+        state = _state(result)
+        self._remember(pending["describe"], state)
+        return {"status": state, "summary": result.summary}
+
     async def cancel_pending_action(self) -> dict:
         pending, self.pending = self.pending, None
         if not pending:

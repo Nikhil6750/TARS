@@ -1,89 +1,69 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { VoicePanel, toVoicePanelStatus } from '../components/voice/VoicePanel';
-import { nativeBridge } from '../services/native-bridge';
-import { CompanionVisualState } from '../types/companion';
-import { ALERT_EVENT, fetchMonitorStatus, MonitorStatus, TarsAlert } from '../services/monitors';
-import { realtimeVoiceClient } from './RealtimeVoiceClient';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { OrbCompanion, OrbActions } from '../components/orb/OrbCompanion';
+import { orbStore } from '../orb/orbStore';
+import { orbNative } from '../orb/orbNative';
+import { ALERT_EVENT, TarsAlert } from '../services/monitors';
 import { isTauri } from '../services/tauri';
+import { realtimeVoiceClient } from './RealtimeVoiceClient';
 import { windowLifecycle } from './WindowLifecycle';
 
 interface VoiceAssistantRuntimeProps {
+  /** Orb (compact) presence is showing. The runtime itself stays mounted in every mode. */
   visible: boolean;
   onModeChange: (mode: 'voice' | 'workstation') => void;
+  onOpenSection?: (section: 'settings') => void;
 }
 
-/** Render the backend session state. No local conversational state machine. */
-export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ visible, onModeChange }) => {
-  const [status, setStatus] = useState<CompanionVisualState>('IDLE');
-  const [transcript, setTranscript] = useState('');
-  const [answer, setAnswer] = useState('');
-  const [volume, setVolume] = useState(0);
-  const [error, setError] = useState('');
-  const [stateLabel, setStateLabel] = useState('IDLE');
-  const [voiceProvider, setVoiceProvider] = useState('');
-  const [monitors, setMonitors] = useState<MonitorStatus | null>(null);
-  const [alert, setAlert] = useState<TarsAlert | null>(null);
+/**
+ * Bridges the ONE realtime voice session to the orb. It owns no conversational state:
+ * every backend event is forwarded to orbStore, which maps them to the orb's visual state.
+ */
+export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ visible, onModeChange, onOpenSection }) => {
   const modeRef = useRef(onModeChange);
   modeRef.current = onModeChange;
+  const sectionRef = useRef(onOpenSection);
+  sectionRef.current = onOpenSection;
+
   useEffect(() => {
     void windowLifecycle.start(mode => modeRef.current(
       mode === 'full' || mode === 'workstation' ? 'workstation' : 'voice'
     ));
-    void realtimeVoiceClient.start(event => {
-      if (event.type === 'state') {
-        const map: Record<string, CompanionVisualState> = {
-          IDLE: 'IDLE', LISTENING: 'LISTENING', USER_SPEAKING: 'LISTENING',
-          ENDPOINTING: 'LISTENING', THINKING: 'THINKING',
-          ASSISTANT_SPEAKING: 'SPEAKING', INTERRUPTING: 'LISTENING', ERROR: 'IDLE',
-        };
-        setStatus(map[event.state ?? ''] ?? 'IDLE');
-        setStateLabel(event.state ?? 'IDLE');
-        if (event.state === 'ERROR') setError(event.detail ?? 'A voice provider is unavailable.');
-        else setError('');
-      } else if (event.type === 'speech_started') {
-        setTranscript(''); setAnswer('');
-        void nativeBridge.summonHUD('voice');
-      } else if (event.type === 'partial_transcript' || event.type === 'final_transcript') {
-        setTranscript(event.text ?? '');
-      } else if (event.type === 'delta') {
-        setAnswer(previous => previous + (event.text ?? ''));
-      } else if (event.type === 'response_complete' && event.response) {
-        setAnswer(event.response.display_text);
-      } else if (event.type === 'provider_status') {
-        if (event.voice_provider) setVoiceProvider(event.voice_provider);
-        if (event.detail && /unavailable|failed|lost|LOCAL/i.test(event.detail)) setError(event.detail);
-      } else if (event.type === 'metrics') {
-        console.info('[TARS voice latency]', event);
-      }
-    }, setVolume);
+    void realtimeVoiceClient.start(event => orbStore.apply(event), () => undefined);
+    void orbNative.restorePosition();
     return () => { realtimeVoiceClient.stop(); windowLifecycle.stop(); };
   }, []);
+
+  // Proactive alerts: the orb pulses and shows a tiny bubble. The workspace is NOT opened.
   useEffect(() => {
-    // Hotkey registration failures are visible, not silent (Rust records each outcome).
+    const onAlert = (e: Event) => {
+      const alert = (e as CustomEvent<TarsAlert>).detail;
+      const plain = (alert.analysis ?? '').replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').trim();
+      orbStore.alert(plain ? plain.slice(0, 120) : alert.title, alert.replay);
+    };
+    window.addEventListener(ALERT_EVENT, onAlert);
+    return () => window.removeEventListener(ALERT_EVENT, onAlert);
+  }, []);
+
+  useEffect(() => {
     if (!isTauri()) return;
     void import('@tauri-apps/api/core').then(async ({ invoke }) => {
-      const status = await invoke<{ shortcut: string; registered: boolean; error?: string }[]>('get_hotkey_status');
+      const status = await invoke<{ shortcut: string; registered: boolean }[]>('get_hotkey_status');
       const failed = status.filter(item => !item.registered);
-      if (failed.length) {
-        setAlert({ title: 'Hotkey unavailable', replay: false, at: Date.now(),
-          summary: `${failed.map(item => item.shortcut).join(', ')} could not be registered (in use by another app?). Use the tray icon instead.` });
-      }
+      if (failed.length) orbStore.alert(`${failed.map(item => item.shortcut).join(', ')} unavailable; use the tray icon`);
     }).catch(() => undefined);
   }, []);
-  useEffect(() => {
-    let alive = true;
-    const poll = async () => { const next = await fetchMonitorStatus(); if (alive) setMonitors(next); };
-    void poll();
-    const timer = window.setInterval(poll, 2000);
-    const onAlert = (e: Event) => setAlert((e as CustomEvent<TarsAlert>).detail);
-    window.addEventListener(ALERT_EVENT, onAlert);
-    return () => { alive = false; window.clearInterval(timer); window.removeEventListener(ALERT_EVENT, onAlert); };
-  }, []);
+
+  const actions: OrbActions = useMemo(() => ({
+    wake: () => realtimeVoiceClient.wake(),
+    setMuted: (muted: boolean) => realtimeVoiceClient.setMuted(muted),
+    confirm: (approve: boolean) => realtimeVoiceClient.confirmAction(approve),
+    openWorkspace: (section) => {
+      void orbNative.expand();
+      if (section) sectionRef.current?.(section);
+    },
+    quit: () => void orbNative.quit(),
+  }), []);
+
   if (!visible) return null;
-  return <div className="fixed inset-0 h-screen w-screen">
-    <VoicePanel status={toVoicePanelStatus(status)} audioVolume={volume}
-      transcript={transcript} streamedAnswer={error || answer}
-      onDismiss={() => void windowLifecycle.hide()}
-      stateLabel={voiceProvider ? `${stateLabel} · ${voiceProvider === 'GEMINI_LIVE' ? 'GEMINI' : 'LOCAL'}` : stateLabel} monitors={monitors} alert={alert} />
-  </div>;
+  return <OrbCompanion actions={actions} />;
 };

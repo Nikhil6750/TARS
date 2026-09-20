@@ -10,6 +10,13 @@ if ('__TAURI_INTERNALS__' in window && 'serviceWorker' in navigator) {
   void caches?.keys().then(keys => keys.forEach(k => void caches.delete(k)));
 }
 
+if ('__TAURI_INTERNALS__' in window) {
+  document.documentElement.dataset.mode = 'orb';
+} else if ('serviceWorker' in navigator) {
+  // Web/PWA build only.
+  void navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />

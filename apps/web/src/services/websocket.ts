@@ -10,7 +10,6 @@ import { ConnectionStatus, CompanionVisualState } from '../types/companion';
 import { validateTradingEvent, validateAssistantMessage } from '../contracts/validator';
 import { sendNotification } from './notifications';
 import { publishAlert } from './monitors';
-import { nativeBridge } from './native-bridge';
 
 export type TradingEventListener = (event: TARSTradingEvent) => void;
 export type ActiveSnapshotListener = (events: TARSTradingEvent[]) => void;
@@ -187,8 +186,7 @@ export class TARSWebSocketClient {
         && ['NOTIFY', 'ANALYZE', 'SPEAK'].includes(String(msg.decision))) {
         void sendNotification({ title: event.title, body: event.summary });
         publishAlert({ title: event.title, summary: event.summary, replay: (event.payload as { replay?: boolean } | undefined)?.replay === true, at: Date.now() });
-        // Surface the compact assistant so the alert is visible and a spoken follow-up is one sentence away.
-        void nativeBridge.summonHUD('voice');
+        // The orb pulses and shows a tiny bubble (VoiceAssistantRuntime); the workspace is not opened.
       }
       return;
     }
