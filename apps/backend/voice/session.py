@@ -189,7 +189,8 @@ class VoiceSessionController:
             await self.send("speech_started")
             await self.transition(VoiceState.USER_SPEAKING)
             return
-        if event.get("utterance") != self.utterance or self.closed:
+        if self.closed or (event.get("utterance") != self.utterance and not (
+                kind == "final_transcript" and event.get("utterance") == self.stt.valid_utterance)):
             return
         if kind == "endpointing":
             await self.transition(VoiceState.ENDPOINTING)

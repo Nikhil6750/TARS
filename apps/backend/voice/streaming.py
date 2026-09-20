@@ -134,6 +134,7 @@ class IncrementalWhisperSTT:
                  echo_reference: Callable[[], str] | None = None):
         self.busy, self.echo_reference = busy, echo_reference
         self.announced = True
+        self.valid_utterance = 0
         self.provider, self.emit, self.vad = provider, emit, vad
         self.partial_interval = partial_interval
         self.partial_engine = partial_engine
@@ -202,7 +203,7 @@ class IncrementalWhisperSTT:
                 self.text_changed_at = 0.0
                 # While TARS speaks/thinks, the mic mostly hears TARS itself (no AEC). A barge-in is
                 # only announced once recognised words are NOT an echo of TARS's own speech.
-                self.announced = not (self.busy and self.busy())
+                self.announced = not (self.partial_engine or (self.busy and self.busy()))
                 if self.announced:
                     await self.on_speech_started({"utterance": self.utterance})
                 if self.partial_engine:
@@ -248,6 +249,7 @@ class IncrementalWhisperSTT:
                 else:
                     await self.on_speech_ended({"utterance": self.utterance,
                                                "at": time.perf_counter() - self.silence})
+                    self.valid_utterance = self.utterance
                     self._request(final=True)
                 self.audio.clear()
                 self.preroll.clear()
@@ -263,8 +265,11 @@ class IncrementalWhisperSTT:
         if text and text != self.last_text:
             self.last_text, self.text_changed_at = text, self.duration
             if not self.announced:
-                reference = self.echo_reference() if self.echo_reference else ""
-                if len(_words(text)) >= 2 and not is_echo(text, reference):
+                # Words recognised by the streaming engine are what make noise a turn. While TARS
+                # itself is talking, they must also not be an echo of TARS's own speech.
+                busy = bool(self.busy and self.busy())
+                reference = self.echo_reference() if (busy and self.echo_reference) else ""
+                if len(_words(text)) >= (2 if busy else 1) and not is_echo(text, reference):
                     self.announced = True
                     await self.on_speech_started({"utterance": self.utterance})
                 else:
@@ -283,11 +288,11 @@ class IncrementalWhisperSTT:
             self._wake.clear()
             while self._requests:
                 utterance, pcm, final = self._requests.popleft()
-                if utterance != self.utterance:
+                if utterance != (self.valid_utterance if final else self.utterance):
                     continue  # superseded before we started decoding
                 try:
                     result = await asyncio.wait_for(self.provider.transcribe(pcm), 15)
-                    if utterance != self.utterance:
+                    if utterance != (self.valid_utterance if final else self.utterance):
                         continue
                     text = result.text.strip()
                     if not final and not self.active:
