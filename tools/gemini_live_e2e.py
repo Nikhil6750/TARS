@@ -37,9 +37,10 @@ def frames(pcm: bytes):
 
 
 async def main():
+    nobarge = os.environ.get("NOBARGE") == "1"
     deep = os.environ.get("DEEP") == "1"  # ask for deep analysis (expects ask_claude), no barge-in
     prompts = [speech("TARS, can you hear me?"),
-               speech("Give me a detailed technical analysis of the gold outlook this week and the key risks.") if deep else speech("What is happening with EURUSD?"),
+               speech("Give me a detailed technical analysis of the gold outlook this week and the key risks.") if deep else speech(os.environ.get("SECOND", "What is happening with EURUSD?")),
                speech("Stop. What about gold?")]
     silence = bytes(FRAME * 2)
     t0 = time.perf_counter()
@@ -77,7 +78,7 @@ async def main():
             if t == "audio_pcm":
                 audio_bytes["n"] += len(base64.b64decode(ev["audio"]))
                 marks.setdefault(f"first_audio_{phase['n']}", now)
-                if not deep and phase["n"] == 2 and not phase["barged"] and now - marks["first_audio_2"] > 1.0:
+                if not deep and not nobarge and phase["n"] == 2 and not phase["barged"] and now - marks["first_audio_2"] > 1.0:
                     phase["barged"] = True
                     say(2, "stop_gold")
                     marks["barge_sent_at"] = now
@@ -99,6 +100,9 @@ async def main():
                     phase["n"] = 2
                     await asyncio.sleep(1.0)
                     say(1, "eurusd")
+                elif nobarge and phase["n"] == 2:
+                    if len([1 for r in log if r[1] == "response_complete"]) >= 3:
+                        break
                 elif deep and "ask_claude_called" not in marks:
                     pass
                 elif deep or phase["barged"]:

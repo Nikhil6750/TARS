@@ -129,7 +129,7 @@ async def realtime(websocket: WebSocket):
             state.realtime_metrics = LatencyMetrics()
         if use_gemini:
             session = GeminiLiveVoiceSession(
-                TarsTools(state, uuid.uuid4().hex), emit, vad, model=settings.gemini_live_model,
+                TarsTools(state, uuid.uuid4().hex), emit, vad, model=settings.gemini_live_model, voice=getattr(settings, "gemini_live_voice", "Sadaltager"),
                 idle_seconds=settings.gemini_live_idle_seconds, metrics=state.realtime_metrics,
                 connect=getattr(state, "gemini_connect_override", None))
             state.realtime_session = session

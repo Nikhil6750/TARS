@@ -215,11 +215,16 @@ async def test_connect_failure_is_truthful_and_marks_fatal_for_local_fallback():
     assert any("Gemini Live unavailable" in (e.get("detail") or "") for e in events)
 
 
-def test_tools_are_bounded_read_only_and_cannot_trade():
-    assert TOOL_NAMES == {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
-                          "get_economic_calendar", "ask_claude"}
-    source = (Path(__file__).parents[1] / "voice" / "gemini_live.py").read_text(encoding="utf-8")
-    assert not re.search(r"order_send|place_order|execute_trade|close_position|\bBuy\(|\bSell\(", source)
+def test_tools_are_bounded_and_none_can_trade():
+    from voice.desktop_tools import DESKTOP_TOOL_NAMES
+
+    base = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
+            "get_economic_calendar", "ask_claude"}
+    assert TOOL_NAMES == base | DESKTOP_TOOL_NAMES
+    assert not any(re.search(r"trade|order|buy|sell", n) for n in TOOL_NAMES)
+    for name in ("voice/gemini_live.py", "voice/desktop_tools.py"):
+        source = (Path(__file__).parents[1] / name).read_text(encoding="utf-8")
+        assert not re.search(r"order_send\(|place_order|execute_trade|close_position|\bBuy\(|\bSell\(", source)
 
 
 async def test_tars_tools_report_missing_sources_truthfully_and_ask_claude_delegates():

@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     voice_provider: str = "gemini_live"
     gemini_api_key: str = ""
     gemini_live_model: str = "gemini-3.8-live"
+    # Sadaltager (Knowledgeable, default) | Achird (Friendly) | Puck (Upbeat) | Sulafat (Warm)
+    gemini_live_voice: str = "Sadaltager"
     gemini_live_idle_seconds: float = 25.0
     sherpa_model_dir: str = "~/.cache/tars-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
     fish_speech_model_path: str | None = None
