@@ -44,9 +44,12 @@ class Settings(BaseSettings):
     # ---- Mock trading events ----
     use_mock_trading_events: bool = True
     mock_event_interval_seconds: float = 45.0
-    event_analysis_enabled: bool = False
+    event_analysis_enabled: bool = True
     event_spoken_alerts_enabled: bool = False
-    event_relevant_symbols: str = ""
+    event_relevant_symbols: str = "EURUSD,XAUUSD"
+    monitors_enabled: bool = True
+    mt5_enabled: bool = True
+    calendar_enabled: bool = True
 
     # ---- quant_brain (future) ----
     quant_brain_base_url: str | None = None

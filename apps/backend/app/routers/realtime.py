@@ -17,6 +17,23 @@ from voice.streaming import SherpaPartialEngine, SileroStreamingVAD
 router = APIRouter(tags=["realtime"])
 
 
+def recent_alert_context(state) -> str:
+    """One-line context of the latest actionable alert (last 10 min) so a spoken
+    follow-up like "what does that mean for EURUSD?" is grounded in it."""
+    from datetime import UTC, datetime, timedelta
+
+    core = getattr(state, "realtime_events", None)
+    if core is None:
+        return ""
+    cutoff = datetime.now(UTC) - timedelta(minutes=10)
+    for item in reversed(core.recent):
+        event = item["event"]
+        if item["decision"] != "IGNORE" and datetime.fromisoformat(event["timestamp"]) >= cutoff:
+            return (f"[Context: TARS alert just raised, {event['source']}: {event['title']}. "
+                    f"{event['summary']} The user is asking about it.]")
+    return ""
+
+
 @router.post("/api/v1/events/normalized")
 async def publish_event(event: NormalizedEvent, request: Request):
     return {"accepted": await request.app.state.realtime_events.publish(event)}
@@ -78,7 +95,8 @@ async def realtime(websocket: WebSocket):
         if SherpaPartialEngine.available(model_dir):
             engine = await asyncio.to_thread(SherpaPartialEngine, model_dir)
         session = VoiceSessionController(state.turn_controller, voice, emit, vad,
-                                         metrics=state.realtime_metrics, partial_engine=engine)
+                                         metrics=state.realtime_metrics, partial_engine=engine,
+                                         context_provider=lambda: recent_alert_context(state))
         state.realtime_session = session
         sender = asyncio.create_task(send())
         await session.start()

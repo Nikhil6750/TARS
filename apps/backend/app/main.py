@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import os
 import logging
 from contextlib import asynccontextmanager
 
@@ -44,6 +45,7 @@ from app.routers import (
 )
 from app.routers import agent_runtime as agent_runtime_router
 from app.routers import agents as agents_router
+from app.routers import monitors as monitors_router
 from app.routers import realtime as realtime_router
 from app.scheduler import build_scheduler
 from app.voice_state import VoiceProviders
@@ -358,9 +360,20 @@ async def lifespan(app: FastAPI):
 
     realtime_events.subscribe(spoken_alert)
 
+    from monitors.manager import MonitorManager
+
+    monitors = MonitorManager(
+        realtime_events, HotChartStateStore(db.conn),
+        mt5_enabled=settings.mt5_enabled, calendar_enabled=settings.calendar_enabled,
+        symbols=[s.strip() for s in settings.event_relevant_symbols.split(",") if s.strip()] or None)
+    app.state.monitors = monitors
+    if settings.monitors_enabled and os.environ.get("TARS_DISABLE_MONITORS") != "1":
+        await monitors.start()
+
     try:
         yield
     finally:
+        await monitors.stop()
         await realtime_events.close()
         session = getattr(app.state, "realtime_session", None)
         if session:
@@ -400,6 +413,7 @@ def create_app() -> FastAPI:
     app.include_router(memory.router)
     app.include_router(voice.router)
     app.include_router(realtime_router.router)
+    app.include_router(monitors_router.router)
     app.include_router(ws.router)
     app.include_router(actions.router)
     app.include_router(action_plans.router)

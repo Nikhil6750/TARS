@@ -74,7 +74,9 @@ class LatencyMetrics:
 
 
 class VoiceSessionController:
-    def __init__(self, turns, voice, emit, vad, *, metrics=None, wake_aliases=None, partial_engine=None):
+    def __init__(self, turns, voice, emit, vad, *, metrics=None, wake_aliases=None, partial_engine=None,
+                 context_provider=None):
+        self.context_provider = context_provider
         self.turns, self.voice, self.emit = turns, voice, emit
         self.metrics = metrics or LatencyMetrics()
         self.state = VoiceState.IDLE
@@ -249,8 +251,9 @@ class VoiceSessionController:
         try:
             self.metrics.mark(turn_id, "agent_request_started")
             async with asyncio.timeout(120):
+                context = self.context_provider() if self.context_provider else ""
                 async for event in self.turns.stream_text(
-                    text, turn_id=turn_id, conversation_id=self.session_id,
+                    (context + " " + text) if context else text, turn_id=turn_id, conversation_id=self.session_id,
                     input_mode=InputMode.voice, speak=False
                 ):
                     if generation != self.generation or self.closed:
