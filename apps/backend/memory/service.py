@@ -15,6 +15,8 @@ import aiosqlite
 from app.observability import get_tracer
 from app.schemas import AssistantMessage
 from memory import fts, notes
+from memory.interpretation import SECRET, interpret, recall_target
+from memory.semantic import SemanticMemory
 from memory.session import SessionMemoryStore
 from memory.vault import VaultIndexResult, reindex_vault
 
@@ -39,6 +41,7 @@ class MemoryService:
         self._conn = conn
         self._vault_path = vault_path
         self._session = session or SessionMemoryStore()
+        self.semantic = SemanticMemory(conn, self._session)
         if sqlite_vec_enabled:
             # ADR-013: sqlite-vec is added only if FTS5 relevance proves
             # insufficient in practice, not introduced speculatively. No
@@ -56,6 +59,8 @@ class MemoryService:
         return self._session
 
     async def index_conversation_message(self, message: AssistantMessage) -> None:
+        if SECRET.search(message.content):
+            return
         title = f"{message.role.value} @ {message.timestamp.isoformat()}"
         await fts.upsert(
             self._conn,
@@ -87,7 +92,15 @@ class MemoryService:
         with tracer.start_as_current_span("memory.search") as span:
             span.set_attribute("memory.query_length", len(query))
             span.set_attribute("memory.source_filter", source or "any")
-            results = await fts.search(self._conn, query=query, limit=limit, source=source)
+            semantic = []
+            if source in (None, KIND_EXPLICIT_MEMORY):
+                semantic = await self.recall_memory(query, limit=min(limit, 5))
+            results = [self._search_result(fact) for fact in semantic]
+            if not (source in (None, KIND_EXPLICIT_MEMORY) and recall_target(query)):
+                raw = await fts.search(self._conn, query=query, limit=limit, source=source)
+                ids = {r["source_id"] for r in results}
+                results.extend(r for r in raw if r["source_id"] not in ids)
+            results = results[:max(1, min(limit, 100))]
             # Retrieved context identifiers, per ARCHITECTURE.md § Observability —
             # logs which notes/turns backed an answer, never their content.
             span.set_attribute(
@@ -100,6 +113,21 @@ class MemoryService:
 
     # ---- Structured, provenance-carrying notes (memory_notes) ----------
 
+    @staticmethod
+    def _search_result(fact: dict) -> dict:
+        return {"source": KIND_EXPLICIT_MEMORY, "source_id": fact["id"],
+                "title": "Semantic memory", "snippet":
+                f"{fact['subject']} {fact['relation']} {fact['object']}", "fact": fact}
+
+    async def remember_fact(self, statement: str, **kwargs) -> dict:
+        return await self.semantic.remember(statement, **kwargs)
+
+    async def recall_memory(self, query: str, **kwargs) -> list[dict]:
+        return await self.semantic.recall(query, **kwargs)
+
+    async def memory_response(self, text: str, *, conversation_id: str | None = None) -> str | None:
+        return await self.semantic.respond(text, conversation_id=conversation_id)
+
     async def remember(
         self,
         text: str,
@@ -111,6 +139,18 @@ class MemoryService:
         """Explicit "remember this" — the user (or orchestrator, on the
         user's behalf) asked TARS to durably keep a fact. Indexed for search
         and recorded with provenance (who said to remember it, and when)."""
+        if actor != "user":
+            raise ValueError("Only explicit user knowledge can become persistent memory")
+        parsed = interpret(text, explicit=True)
+        if parsed.status == "READY":
+            result = await self.remember_fact(
+                text, actor=actor, conversation_id=conversation_id, explicit=True,
+            )
+            if result["status"] not in {"SAVED", "UPDATED", "UNCHANGED"}:
+                raise ValueError(result["reason"])
+            return result["facts"][0]["id"]
+        if parsed.status in {"REJECTED", "EPHEMERAL"}:
+            raise ValueError("This text is not suitable for persistent memory")
         return await self._save_note(
             kind=KIND_EXPLICIT_MEMORY,
             body=text,
@@ -181,6 +221,8 @@ class MemoryService:
     async def forget(self, note_id: str) -> bool:
         """Deletes a structured note and its FTS entry. Returns False if no
         such note existed (idempotent, not an error)."""
+        if await self.semantic.forget(note_id):
+            return True
         note = await notes.get(self._conn, note_id)
         if note is None:
             return False
@@ -188,6 +230,7 @@ class MemoryService:
         # FTS rows for a note are indexed with source=kind, source_id=note_id
         # (see _save_note) -- not source=note_id, which would never match.
         await fts.delete(self._conn, source=note["kind"], source_id=note_id)
+        self._session.invalidate_retrieval()
         return True
 
     async def _save_note(
@@ -202,6 +245,8 @@ class MemoryService:
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:
+        if SECRET.search(body):
+            raise ValueError("Secrets cannot be saved as memory")
         note_id = await notes.insert(
             self._conn,
             kind=kind,
@@ -221,6 +266,7 @@ class MemoryService:
             title=f"{title_prefix} @ {note_id}",
             body=body,
         )
+        self._session.invalidate_retrieval()
         return note_id
 
     async def get_note(self, note_id: str) -> dict[str, Any] | None:

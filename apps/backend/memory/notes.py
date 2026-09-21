@@ -69,7 +69,7 @@ async def list_by_kind(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     limit = max(1, min(limit, 200))
-    sql = "SELECT * FROM memory_notes WHERE kind = ?"
+    sql = "SELECT * FROM memory_notes WHERE kind = ? AND superseded_by IS NULL"
     params: list[Any] = [kind]
     if symbol:
         sql += " AND symbol = ?"
@@ -103,4 +103,6 @@ def _row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
         "body": row["body"],
         "metadata": json.loads(row["metadata"]),
         "created_at": row["created_at"],
+        "supersedes": row["supersedes"],
+        "superseded_by": row["superseded_by"],
     }

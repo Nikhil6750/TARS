@@ -44,6 +44,7 @@ class SessionMemoryStore:
         self._retrieval_cache: OrderedDict[str, tuple[float, list[dict]]] = OrderedDict()
         self._retrieval_ttl = retrieval_cache_ttl_seconds
         self._max_retrieval_cache = max_retrieval_cache_entries
+        self._semantic: OrderedDict[str, dict[str, dict]] = OrderedDict()
 
     def remember_turn(self, conversation_id: str, role: str, text: str) -> None:
         if not text.strip():
@@ -62,6 +63,23 @@ class SessionMemoryStore:
 
     def clear(self, conversation_id: str) -> None:
         self._conversations.pop(conversation_id, None)
+        self._semantic.pop(f"session:{conversation_id}", None)
+
+    def invalidate_retrieval(self) -> None:
+        self._retrieval_cache.clear()
+
+    def semantic_facts(self, scope: str) -> dict[str, dict]:
+        return self._semantic.get(scope, {})
+
+    def set_semantic_fact(self, scope: str, fact: dict) -> None:
+        facts = self._semantic.setdefault(scope, {})
+        key = f"{fact['subject'].casefold()}:{fact['relation']}"
+        facts[key] = fact
+        while len(facts) > self._max_entries:
+            del facts[next(iter(facts))]
+        self._semantic.move_to_end(scope)
+        while len(self._semantic) > self._max_conversations:
+            self._semantic.popitem(last=False)
 
     def cache_retrieval(self, cache_key: str, results: list[dict]) -> None:
         self._retrieval_cache[cache_key] = (time.monotonic(), results)
