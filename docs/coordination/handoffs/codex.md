@@ -6,6 +6,94 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Latest handoff — semantic memory and conversational intelligence (2026-09-21)
+
+**Branch**: `feature/tars-semantic-memory`
+
+**Semantic layer commit SHA**: `5ede3dfa6efb190f630a48841c3f2084ea71e336`.
+The following integration commit contains the Gemini/routing wiring and this
+handoff; resolve the final tip with `git rev-parse feature/tars-semantic-memory`.
+
+**Base / worktree**: `53473305569e591e4cbf93d97ab8691445454e78` from the fetched
+`origin/feature/tars-desktop-demo-20260920`, at
+`C:\TARS-worktrees\tars-semantic-memory`. User explicitly authorized this sole
+builder to work across the necessary backend paths. No original working-tree
+files, orb/UI, voice transport/selection, action permissions, MT5 safety, or
+strategy-research implementation changed. No merge performed.
+
+**Work completed**:
+
+- Extended existing `memory_notes`/FTS/SQLite and session memory with canonical
+  facts, preferences, aliases and project context, provenance and revision links.
+- Added deterministic entity/relation/timeframe normalization and paraphrase
+  recall, natural replies, bounded search and alias-to-market-symbol resolution.
+- Atomic compare-and-swap corrections retain previous evidence and expose only
+  the active revision; forgetting either a semantic or migrated original note ID
+  removes its lineage. Retrieval-cache invalidation prevents stale corrections.
+- Added paged legacy-note promotion with provenance preservation; conflicting
+  old claims are retained as unresolved evidence and excluded from grounding.
+- Added two Gemini tools tied to the actual human transcript, deterministic
+  conversational routing, structured provider grounding and a simple-memory
+  bypass for mistaken `ask_claude` calls. No LLM/database implementation overlap.
+- Added privacy, rejection, ephemeral scope, restart, migration, concurrent-write,
+  SDK declaration, actual tool dispatch, API and latency acceptance coverage.
+
+**Files changed**:
+
+- `apps/backend/memory/{interpretation,semantic,service,notes,session}.py` and README.
+- `apps/backend/storage/migrations/0010_semantic_memory.sql`.
+- `apps/backend/voice/{memory_tools,gemini_live}.py`.
+- `apps/backend/assistant/{turn_controller,grounding}.py`,
+  `orchestrator/orchestrator.py`, and `app/main.py` startup wiring.
+- `apps/backend/tests/test_semantic_memory.py`,
+  `test_semantic_memory_integration.py`, and the existing Gemini tool allowlist test.
+- This Codex handoff only under coordination docs.
+
+**Interfaces exposed**:
+
+- `MemoryService.remember_fact(statement, ...)`, `recall_memory(query, ...)`,
+  `memory_response(text, ...)`; `semantic.resolve_symbol(alias)`.
+- `remember_fact()` and `recall_memory(query)` Gemini function declarations.
+  Corrections share `remember_fact()` and must come from the human's statement.
+- Existing memory search optionally includes a structured `fact` alongside its
+  compatible source/source_id/title/snippet fields. Frozen contracts unchanged.
+
+**Tests run**:
+
+- Final semantic unit suite: **89 passed**; new Gemini/API integration: **19 cases**.
+- Earlier combined memory, orchestrator, controller and Gemini regression run:
+  **150 passed**; desktop/action/memory combined run: **137 passed**.
+- Root memory-grounding/voice-pipeline integration: **2 passed**; root contract
+  fixtures/generated-model checks: **31 passed**.
+- Full backend suite: **841 passed** in 487.65 seconds, one existing third-party
+  deprecation warning. The final 89-case semantic rerun also covers the subsequent
+  legacy-ID deletion fix (108 new semantic/Gemini/API cases in the final source).
+- Ruff on changed Python files and MyPy on the memory/grounding/tool modules:
+  passed. Staged `detect-secrets 1.5.0` scan with network verification disabled:
+  clean (the synthetic `.invalid` basic-auth rejection fixture is explicitly marked).
+- Actual sample: `TARS developed_by Nikhil` -> "I was developed by Nikhil."
+  Local indexed recall, 200 calls: median **0.240 ms**, p95 **0.399 ms**.
+
+**Known limitations**:
+
+- Conservative English grammar and a closed ontology; unrecognized/ambiguous
+  requests ask for a clearer fact. Each entity/relation slot has one active value.
+- Confidence 1.0 denotes explicit user attribution, never verified trading facts.
+- Live paid Gemini/microphone behavior was not exercised; SDK tool wiring and
+  deterministic answers were verified. Gemini's final spoken wording is model-driven.
+- Default-chart lookup retrieves settings and does not itself claim to open a
+  chart; Gemini can use the unchanged guarded desktop tools after retrieving them.
+
+**Exact dependencies required from other agents**: None to run the tests or local
+memory. Integration owner must retain the existing application SQLite connection
+and apply migration 0010 at startup. No new package or frontend build is required.
+
+**Next recommended action**: Merge the complete branch when desired. Reconcile
+only memory additions in `voice/gemini_live.py` with any newer Claude voice work;
+preserve its audio/voice/desktop-confirmation behavior. Check migration-number
+availability if another branch adds 0010. Run the focused memory/Gemini tests and
+exercise the three user voice examples after integration.
+
 ## Latest handoff — minimal golden voice loop awaiting physical certification (2026-08-22)
 
 **Branch**: `feature/tars-minimal-golden-loop`

@@ -34,6 +34,7 @@ from app.schemas import AssistantMessage, InputMode, MessageProviders, MessageRo
 from assistant.conversation_store import ConversationStore
 from assistant.response_quality import ResponseComposer
 from assistant.router import AssistantRouter, RouterReply
+from memory.interpretation import SECRET, interpret, recall_target
 from memory.service import MemoryService
 from orchestrator import patterns
 
@@ -110,7 +111,8 @@ class TarsOrchestrator:
             content=text,
             input_mode=InputMode.text,
         )
-        await self._save(user_message)
+        if not SECRET.search(text):
+            await self._save(user_message)
 
         handler = getattr(self, f"_handle_{route.kind}")
         reply_text, intent = await handler(route.payload, conversation_id)
@@ -166,7 +168,8 @@ class TarsOrchestrator:
             content=text,
             input_mode=InputMode.text,
         )
-        await self._save(user_message)
+        if not SECRET.search(text):
+            await self._save(user_message)
 
         handler = getattr(self, f"_handle_{route.kind}")
         reply_text, intent = await handler(route.payload, conversation_id)
@@ -197,6 +200,8 @@ class TarsOrchestrator:
     # ---- routing ----------------------------------------------------------
 
     def _classify(self, text: str, conversation_id: str) -> _Route | None:
+        if recall_target(text) or interpret(text).status != "UNRECOGNIZED":
+            return _Route("remember", {"text": text})
         # Only ever consulted when this exact conversation actually has a
         # pending skill install/uninstall/update confirmation -- otherwise
         # an ordinary "yes"/"cancel" in normal conversation would wrongly
@@ -256,13 +261,8 @@ class TarsOrchestrator:
     async def _handle_remember(
         self, payload: dict[str, Any], conversation_id: str
     ) -> tuple[str, str]:
-        text = payload["text"]
-        note_id = await self._memory.remember(text, actor="user", conversation_id=conversation_id)
-        await self._record_decision(
-            f"Remembered a fact at the user's explicit request (note {note_id}).",
-            conversation_id,
-        )
-        return f"Got it, I'll remember that: {text}", "remember"
+        response = await self._memory.memory_response(payload["text"], conversation_id=conversation_id)
+        return response or "What single fact should I remember?", "remember"
 
     async def _handle_save_trading_observation(
         self, payload: dict[str, Any], conversation_id: str

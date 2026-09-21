@@ -720,7 +720,27 @@ class AssistantTurnController:
             TurnEvent(turn_id=turn_id, type="state", state=TurnState.PROCESSING)
         )
         try:
-            if intent is TurnIntent.NORMAL_CONVERSATION:
+            memory_reply = (
+                await self._memory.memory_response(text, conversation_id=conversation_id)
+                if self._memory is not None else None
+            )
+            if memory_reply is not None:
+                from memory.interpretation import SECRET
+
+                intent, provider = TurnIntent.TOOL_TASK, "deterministic"
+                presentation = self._composer.compose(user_text=text, display_text=memory_reply)
+                # A rejected secret must not leak through conversation history either.
+                if not SECRET.search(text):
+                    await self._persist_message(AssistantMessage(
+                        conversation_id=_conversation_uuid(conversation_id),
+                        role=MessageRole.user, content=text, input_mode=input_mode,
+                    ))
+                await self._persist_message(AssistantMessage(
+                    conversation_id=_conversation_uuid(conversation_id), role=MessageRole.assistant,
+                    content=presentation.display_text, input_mode=input_mode,
+                    intent=intent.value, providers=MessageProviders(assistant=provider),
+                ))
+            elif intent is TurnIntent.NORMAL_CONVERSATION:
                 display, provider = await self._normal_conversation(
                     text, turn_id=turn_id, conversation_id=conversation_id, input_mode=input_mode
                 )

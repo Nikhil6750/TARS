@@ -1,8 +1,8 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import os
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -130,6 +130,7 @@ async def lifespan(app: FastAPI):
         sqlite_vec_enabled=settings.sqlite_vec_enabled,
     )
     app.state.memory_service = memory_service
+    await memory_service.semantic.import_legacy()
     startup_index = await memory_service.reindex_vault()
     if not startup_index.vault_missing:
         logger.info(

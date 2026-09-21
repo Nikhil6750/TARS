@@ -24,6 +24,7 @@ from uuid import uuid4
 
 from app.schemas import InputMode
 from voice.desktop_tools import DESKTOP_TOOL_NAMES, DesktopTools
+from voice.memory_tools import MEMORY_INSTRUCTIONS, MEMORY_TOOL_NAMES, MemoryTools, declarations
 from voice.session import LatencyMetrics, VoiceState
 
 logger = logging.getLogger("tars.gemini_live")
@@ -99,7 +100,7 @@ Hard limits
 - Live trading is read-only. You cannot and must never place, modify, close or cancel orders or positions, and must
   not click order buttons in MetaTrader. If asked, say trading stays in the user's hands.
 - Only respond when the user is talking to you (usually "TARS") or a conversation is already active. Ignore
-  background chatter and TV."""
+  background chatter and TV.""" + MEMORY_INSTRUCTIONS
 
 
 def _tool_declarations():
@@ -111,6 +112,7 @@ def _tool_declarations():
 
     decl = types.FunctionDeclaration
     return [types.Tool(function_declarations=[
+        *declarations(types),
         decl(name="get_market_context", description="Live quote (bid/ask/spread and source), next calendar event and chart-monitor state for a symbol. Use for any 'what is happening with X' question.",
              parameters=obj(symbol=("STRING", "Symbol such as EURUSD or XAUUSD"))),
         decl(name="get_recent_events", description="Most recent proactive market events/alerts TARS raised (price moves, calendar, position changes).",
@@ -152,24 +154,32 @@ def _tool_declarations():
 
 BASE_TOOL_NAMES = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
                    "get_economic_calendar", "ask_claude"}
-TOOL_NAMES = BASE_TOOL_NAMES | DESKTOP_TOOL_NAMES
+TOOL_NAMES = BASE_TOOL_NAMES | DESKTOP_TOOL_NAMES | MEMORY_TOOL_NAMES
 
 
 class TarsTools:
-    """Bounded, read-only tools. Nothing here can trade or change state."""
+    """Bounded data, local memory, and guarded desktop tools. No trading execution."""
 
     def __init__(self, app_state, session_id: str):
         self.state, self.session_id = app_state, session_id
         self._last_user = lambda: ("", 0.0)
         self.desktop = DesktopTools(app_state, lambda: self._last_user())
+        self._memory_user = lambda: self._last_user()
+        self.memory = MemoryTools(getattr(app_state, "memory_service", None), session_id,
+                                  lambda: self._memory_user())
 
     def bind_last_user(self, getter):
         self._last_user = getter
+
+    def bind_memory_user(self, getter):
+        self._memory_user = getter
 
     async def call(self, name: str, args: dict) -> dict:
         if name not in TOOL_NAMES:
             return {"error": f"unknown tool {name}"}
         try:
+            if name in MEMORY_TOOL_NAMES:
+                return await self.memory.call(name, args)
             if name in DESKTOP_TOOL_NAMES:
                 allowed = {"target", "control_id", "label", "text", "direction", "url", "query", "path", "command", "question"}
                 return await self.desktop.call(name, {k: v for k, v in (args or {}).items() if k in allowed})
@@ -186,6 +196,8 @@ class TarsTools:
         return await monitors.status() if monitors is not None else None
 
     async def get_market_context(self, symbol: str = "EURUSD") -> dict:
+        if self.memory.memory is not None:
+            symbol = await self.memory.memory.semantic.resolve_symbol(symbol or "EURUSD")
         status = await self._status()
         if status is None:
             return {"available": False, "detail": "monitors are not running"}
@@ -236,6 +248,14 @@ class TarsTools:
                             "actual": e.actual, "replay": e.replay} for e in events[:12]]}
 
     async def ask_claude(self, question: str = "", context: str = "") -> dict:
+        if self.memory.memory is not None:
+            from memory.interpretation import interpret, recall_target
+
+            if recall_target(question):
+                return {"answer": await self.memory.memory.memory_response(question),
+                        "source": "semantic_memory"}
+            if interpret(question).status != "UNRECOGNIZED":
+                return await self.memory.call("remember_fact", {})
         turns = getattr(self.state, "turn_controller", None)
         if turns is None or not question.strip():
             return {"error": "Claude backend unavailable or empty question"}
@@ -272,6 +292,12 @@ class GeminiLiveVoiceSession:
         self._last_final_user = ("", 0.0)
         if hasattr(tools, "bind_last_user"):
             tools.bind_last_user(lambda: self._last_final_user)
+        if hasattr(tools, "bind_memory_user"):
+            # Tool calls can arrive before the first audio frame finalizes the
+            # human transcription. This getter is memory-only; desktop
+            # confirmation still uses its unchanged final-transcript gate.
+            tools.bind_memory_user(lambda: (self._user_text.strip(), time.monotonic())
+                                   if self._user_open else self._last_final_user)
         self._connect = connect
         self.metrics = metrics or LatencyMetrics()
         self.speech_open_frames = speech_open_frames
@@ -347,6 +373,7 @@ class GeminiLiveVoiceSession:
     def _default_connect(self):
         from google import genai
         from google.genai import types
+
         from app.config import get_settings
 
         key = get_settings().gemini_api_key
