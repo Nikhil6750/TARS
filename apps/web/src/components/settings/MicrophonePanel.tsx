@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { MicInfo, MicTestResult, SILENT_DB, judgeMicTest, meterFraction, micStore } from '../../orb/micStore';
 import { isTauri } from '../../services/tauri';
+import { muteStore } from '../../orb/muteStore';
 
 const PREF_KEY = 'tars.mic.preferred';
 const API = 'http://127.0.0.1:8000';
@@ -45,6 +46,7 @@ const Meter: React.FC<{ db: number }> = ({ db }) => {
 
 export const MicrophonePanel: React.FC = () => {
   const info: MicInfo | null = useSyncExternalStore(micStore.subscribe, micStore.getSnapshot);
+  const muted = useSyncExternalStore(muteStore.subscribe, muteStore.getSnapshot);
   const [devices, setDevices] = useState<DeviceRow[]>([]);
   const [preferred, setPreferred] = useState<string>(() => {
     try { return localStorage.getItem(PREF_KEY) ?? ''; } catch { return ''; }
@@ -135,6 +137,12 @@ export const MicrophonePanel: React.FC = () => {
           <button type="button" onClick={() => void refreshDevices()} className="rounded border border-slate-300 px-2 py-1 hover:bg-slate-50">Refresh</button>
         </label>
 
+        <label className="flex items-center gap-2">
+          <span className="w-28 text-slate-500">Mute</span>
+          <input type="checkbox" role="switch" aria-label="Mute microphone" checked={muted}
+            onChange={e => void muteStore.set(e.target.checked)} data-testid="settings-mute" />
+          <span>{muted ? 'Microphone muted: TARS is not listening (monitors keep running)' : 'Microphone active'}</span>
+        </label>
         <div className="flex items-center gap-2">
           <span className="w-28 text-slate-500">In use</span>
           <span data-testid="mic-device">{info?.device ? `${info.device} · ${info.sample_rate} Hz · ${info.channels} ch · ${info.selected_by}${info.status === 'STARTING' ? ' · waiting for first audio' : ''}` : info?.error ?? 'No microphone signal path'}</span>

@@ -160,6 +160,48 @@ fn orb_toggle(app: tauri::AppHandle) -> Result<bool, String> {
     toggle_orb(&app)
 }
 
+static MUTE_FILE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+static MUTE_MENU_ITEM: std::sync::Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>> = std::sync::Mutex::new(None);
+
+fn load_mute_preference(app: &tauri::AppHandle) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("mic_muted");
+        // Only the boolean preference is stored.
+        let muted = fs::read_to_string(&file).map(|t| t.trim() == "1").unwrap_or(false);
+        wake_engine::set_muted_flag(muted);
+        if let Ok(mut g) = MUTE_FILE.lock() {
+            *g = Some(file);
+        }
+    }
+}
+
+/// The single place that changes mute: flag, persistence, tray label and UI notification.
+fn apply_mic_muted(app: &tauri::AppHandle, muted: bool) {
+    wake_engine::set_muted_flag(muted);
+    if let Ok(g) = MUTE_FILE.lock() {
+        if let Some(file) = g.as_ref() {
+            let _ = fs::write(file, if muted { "1" } else { "0" });
+        }
+    }
+    if let Ok(g) = MUTE_MENU_ITEM.lock() {
+        if let Some(item) = g.as_ref() {
+            let _ = item.set_text(if muted { "Unmute Microphone" } else { "Mute Microphone" });
+        }
+    }
+    let _ = app.emit("tars://mic-muted", muted);
+}
+
+#[tauri::command]
+fn get_mic_muted() -> bool {
+    wake_engine::is_muted()
+}
+
+#[tauri::command]
+fn set_mic_muted(app: tauri::AppHandle, muted: bool) {
+    apply_mic_muted(&app, muted);
+}
+
 #[tauri::command]
 fn mic_info() -> Option<wake_engine::MicInfo> {
     wake_engine::info()
@@ -1483,6 +1525,8 @@ pub fn run() {
             get_hotkey_status,
             orb_start_drag,
             mic_info,
+            get_mic_muted,
+            set_mic_muted,
             list_input_devices,
             set_preferred_mic,
             orb_hide,
@@ -1526,9 +1570,11 @@ pub fn run() {
             let hide_i = MenuItem::with_id(app, "hide_tars", "Hide TARS", true, None::<&str>)?;
             let workspace_i = MenuItem::with_id(app, "open_workspace", "Open Workspace", true, None::<&str>)?;
             let mic_i = MenuItem::with_id(app, "mic_test", "Microphone Test", true, None::<&str>)?;
+            let mute_i = MenuItem::with_id(app, "toggle_mute", if wake_engine::is_muted() { "Unmute Microphone" } else { "Mute Microphone" }, true, None::<&str>)?;
+            if let Ok(mut g) = MUTE_MENU_ITEM.lock() { *g = Some(mute_i.clone()); }
             let sep1 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit TARS", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &workspace_i, &mic_i, &sep1, &quit_i])?;
+            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &workspace_i, &mute_i, &mic_i, &sep1, &quit_i])?;
 
             let icon = app.default_window_icon().cloned().unwrap();
             let _tray = TrayIconBuilder::new()
@@ -1549,6 +1595,9 @@ pub fn run() {
                     "mic_test" => {
                         let _ = show_main_impl(app);
                         let _ = app.emit("tars://open-mic-test", ());
+                    }
+                    "toggle_mute" => {
+                        apply_mic_muted(app, !wake_engine::is_muted());
                     }
                     "quit" => {
                         app.exit(0);
@@ -1593,6 +1642,7 @@ pub fn run() {
             // to verify the native page loaded); closing it hides to the tray
             // and TARS keeps running, so it is a background/tray app after
             // first launch rather than a dashboard that happens to also listen.
+            load_mute_preference(app.handle());
             start_orb_hit_test(app.handle().clone());
             let _ = enter_orb(app.handle());
             {

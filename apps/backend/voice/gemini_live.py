@@ -311,6 +311,7 @@ class GeminiLiveVoiceSession:
                     "status": "DISCONNECTED"}
         self.last_transcript = ""
         self._mic_logged = 0.0
+        self.microphone_muted = False
 
     # ---- events -----------------------------------------------------------
     async def send(self, type_: str, **payload):
@@ -328,6 +329,7 @@ class GeminiLiveVoiceSession:
         await self.send("state", state=state.value)
 
     async def _status(self, **detail):
+        detail.setdefault("microphone_muted", self.microphone_muted)
         await self.send("provider_status", providers=self.provider_status.copy(),
                         voice_provider=self.voice_provider, **detail)
 
@@ -422,8 +424,8 @@ class GeminiLiveVoiceSession:
 
     # ---- audio in ---------------------------------------------------------
     async def push_audio(self, frame: bytes):
-        if self.closed:
-            return
+        if self.closed or self.microphone_muted:
+            return  # muted: no VAD, no accounting, no Gemini, no session opening
         if self.provider_status["microphone"] in ("DISCONNECTED", "STARTING"):
             self.provider_status["microphone"] = "CONNECTED"  # frames are arriving; health() refines it
             await self._status()
@@ -470,6 +472,8 @@ class GeminiLiveVoiceSession:
     def mic_health(self) -> str:
         """CONNECTED | SILENT (frames flow but never any signal) | DISCONNECTED (no frames)."""
         m, now = self.mic, time.monotonic()
+        if self.microphone_muted:
+            return "MUTED"
         if m["frames"] == 0:
             return "STARTING" if now - self._started_at < 6.0 else "DISCONNECTED"
         if now - m["last_frame_at"] > 3.0:
@@ -484,7 +488,8 @@ class GeminiLiveVoiceSession:
                            if k not in ("last_frame_at", "first_frame_at", "last_signal_at")},
                         "health": self.mic_health()},
                 "gemini": self.provider_status["gemini_live"], "transcript": self.last_transcript,
-                "voice_state": self.state.value, "voice_provider": self.voice_provider}
+                "voice_state": self.state.value, "voice_provider": self.voice_provider,
+                "microphone_muted": self.microphone_muted}
 
     async def _send_audio(self, chunk: bytes):
         live = self._live
@@ -642,8 +647,38 @@ class GeminiLiveVoiceSession:
         self._first_audio, self._assistant_text = False, ""
         await self.send("interrupt", previous_turn_id=previous, status="interrupted")
 
+    async def set_muted(self, muted: bool):
+        """Mirror of the native mute (the authority). Muting drops any half-heard utterance cleanly."""
+        muted = bool(muted)
+        if muted == self.microphone_muted:
+            return
+        self.microphone_muted = muted
+        if muted:
+            mid_utterance = self._user_open or self.stt.active or self._speech_frames > 0
+            self._pending.clear()
+            self._preroll.clear()
+            self._speech_frames = 0
+            self._user_open, self._user_text = False, ""
+            self.stt.active = False
+            if self._open_task and not self._open_task.done():
+                self._open_task.cancel()
+                await asyncio.gather(self._open_task, return_exceptions=True)
+            if self._live is not None and mid_utterance:
+                # Closing the session is the only way to guarantee the unfinished utterance is not answered.
+                await self._teardown_live("muted mid-utterance")
+            self.provider_status["microphone"] = "MUTED"
+            if self.state in (VoiceState.USER_SPEAKING, VoiceState.ENDPOINTING):
+                await self.transition(VoiceState.LISTENING)
+        else:
+            self.provider_status["microphone"] = "STARTING"  # health() takes over once frames arrive
+            self.mic["last_frame_at"] = 0.0
+            self.mic["first_frame_at"] = 0.0
+        await self._status(detail="Microphone muted" if muted else "Microphone active", microphone_muted=muted)
+
     async def wake(self):
         """Orb click: open the Gemini session now instead of waiting for speech (no-op if already open)."""
+        if self.microphone_muted:
+            return
         self._last_activity = time.monotonic()
         if self._live is None and not (self._open_task and not self._open_task.done()) and not self.closed:
             self._open_task = asyncio.create_task(self._open())

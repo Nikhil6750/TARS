@@ -14,6 +14,12 @@ static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// Preferred input device name (saved TARS preference); empty = automatic.
 static PREFERRED: Mutex<String> = Mutex::new(String::new());
 static RESTART: AtomicBool = AtomicBool::new(false);
+/// Authoritative microphone mute. While set, NO audio frame leaves this thread: nothing reaches the
+/// webview, the backend VAD, Gemini or STT. Level metering for diagnostics continues locally.
+static MUTED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_muted() -> bool { MUTED.load(Ordering::SeqCst) }
+pub fn set_muted_flag(muted: bool) { MUTED.store(muted, Ordering::SeqCst); }
 static INFO: Mutex<Option<MicInfo>> = Mutex::new(None);
 
 /// Digital silence threshold: even a quiet room sits far above this on a working microphone path.
@@ -202,8 +208,12 @@ fn run(app: &AppHandle) -> Result<(), String> {
                     smooth_db = if frame_db > smooth_db { frame_db } else { smooth_db * 0.9 + frame_db * 0.1 };
                     if frame_db > max_db { max_db = frame_db; }
                     if frame_db > SILENT_DB { last_signal = Instant::now(); }
-                    let _ = app.emit("tars://wake-audio-level", (energy * 8.0).min(1.0));
-                    let _ = app.emit("tars://microphone-pcm", frame);
+                    if MUTED.load(Ordering::SeqCst) {
+                        let _ = app.emit("tars://wake-audio-level", 0.0f32);
+                    } else {
+                        let _ = app.emit("tars://wake-audio-level", (energy * 8.0).min(1.0));
+                        let _ = app.emit("tars://microphone-pcm", frame);
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {

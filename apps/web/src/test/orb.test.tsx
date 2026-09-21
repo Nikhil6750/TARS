@@ -174,10 +174,9 @@ describe('interactions', () => {
     render(<OrbCompanion store={store} actions={a} />);
     fireEvent.contextMenu(screen.getByTestId('orb-hit'));
     const labels = screen.getAllByRole('menuitem').map(el => el.textContent);
-    expect(labels).toEqual(['Open TARS', 'Start listening', 'Mute TARS', 'Settings', 'Quit TARS']);
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Mute TARS' }));
+    expect(labels).toEqual(['Open TARS', 'Start listening', 'Mute microphone', 'Settings', 'Quit TARS']);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Mute microphone' }));
     expect(a.setMuted).toHaveBeenCalledWith(true);
-    expect(store.getSnapshot().muted).toBe(true);
     fireEvent.contextMenu(screen.getByTestId('orb-hit'));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Settings' }));
     expect(a.openWorkspace).toHaveBeenCalledWith('settings');

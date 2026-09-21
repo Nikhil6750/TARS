@@ -76,7 +76,11 @@ export class RealtimeVoiceClient {
     const socket = new WebSocket(`${url}/api/v1/voice/realtime`);
     this.socket = socket;
     this.generation = -1;
-    socket.onopen = () => { if (this.socket === socket) this.listener({ type: 'connection', connected: true }); };
+    socket.onopen = () => {
+      if (this.socket !== socket) return;
+      this.listener({ type: 'connection', connected: true });
+      this.send({ type: 'mute', muted: this.muted }); // a new session starts with the true mute state
+    };
     socket.onmessage = ({ data }) => {
       if (this.socket !== socket || this.stopped) return;
       try { this.accept(JSON.parse(String(data)) as VoiceEvent); }
@@ -181,6 +185,7 @@ export class RealtimeVoiceClient {
   setMuted(muted: boolean) {
     this.muted = muted;
     if (muted) this.flush();
+    this.send({ type: 'mute', muted });
   }
 
   interrupt() {

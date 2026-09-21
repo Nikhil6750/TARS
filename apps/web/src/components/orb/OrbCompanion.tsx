@@ -10,6 +10,7 @@ const CANVAS = 168;
 const HIT = 120; // interactive square around the orb body
 const HIT_X = (ORB_WINDOW.w - HIT) / 2;
 const HIT_Y = CANVAS / 2 - HIT / 2;
+const MUTE = { x: HIT_X + HIT + 6, y: CANVAS / 2 - 14, size: 28 };
 
 export interface OrbActions {
   /** Ask the backend session to start listening now (opens Gemini Live). */
@@ -102,7 +103,7 @@ export const OrbCompanion: React.FC<Props> = ({ store = defaultStore, actions })
 
   // Report which rectangles are interactive so all other transparent pixels are click-through.
   useEffect(() => {
-    const regions: Array<[number, number, number, number]> = [[HIT_X, HIT_Y, HIT, HIT]];
+    const regions: Array<[number, number, number, number]> = [[HIT_X, HIT_Y, HIT, HIT], [MUTE.x, MUTE.y, MUTE.size, MUTE.size]];
     for (const el of [bubbleRef.current, menuRef.current]) {
       if (el) regions.push([el.offsetLeft, el.offsetTop, el.offsetWidth, el.offsetHeight]);
     }
@@ -143,7 +144,7 @@ export const OrbCompanion: React.FC<Props> = ({ store = defaultStore, actions })
       style={{ width: ORB_WINDOW.w, height: ORB_WINDOW.h, background: 'transparent' }}
     >
       {/* The orb: the only permanent element. */}
-      <div style={{ position: 'absolute', left: (ORB_WINDOW.w - CANVAS) / 2, top: 0, opacity: snap.muted ? 0.5 : 1, transition: 'opacity 250ms' }}>
+      <div style={{ position: 'absolute', left: (ORB_WINDOW.w - CANVAS) / 2, top: 0, opacity: snap.muted ? 0.72 : 1, transition: 'opacity 250ms' }}>
         <TarsOrb state={snap.state} flashUntil={snap.flashUntil} size={CANVAS} />
       </div>
       <div
@@ -159,6 +160,38 @@ export const OrbCompanion: React.FC<Props> = ({ store = defaultStore, actions })
         className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-sky-300/60"
         style={{ position: 'absolute', left: HIT_X, top: HIT_Y, width: HIT, height: HIT, cursor: 'pointer', touchAction: 'none' }}
       />
+
+      {/* Mute: toggles the microphone ONLY. Its pointer events never reach the orb (no wake, no drag,
+          no workspace). The state shown is the native authority's, not a local flag. */}
+      <button
+        type="button"
+        data-testid="orb-mute"
+        aria-label={snap.muted ? 'Unmute microphone' : 'Mute microphone'}
+        aria-pressed={snap.muted}
+        title={snap.muted ? 'Microphone muted' : 'Microphone active'}
+        onPointerDown={e => e.stopPropagation()}
+        onPointerUp={e => e.stopPropagation()}
+        onPointerMove={e => e.stopPropagation()}
+        onDoubleClick={e => e.stopPropagation()}
+        onContextMenu={e => e.stopPropagation()}
+        onClick={e => { e.stopPropagation(); actions.setMuted(!snap.muted); }}
+        onKeyDown={e => e.stopPropagation()}
+        className="absolute rounded-full backdrop-blur outline-none focus-visible:ring-2 focus-visible:ring-sky-300/70 transition-colors"
+        style={{
+          left: MUTE.x, top: MUTE.y, width: MUTE.size, height: MUTE.size, padding: 0, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', cursor: 'pointer', touchAction: 'none',
+          background: snap.muted ? 'rgba(120,80,30,0.55)' : 'rgba(15,23,42,0.45)',
+          border: `1px solid ${snap.muted ? 'rgba(251,191,36,0.55)' : 'rgba(255,255,255,0.14)'}`,
+          color: snap.muted ? 'rgb(253,224,150)' : 'rgba(226,232,240,0.85)',
+        }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" data-testid={snap.muted ? 'icon-mic-off' : 'icon-mic'}>
+          <rect x="9" y="3" width="6" height="11" rx="3" />
+          <path d="M5 11a7 7 0 0 0 14 0" />
+          <path d="M12 18v3" />
+          {snap.muted && <path d="M4 4l16 16" />}
+        </svg>
+      </button>
 
       {/* Waveform: only while voice is active. */}
       <div style={{ position: 'absolute', left: (ORB_WINDOW.w - 104) / 2, top: CANVAS - 20, height: 22 }}>
@@ -214,7 +247,7 @@ export const OrbCompanion: React.FC<Props> = ({ store = defaultStore, actions })
         >
           {item('Open TARS', () => actions.openWorkspace())}
           {item('Start listening', activate)}
-          {item(snap.muted ? 'Unmute TARS' : 'Mute TARS', () => { actions.setMuted(!snap.muted); store.setMuted(!snap.muted); })}
+          {item(snap.muted ? 'Unmute microphone' : 'Mute microphone', () => actions.setMuted(!snap.muted))}
           {snap.lastAlert && item('Recent alert', () => store.showLastAlert())}
           {item('Settings', () => actions.openWorkspace('settings'))}
           {item('Quit TARS', actions.quit)}

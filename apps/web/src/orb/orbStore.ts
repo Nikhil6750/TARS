@@ -31,6 +31,7 @@ export interface OrbEvent {
   voice_provider?: string;
   connected?: boolean;
   providers?: Record<string, string>;
+  microphone_muted?: boolean;
   response?: { display_text: string };
 }
 
@@ -131,6 +132,7 @@ export class OrbStore {
       case 'provider_status':
         if (ev.voice_provider) this.inputs.provider = ev.voice_provider;
         if (ev.providers?.microphone) this.inputs.mic = ev.providers.microphone;
+        if (typeof ev.microphone_muted === 'boolean') this.muted = ev.microphone_muted;
         if (ev.providers?.gemini_live) this.inputs.gemini = ev.providers.gemini_live;
         if (ev.detail && /Using LOCAL_STREAMING/i.test(ev.detail)) {
           this.setBubble({ text: 'Using local voice', kind: 'error', at: now });

@@ -89,6 +89,7 @@ class VoiceSessionController:
         self.turn_id = f"{self.session_id}:0"
         self.utterance = 0
         self.closed = False
+        self.microphone_muted = False
         self.response_task: asyncio.Task | None = None
         self.tts: LocalStreamingTTS | None = None
         self.tts_task: asyncio.Task | None = None
@@ -142,7 +143,7 @@ class VoiceSessionController:
             pass
 
     async def push_audio(self, frame: bytes):
-        if self.closed:
+        if self.closed or self.microphone_muted:
             return
         if self.provider_status["microphone"] != "CONNECTED":
             self.provider_status["microphone"] = "CONNECTED"
@@ -151,6 +152,19 @@ class VoiceSessionController:
             await self.stt.push_audio(frame)
         except Exception as exc:
             await self.failure("stt", type(exc).__name__)
+
+    async def set_muted(self, muted: bool):
+        muted = bool(muted)
+        if muted == self.microphone_muted:
+            return
+        self.microphone_muted = muted
+        if muted:
+            await self.stt.stop()      # drops the in-flight utterance without a final decode
+            await self.stt.start()
+            if self.state in (VoiceState.USER_SPEAKING, VoiceState.ENDPOINTING):
+                await self.transition(VoiceState.LISTENING)
+        self.provider_status["microphone"] = "MUTED" if muted else "CONNECTED"
+        await self.send("provider_status", providers=self.provider_status.copy(), microphone_muted=muted)
 
     async def failure(self, provider: str, detail: str):
         self.provider_status[provider] = "ERROR"

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { OrbCompanion, OrbActions } from '../components/orb/OrbCompanion';
 import { orbStore } from '../orb/orbStore';
 import { orbNative } from '../orb/orbNative';
+import { muteStore } from '../orb/muteStore';
 import { applySavedMicrophone } from '../components/settings/MicrophonePanel';
 import { ALERT_EVENT, TarsAlert } from '../services/monitors';
 import { isTauri } from '../services/tauri';
@@ -32,9 +33,16 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
     void realtimeVoiceClient.start(event => orbStore.apply(event), () => undefined);
     void orbNative.restorePosition();
     void applySavedMicrophone();
+    // The native shell owns mute. Mirror it into the realtime client (backend enforcement) and the orb.
+    const unsubscribeMute = muteStore.subscribe(() => {
+      const muted = muteStore.getSnapshot();
+      realtimeVoiceClient.setMuted(muted);
+      orbStore.setMuted(muted);
+    });
+    void muteStore.start();
     let stopMoves: () => void = () => undefined;
     void orbNative.watchMoves().then(off => { stopMoves = off; });
-    return () => { stopMoves(); realtimeVoiceClient.stop(); windowLifecycle.stop(); };
+    return () => { unsubscribeMute(); stopMoves(); realtimeVoiceClient.stop(); windowLifecycle.stop(); };
   }, []);
 
   // Proactive alerts: the orb pulses and shows a tiny bubble. The workspace is NOT opened.
@@ -59,7 +67,7 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
 
   const actions: OrbActions = useMemo(() => ({
     wake: () => realtimeVoiceClient.wake(),
-    setMuted: (muted: boolean) => realtimeVoiceClient.setMuted(muted),
+    setMuted: (muted: boolean) => void muteStore.set(muted),
     confirm: (approve: boolean) => realtimeVoiceClient.confirmAction(approve),
     openWorkspace: (section) => {
       void orbNative.expand();
