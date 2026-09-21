@@ -4,6 +4,8 @@ const calls: Array<[string, unknown]> = [];
 let position: [number, number] = [640, 380];
 
 vi.mock('../services/tauri', () => ({ isTauri: () => true }));
+let moveHandler: (() => void) | null = null;
+vi.mock('@tauri-apps/api/event', () => ({ listen: async (_e: string, cb: () => void) => { moveHandler = cb; return () => { moveHandler = null; }; } }));
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: async (cmd: string, args?: unknown) => {
     calls.push([cmd, args]);
@@ -27,12 +29,13 @@ describe('orb position persistence (drag)', () => {
     expect(calls[1][1]).toEqual({ mode: 'voice' });
   });
 
-  it('does nothing when no position was saved, and ignores corrupt data', async () => {
+  it('without a saved position it still applies the orb layout once, and ignores corrupt data', async () => {
     await orbNative.restorePosition();
-    expect(calls).toEqual([]);
+    expect(calls.map(c => c[0])).toEqual(['summon_hud']);
+    calls.length = 0;
     localStorage.setItem('tars.orb.position', '{"nope"');
     await orbNative.restorePosition();
-    expect(calls).toEqual([]);
+    expect(calls.map(c => c[0])).toEqual(['summon_hud']);
   });
 
   it('drag and hit-region commands go through the existing Tauri window commands', async () => {
@@ -45,5 +48,22 @@ describe('orb position persistence (drag)', () => {
     await orbNative.expand();
     await orbNative.collapse();
     expect(calls.map(c => [c[0], (c[1] as { mode: string }).mode])).toEqual([['summon_hud', 'workstation'], ['summon_hud', 'voice']]);
+  });
+
+  it('saves the position when the window actually moves (the OS drag loop swallows pointer-up), only in orb mode', async () => {
+    vi.useFakeTimers();
+    const off = await orbNative.watchMoves();
+    document.documentElement.dataset.mode = 'workspace';
+    moveHandler?.();
+    await vi.advanceTimersByTimeAsync(700);
+    expect(calls).toEqual([]);
+    document.documentElement.dataset.mode = 'orb';
+    moveHandler?.();
+    moveHandler?.();
+    await vi.advanceTimersByTimeAsync(700);
+    expect(calls.filter(c => c[0] === 'orb_get_position').length).toBe(1); // debounced
+    expect(localStorage.getItem('tars.orb.position')).toBe('[640,380]');
+    off();
+    vi.useRealTimers();
   });
 });

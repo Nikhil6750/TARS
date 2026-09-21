@@ -35,6 +35,7 @@ export const LOOKS: Record<OrbState, OrbLook> = {
   ASSISTANT_SPEAKING: look([255, 208, 168], [70, 48, 110], [255, 244, 232], { energy: 0.6, scale: 1.06, glow: 0.55, wobble: 0.04, ring: 0.3, audio: 1 }),
   ALERT: look([255, 190, 92], [84, 52, 24], [255, 240, 208], { energy: 0.5, scale: 1.1, glow: 0.7, wobble: 0.03, ring: 0.55 }),
   ERROR: look([222, 112, 134], [64, 22, 36], [255, 218, 224], { energy: 0.12, scale: 0.96, glow: 0.3, wobble: 0.01, ring: 0.1, dim: 0.85 }),
+  MIC_ERROR: look([232, 168, 96], [70, 44, 20], [255, 232, 200], { energy: 0.1, scale: 0.94, glow: 0.22, wobble: 0.008, ring: 0.06, dim: 0.7 }),
   DISCONNECTED: look([122, 132, 152], [26, 30, 40], [190, 198, 214], { energy: 0.05, scale: 0.88, glow: 0.08, wobble: 0.005, ring: 0.02, dim: 0.42 }),
 };
 

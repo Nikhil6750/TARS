@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { OrbCompanion, OrbActions } from '../components/orb/OrbCompanion';
 import { orbStore } from '../orb/orbStore';
 import { orbNative } from '../orb/orbNative';
+import { applySavedMicrophone } from '../components/settings/MicrophonePanel';
 import { ALERT_EVENT, TarsAlert } from '../services/monitors';
 import { isTauri } from '../services/tauri';
 import { realtimeVoiceClient } from './RealtimeVoiceClient';
@@ -30,7 +31,10 @@ export const VoiceAssistantRuntime: React.FC<VoiceAssistantRuntimeProps> = ({ vi
     ));
     void realtimeVoiceClient.start(event => orbStore.apply(event), () => undefined);
     void orbNative.restorePosition();
-    return () => { realtimeVoiceClient.stop(); windowLifecycle.stop(); };
+    void applySavedMicrophone();
+    let stopMoves: () => void = () => undefined;
+    void orbNative.watchMoves().then(off => { stopMoves = off; });
+    return () => { stopMoves(); realtimeVoiceClient.stop(); windowLifecycle.stop(); };
   }, []);
 
   // Proactive alerts: the orb pulses and shows a tiny bubble. The workspace is NOT opened.

@@ -11,6 +11,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { AppSettings } from '../../types/companion';
+import { MicrophonePanel } from './MicrophonePanel';
 import { sendNotification, requestNotificationPermission } from '../../services/notifications';
 import { nativeBridge } from '../../services/native-bridge';
 
@@ -67,6 +68,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   return (
     <div className="w-full h-full flex flex-col gap-4 p-3 md:p-6 overflow-y-auto max-w-4xl mx-auto">
+
+      <MicrophonePanel />
       {/* Header */}
       <div className="pb-3 border-b border-cyan-500/20">
         <h1 className="text-base font-display-title font-bold text-slate-100 flex items-center gap-2">

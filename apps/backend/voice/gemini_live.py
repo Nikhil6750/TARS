@@ -51,6 +51,9 @@ def resolve_trading_terms(text: str) -> str:
 
 
 INPUT_RATE = 16000
+# A working microphone path, even in a quiet room, is far above this; drivers that gate silence sit at -100 dB.
+MIC_SILENT_DB = -85.0
+MIC_SILENT_AFTER_S = 90.0
 OUTPUT_RATE = 24000
 
 SYSTEM_PROMPT = """You are TARS: a sharp, calm real-time trading assistant living on the user's desktop. You talk
@@ -281,7 +284,8 @@ class GeminiLiveVoiceSession:
         self.closed, self.seq = False, 0
         self.history: deque[dict] = deque(maxlen=300)
         self.stt = SimpleNamespace(active=False, name="gemini_live")
-        self.provider_status = {"microphone": "DISCONNECTED", "gemini_live": "IDLE"}
+        self.provider_status = {"microphone": "STARTING", "gemini_live": "IDLE"}
+        self._started_at = time.monotonic()
         self.fatal: str | None = None
         self.utterance = 0
         self._stack: contextlib.AsyncExitStack | None = None
@@ -301,6 +305,12 @@ class GeminiLiveVoiceSession:
         self._first_audio = False
         self._last_user_at = 0.0
         self.connects = 0
+        # Microphone truth: what actually arrives here (levels/counters only, never audio content).
+        self.mic = {"frames": 0, "db": -120.0, "max_db": -120.0, "vad": False, "speech_frames": 0,
+                    "sent_to_gemini": 0, "last_frame_at": 0.0, "first_frame_at": 0.0, "last_signal_at": 0.0,
+                    "status": "DISCONNECTED"}
+        self.last_transcript = ""
+        self._mic_logged = 0.0
 
     # ---- events -----------------------------------------------------------
     async def send(self, type_: str, **payload):
@@ -391,6 +401,10 @@ class GeminiLiveVoiceSession:
     async def _idle_watch(self):
         while True:
             await asyncio.sleep(1.0)
+            health = self.mic_health()
+            if health != self.provider_status["microphone"]:
+                self.provider_status["microphone"] = health
+                await self._status(detail=f"Microphone {health.lower()}")
             if (self._live and not self._tool_tasks and self.state is VoiceState.LISTENING
                     and time.monotonic() - self._last_activity > self.idle_seconds):
                 logger.info("gemini live idle for %.0fs: closing session", self.idle_seconds)
@@ -410,14 +424,15 @@ class GeminiLiveVoiceSession:
     async def push_audio(self, frame: bytes):
         if self.closed:
             return
-        if self.provider_status["microphone"] != "CONNECTED":
-            self.provider_status["microphone"] = "CONNECTED"
+        if self.provider_status["microphone"] in ("DISCONNECTED", "STARTING"):
+            self.provider_status["microphone"] = "CONNECTED"  # frames are arriving; health() refines it
             await self._status()
         self._pending.extend(frame)
         while len(self._pending) >= 1024:
             chunk = bytes(self._pending[:1024])
             del self._pending[:1024]
             speech = self.vad(chunk)
+            self._account(chunk, speech)
             if speech:
                 self._last_activity = time.monotonic()
             if self._live:
@@ -429,6 +444,48 @@ class GeminiLiveVoiceSession:
                 self._speech_frames = 0
                 self._open_task = asyncio.create_task(self._open())
 
+    def _account(self, chunk: bytes, speech: bool):
+        import numpy as np
+
+        now = time.monotonic()
+        samples = np.frombuffer(chunk, dtype="<i2").astype("float32") / 32768.0
+        rms = float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
+        db = 20 * np.log10(rms) if rms > 1e-6 else -120.0
+        m = self.mic
+        m["frames"] += 1
+        m["db"] = float(db if db > m["db"] else m["db"] * 0.9 + db * 0.1)
+        m["max_db"] = max(m["max_db"], float(db))
+        m["vad"] = bool(speech)
+        m["speech_frames"] += 1 if speech else 0
+        m["last_frame_at"] = now
+        m["first_frame_at"] = m["first_frame_at"] or now
+        if db > MIC_SILENT_DB:
+            m["last_signal_at"] = now
+        if now - self._mic_logged > 10:
+            self._mic_logged = now
+            logger.info("mic frames=%s rms=%.1fdB max=%.1fdB vad=%s speech_frames=%s sent_to_gemini=%s gemini=%s",
+                        m["frames"], m["db"], m["max_db"], m["vad"], m["speech_frames"], m["sent_to_gemini"],
+                        self.provider_status["gemini_live"])
+
+    def mic_health(self) -> str:
+        """CONNECTED | SILENT (frames flow but never any signal) | DISCONNECTED (no frames)."""
+        m, now = self.mic, time.monotonic()
+        if m["frames"] == 0:
+            return "STARTING" if now - self._started_at < 6.0 else "DISCONNECTED"
+        if now - m["last_frame_at"] > 3.0:
+            return "DISCONNECTED"
+        if m["max_db"] <= MIC_SILENT_DB and now - m["first_frame_at"] > MIC_SILENT_AFTER_S:
+            return "SILENT"
+        return "CONNECTED"
+
+    def diag(self) -> dict:
+        m = self.mic
+        return {"mic": {**{k: (round(v, 1) if isinstance(v, float) else v) for k, v in m.items()
+                           if k not in ("last_frame_at", "first_frame_at", "last_signal_at")},
+                        "health": self.mic_health()},
+                "gemini": self.provider_status["gemini_live"], "transcript": self.last_transcript,
+                "voice_state": self.state.value, "voice_provider": self.voice_provider}
+
     async def _send_audio(self, chunk: bytes):
         live = self._live
         if live is None:
@@ -436,6 +493,7 @@ class GeminiLiveVoiceSession:
         from google.genai import types
         try:
             await live.send_realtime_input(audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={INPUT_RATE}"))
+            self.mic["sent_to_gemini"] += 1
         except Exception as exc:
             logger.warning("gemini send failed: %s", type(exc).__name__)
             await self._teardown_live("connection lost")
@@ -496,6 +554,7 @@ class GeminiLiveVoiceSession:
             await self.send("speech_started")
             await self.transition(VoiceState.USER_SPEAKING)
         self._user_text += text
+        self.last_transcript = self._user_text.strip()
         self._last_user_at = time.perf_counter()
         await self.send("partial_transcript", text=resolve_trading_terms(self._user_text.strip()))
 

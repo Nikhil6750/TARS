@@ -34,7 +34,29 @@ export const orbNative = {
     } catch { saved = null; }
     if (saved && Number.isFinite(saved[0]) && Number.isFinite(saved[1])) {
       await invoke('orb_set_saved_position', { x: saved[0], y: saved[1] });
-      await nativeBridge.summonHUD('voice');
+    }
+    // Always (re)apply the orb layout once the page is up: the native startup pass can land before the
+    // window is realised (observed: not always-on-top, wrong footprint until the first summon).
+    await nativeBridge.summonHUD('voice');
+  },
+  /**
+   * The OS drag loop swallows the pointer-up, so persist the position when the window actually moved
+   * (debounced). Only while the orb layout is showing: workspace moves are not remembered.
+   */
+  async watchMoves(): Promise<() => void> {
+    if (!isTauri()) return () => undefined;
+    try {
+      const { listen } = await import('@tauri-apps/api/event');
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const off = await listen('tauri://move', () => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (document.documentElement.dataset.mode === 'orb') void orbNative.savePosition();
+        }, 500);
+      });
+      return () => { if (timer) clearTimeout(timer); off(); };
+    } catch {
+      return () => undefined;
     }
   },
   expand: () => nativeBridge.summonHUD('workstation'),

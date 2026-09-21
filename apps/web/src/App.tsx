@@ -20,7 +20,7 @@ import {
 import { TARSWebSocketClient } from './services/websocket';
 import { audioService } from './services/audio';
 import { sendNotification } from './services/notifications';
-import { toggleCompactWindow, registerGlobalShortcut, unregisterGlobalShortcut, isTauri } from './services/tauri';
+import { toggleCompactWindow, isTauri } from './services/tauri';
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
 import { nativeBridge } from './services/native-bridge';
 import { VoiceAssistantRuntime } from './runtime/VoiceAssistantRuntime';
@@ -790,34 +790,25 @@ export const App: React.FC = () => {
     document.documentElement.dataset.mode = appMode === 'voice' ? 'orb' : 'workspace';
   }, [appMode]);
 
-  // Global Shortcuts for summoning voice panel
+  // Global hotkeys (Ctrl+Shift+Space toggles the orb, Ctrl+Shift+T summons it) are owned by the native
+  // shell; registering them again here made every press act twice. Only PTT and the tray mic test remain.
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === ' ' || e.code === 'Space')) {
-        e.preventDefault();
-        nativeBridge.summonHUD('voice');
-      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
-        e.preventDefault();
-        nativeBridge.summonHUD('voice');
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    registerGlobalShortcut('CommandOrControl+Shift+Space', () => nativeBridge.summonHUD('voice'));
-    registerGlobalShortcut('CommandOrControl+Shift+T', () => nativeBridge.summonHUD('voice'));
-
     let cleanupPtt: (() => void) | undefined;
+    let cleanupMic: (() => void) | undefined;
     void (async () => {
       if (isTauri()) {
         const { listen } = await import('@tauri-apps/api/event');
         cleanupPtt = await listen('tars://ptt-toggle', () => handleTogglePushToTalk());
+        cleanupMic = await listen('tars://open-mic-test', () => {
+          try { sessionStorage.setItem('tars.micTest.pending', '1'); } catch { /* storage unavailable */ }
+          setActiveTab('settings');
+          window.dispatchEvent(new Event('tars-mic-test'));
+        });
       }
     })();
-
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      unregisterGlobalShortcut('CommandOrControl+Shift+Space');
-      unregisterGlobalShortcut('CommandOrControl+Shift+T');
       if (cleanupPtt) cleanupPtt();
+      if (cleanupMic) cleanupMic();
     };
   }, []);
 

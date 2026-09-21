@@ -22,7 +22,7 @@ vi.mock('../runtime/RealtimeVoiceClient', () => ({
   },
 }));
 vi.mock('../orb/orbNative', () => ({
-  orbNative: { expand: h.expand, collapse: h.collapse, restorePosition: h.restore, quit: vi.fn(), setHitRegions: vi.fn(), startDrag: vi.fn(), savePosition: vi.fn() },
+  orbNative: { expand: h.expand, collapse: h.collapse, restorePosition: h.restore, watchMoves: async () => () => undefined, quit: vi.fn(), setHitRegions: vi.fn(), startDrag: vi.fn(), savePosition: vi.fn() },
 }));
 
 import { VoiceAssistantRuntime } from '../runtime/VoiceAssistantRuntime';

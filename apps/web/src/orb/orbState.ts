@@ -13,6 +13,7 @@ export type OrbState =
   | 'ASSISTANT_SPEAKING'
   | 'ALERT'
   | 'ERROR'
+  | 'MIC_ERROR'
   | 'DISCONNECTED';
 
 export interface OrbInputs {
@@ -28,6 +29,8 @@ export interface OrbInputs {
   tool: string | null;
   /** The user clicked the orb and asked TARS to listen (visual attention window end, ms epoch). */
   attentionUntil: number;
+  /** Microphone health as measured by the backend from frames actually received: CONNECTED | SILENT | DISCONNECTED. */
+  mic: string;
   /** Transient alert pulse end (ms epoch). */
   alertUntil: number;
   now: number;
@@ -35,11 +38,13 @@ export interface OrbInputs {
 
 export const initialInputs = (): OrbInputs => ({
   connected: false, backend: 'IDLE', provider: '', gemini: 'IDLE', tool: null,
-  attentionUntil: 0, alertUntil: 0, now: Date.now(),
+  attentionUntil: 0, alertUntil: 0, mic: 'CONNECTED', now: Date.now(),
 });
 
 export function deriveOrbState(i: OrbInputs): OrbState {
   if (!i.connected) return 'DISCONNECTED';
+  // A dead microphone is never dressed up as listening.
+  if (i.mic === 'SILENT' || i.mic === 'DISCONNECTED') return 'MIC_ERROR';
   if (i.backend === 'ERROR' || (i.provider === 'GEMINI_LIVE' && i.gemini === 'ERROR')) return 'ERROR';
   // Alert is a short pulse; it never masks the user speaking or TARS speaking.
   if (i.alertUntil > i.now && i.backend !== 'USER_SPEAKING' && i.backend !== 'ASSISTANT_SPEAKING') return 'ALERT';

@@ -78,7 +78,8 @@ async def diagnostics(request: Request):
     metrics = getattr(request.app.state, "realtime_metrics", None)
     snapshot = metrics.snapshot() if metrics else {"latest_ms": {}, "p50_ms": {}, "sample_counts": {}}
     session = getattr(request.app.state, "realtime_session", None)
-    return {**snapshot, "session": session.session_id if session else None,
+    extra = session.diag() if session is not None and hasattr(session, "diag") else {}
+    return {**snapshot, **extra, "session": session.session_id if session else None,
             "state": session.state.value if session else "IDLE",
             "events": list(session.history) if session else [],
             "providers": session.provider_status if session else {"microphone": "DISCONNECTED"}}

@@ -130,6 +130,7 @@ export class OrbStore {
         break;
       case 'provider_status':
         if (ev.voice_provider) this.inputs.provider = ev.voice_provider;
+        if (ev.providers?.microphone) this.inputs.mic = ev.providers.microphone;
         if (ev.providers?.gemini_live) this.inputs.gemini = ev.providers.gemini_live;
         if (ev.detail && /Using LOCAL_STREAMING/i.test(ev.detail)) {
           this.setBubble({ text: 'Using local voice', kind: 'error', at: now });
@@ -205,7 +206,11 @@ export class OrbStore {
   }
 
   attend() {
-    this.inputs.attentionUntil = this.clock() + ATTENTION_MS;
+    const now = this.clock();
+    if (this.inputs.mic === 'SILENT' || this.inputs.mic === 'DISCONNECTED') {
+      this.setBubble({ text: this.inputs.mic === 'SILENT' ? 'Microphone is silent. Check Settings.' : 'No microphone signal. Check Settings.', kind: 'error', at: now });
+    }
+    this.inputs.attentionUntil = now + ATTENTION_MS;
     this.commit();
   }
 

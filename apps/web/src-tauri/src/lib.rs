@@ -57,6 +57,11 @@ fn orb_clamp_position(app: &tauri::AppHandle, window: &tauri::WebviewWindow, x: 
 
 fn enter_orb(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("Main window not found")?;
+    if !ORB_MODE.load(Ordering::SeqCst) {
+        // Changing layout on a window that is already on screen left it not-topmost with the wrong
+        // footprint at startup; applying the layout while hidden (as the hotkey path does) is reliable.
+        let _ = window.hide();
+    }
     ORB_MODE.store(true, Ordering::SeqCst);
     let _ = window.unminimize();
     let _ = window.set_resizable(false);
@@ -102,7 +107,7 @@ fn enter_workspace(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Hotkey / tray: workspace open -> focus it; otherwise show/pulse the orb. Never hides, never duplicates.
+/// Show the orb (or focus the workspace when that is what is open). Never duplicates a window.
 fn summon_smart(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("Main window not found")?;
     let visible = window.is_visible().unwrap_or(false);
@@ -111,6 +116,63 @@ fn summon_smart(app: &tauri::AppHandle) -> Result<(), String> {
         return window.set_focus().map_err(|e| e.to_string());
     }
     enter_orb(app)
+}
+
+/// Hide the orb completely. Background monitors and microphone capture keep running (they live in the
+/// backend and native capture thread, not in the window).
+fn hide_orb(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("Main window not found")?;
+    if ORB_MODE.load(Ordering::SeqCst) {
+        if let Ok(p) = window.outer_position() {
+            if let Ok(mut g) = ORB_LAST_POS.lock() {
+                *g = Some((p.x, p.y));
+            }
+        }
+    }
+    window.hide().map_err(|e| e.to_string())
+}
+
+/// Ctrl+Shift+Space: workspace open -> focus it; orb visible -> hide it; hidden -> show it.
+fn toggle_orb(app: &tauri::AppHandle) -> Result<bool, String> {
+    let window = app.get_webview_window("main").ok_or("Main window not found")?;
+    let visible = window.is_visible().unwrap_or(false);
+    if visible && !ORB_MODE.load(Ordering::SeqCst) {
+        let _ = window.unminimize();
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
+    if visible {
+        hide_orb(app)?;
+        Ok(false)
+    } else {
+        enter_orb(app)?;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+fn orb_hide(app: tauri::AppHandle) -> Result<(), String> {
+    hide_orb(&app)
+}
+
+#[tauri::command]
+fn orb_toggle(app: tauri::AppHandle) -> Result<bool, String> {
+    toggle_orb(&app)
+}
+
+#[tauri::command]
+fn mic_info() -> Option<wake_engine::MicInfo> {
+    wake_engine::info()
+}
+
+#[tauri::command]
+fn list_input_devices() -> Vec<wake_engine::InputDevice> {
+    wake_engine::list_devices()
+}
+
+#[tauri::command]
+fn set_preferred_mic(name: String) {
+    wake_engine::set_preferred(name);
 }
 
 #[tauri::command]
@@ -568,9 +630,7 @@ fn hide_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 fn toggle_hud_impl(app: &tauri::AppHandle, _mode: Option<&str>) -> Result<bool, String> {
-    // The orb is a persistent presence: the hotkey/tray summon it, they never hide it.
-    summon_smart(app)?;
-    Ok(true)
+    toggle_orb(app)
 }
 
 #[tauri::command]
@@ -1422,6 +1482,11 @@ pub fn run() {
             get_monitors_geometry,
             get_hotkey_status,
             orb_start_drag,
+            mic_info,
+            list_input_devices,
+            set_preferred_mic,
+            orb_hide,
+            orb_toggle,
             orb_get_position,
             orb_set_saved_position,
             orb_set_hit_regions,
@@ -1457,35 +1522,13 @@ pub fn run() {
         })
         .setup(move |app| {
             // Setup System Tray Menu
-            let summon_i = MenuItem::with_id(
-                app,
-                "summon_hud",
-                "Summon TARS HUD (Ctrl+Shift+Space)",
-                true,
-                None::<&str>,
-            )?;
-            let show_main_i = MenuItem::with_id(
-                app,
-                "show_main",
-                "Open Main Dashboard",
-                true,
-                None::<&str>,
-            )?;
+            let show_i = MenuItem::with_id(app, "show_tars", "Show TARS", true, None::<&str>)?;
+            let hide_i = MenuItem::with_id(app, "hide_tars", "Hide TARS", true, None::<&str>)?;
+            let workspace_i = MenuItem::with_id(app, "open_workspace", "Open Workspace", true, None::<&str>)?;
+            let mic_i = MenuItem::with_id(app, "mic_test", "Microphone Test", true, None::<&str>)?;
             let sep1 = PredefinedMenuItem::separator(app)?;
-            let ptt_i = MenuItem::with_id(
-                app,
-                "trigger_ptt",
-                "Trigger Voice PTT (Ctrl+Shift+V)",
-                true,
-                None::<&str>,
-            )?;
-            let sep2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit TARS", true, None::<&str>)?;
-
-            let tray_menu = Menu::with_items(
-                app,
-                &[&summon_i, &show_main_i, &sep1, &ptt_i, &sep2, &quit_i],
-            )?;
+            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &workspace_i, &mic_i, &sep1, &quit_i])?;
 
             let icon = app.default_window_icon().cloned().unwrap();
             let _tray = TrayIconBuilder::new()
@@ -1494,14 +1537,18 @@ pub fn run() {
                 .icon(icon)
                 .tooltip("TARS Windows Assistant (Running in Background)")
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "summon_hud" => {
-                        let _ = summon_hud_impl(app, Some("voice"));
+                    "show_tars" => {
+                        let _ = summon_smart(app);
                     }
-                    "show_main" => {
+                    "hide_tars" => {
+                        let _ = hide_orb(app);
+                    }
+                    "open_workspace" => {
                         let _ = show_main_impl(app);
                     }
-                    "trigger_ptt" => {
-                        let _ = app.emit("tars://ptt-toggle", ());
+                    "mic_test" => {
+                        let _ = show_main_impl(app);
+                        let _ = app.emit("tars://open-mic-test", ());
                     }
                     "quit" => {
                         app.exit(0);
@@ -1516,7 +1563,7 @@ pub fn run() {
                     } = event
                     {
                         let app = tray.app_handle();
-                        let _ = toggle_hud_impl(app, Some("voice"));
+                        let _ = summon_smart(app);
                     }
                 })
                 .build(app)?;

@@ -73,6 +73,24 @@ def chord():
         user32.keybd_event(k, 0, 2, 0)
 
 
+def windows_of_tars():
+    pids = tars_pids()
+    found = []
+    cb = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+    def each(hw, _):
+        pid = wt.DWORD()
+        user32.GetWindowThreadProcessId(hw, ctypes.byref(pid))
+        buf = ctypes.create_unicode_buffer(64)
+        user32.GetWindowTextW(hw, buf, 64)
+        if pid.value in pids and buf.value.startswith('TARS') and user32.IsWindowVisible(hw) and user32.GetWindow(hw, 4) == 0:
+            found.append(hw)
+        return True
+
+    user32.EnumWindows(cb(each), 0)
+    return found
+
+
 def visible(h):
     return bool(user32.IsWindowVisible(h))
 
@@ -121,15 +139,56 @@ async def main():
     results.append(ok("transparent area is click-through (does not intercept apps behind)", corner_root != h, f"corner root={corner_root} tars={h}"))
     results.append(ok("orb itself accepts pointer input", orb_root == h))
 
-    # --- hotkey never hides; close returns/hides then hotkey summons
-    chord(); time.sleep(0.8)
-    results.append(ok("hotkey with orb visible keeps it visible (no toggle-hide, no duplicate)", visible(h)))
-    user32.PostMessageW(h, WM_CLOSE, 0, 0); time.sleep(1.2)
-    results.append(ok("closing the orb window leaves TARS running", tars_window() is not None or True))
-    hid = not visible(h)
-    chord(); time.sleep(1.0)
-    results.append(ok("hotkey summons the orb again", visible(h), f"was hidden={hid}"))
-    time.sleep(0.5)
+    # --- hotkey toggles orb visibility completely; close/hide never quits TARS
+    chord(); time.sleep(0.9)
+    hidden = not visible(h)
+    results.append(ok("Ctrl+Shift+Space hides the orb completely", hidden))
+    results.append(ok("TARS keeps running while the orb is hidden", bool(tars_pids())))
+    chord(); time.sleep(0.9)
+    results.append(ok("Ctrl+Shift+Space shows the orb again (single window)", visible(h) and len(windows_of_tars()) == 1))
+    user32.PostMessageW(h, WM_CLOSE, 0, 0); time.sleep(1.0)
+    results.append(ok("closing the orb window leaves TARS running", bool(tars_pids())))
+    chord(); time.sleep(0.9)
+    results.append(ok("hotkey summons the orb after close", visible(h)))
+    time.sleep(0.4)
+    before = rect(h)
+
+    # --- real mouse: single click = wake, drag = move only, double click = workspace
+    ws0, ev0 = await page()
+    cx, cy = before[0] + before[2] // 2, before[1] + int(before[3] * 0.36)
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP = 2, 4
+    user32.SetCursorPos(cx, cy); time.sleep(0.3)
+    d0 = json.load(urllib.request.urlopen("http://127.0.0.1:8000/api/v1/voice/realtime/diagnostics"))
+    seq0 = max([e.get("seq", 0) for e in d0.get("events", [])] or [0])
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); time.sleep(0.05); user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    time.sleep(1.2)
+    attn = await ev0("document.querySelector('[data-testid=orb-companion]').dataset.orbState")
+    results.append(ok("single click activates voice interaction (orb leaves idle / mic truth shown)", attn in ("LISTENING", "MIC_ERROR", "USER_SPEAKING", "THINKING", "ASSISTANT_SPEAKING"), f"orb={attn}"))
+    pos_a = rect(h)
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); time.sleep(0.15)
+    for step in range(1, 9):
+        user32.SetCursorPos(cx - step * 12, cy - step * 6); time.sleep(0.04)
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0); time.sleep(1.0)
+    pos_b = rect(h)
+    moved = abs(pos_b[0] - pos_a[0]) + abs(pos_b[1] - pos_a[1])
+    saved = await ev0("localStorage.getItem('tars.orb.position')")
+    results.append(ok("dragging moves the orb", moved > 40 and pos_b[2] == pos_a[2], f"moved {moved}px"))
+    results.append(ok("position is remembered after drag", bool(saved), str(saved)))
+    time.sleep(1.0)
+    still = rect(h)
+    results.append(ok("drag does not open the workspace or trigger a click action", still[2] < 420, f"size {still[2]}x{still[3]}"))
+    cx2, cy2 = still[0] + still[2] // 2, still[1] + int(still[3] * 0.36)
+    user32.SetCursorPos(cx2, cy2); time.sleep(0.3)
+    for _ in range(2):
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0); time.sleep(0.03); user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0); time.sleep(0.09)
+    time.sleep(1.4)
+    dbl = rect(h)
+    results.append(ok("double click opens the full workspace", dbl[2] > 800 and dbl[3] > 600, f"{dbl[2]}x{dbl[3]}"))
+    await ws0.close()
+    ws1, ev1 = await page()
+    await ev1("window.__TAURI_INTERNALS__.invoke('summon_hud',{mode:'voice'})")
+    time.sleep(1.2)
+    await ws1.close()
     before = rect(h)
 
     # --- expand / collapse through the real native summon commands

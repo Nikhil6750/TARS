@@ -1,5 +1,6 @@
 import { PcmStreamPlayer } from '../services/pcm-player';
 import { audioLevels } from '../orb/audioLevels';
+import { micStore, MicInfo } from '../orb/micStore';
 import { audioService } from '../services/audio';
 import { loadSettings } from '../services/storage';
 import { isTauri } from '../services/tauri';
@@ -57,6 +58,7 @@ export class RealtimeVoiceClient {
         payload.forEach((value, i) => view.setInt16(i * 2, value, true));
         ws.send(bytes);
       }),
+      listen<MicInfo>('tars://microphone-info', ({ payload }) => micStore.set(payload)),
       listen<number>('tars://wake-audio-level', ({ payload }) => { audioLevels.pushMic(this.muted ? 0 : payload); onLevel(payload); }),
       listen<string>('tars://microphone-status', ({ payload }) => {
         listener({ type: 'provider_status', providers: { microphone: payload } });
