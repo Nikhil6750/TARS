@@ -90,9 +90,19 @@ Facts and tools
   open" -> desktop_context. Never claim you looked at something you did not.
 
 Desktop control (all through TARS's guarded action layer)
-- You can open/switch apps (desktop_open_app, desktop_focus_window), inspect and list controls, scroll, open URLs,
-  search the web, list/open files and run bounded terminal commands. Tell the user in a few words what you did and
-  report the tool's real result: DONE, NOT_FOUND, NEEDS_CONFIRMATION, BLOCKED or FAILED. Never pretend it worked.
+- TARS resolves applications itself from what is actually installed on this machine -- you never know or
+  guess an executable name or file path. For desktop_open_app/desktop_focus_window, always pass the app's
+  plain spoken name exactly as the user said it (e.g. "clock", "calculator", "tradingview", "mt5"), never an
+  invented .exe name. If you are unsure whether something is installed, call desktop_resolve_app or
+  desktop_list_installed_apps first.
+- "Open X" (an application) -> desktop_open_app. "Open x.com" or "open the X website" -> browser_open_url.
+  "Search for X" / "search the web for X" -> browser_search. Never call browser_open_url or browser_search as a
+  substitute for desktop_open_app -- if it returns NOT_INSTALLED (not found) or is ambiguous (matches more than
+  one installed app), tell the user exactly that and ask what they want, or ask which one they meant. Do not
+  silently fall back to the browser, and do not open a browser unless the user asked for a website or a search.
+- You can open/switch apps, inspect and list controls, scroll, open URLs, search the web, list/open files and run
+  bounded terminal commands. Tell the user in a few words what you did and report the tool's real result: DONE,
+  NOT_FOUND, NEEDS_CONFIRMATION, BLOCKED or FAILED. Never pretend it worked.
 - If a click, typing or other state-changing action returns NEEDS_CONFIRMATION, ask the user plainly ("Click Save in
   Notepad, yes?"). Only after they clearly say yes call confirm_pending_action; if they say no call
   cancel_pending_action. Never confirm on your own.
@@ -126,10 +136,16 @@ def _tool_declarations():
              parameters=obj(question=("STRING", "The full question to analyse"),
                             context=("STRING", "Optional extra context from the conversation"))),
         decl(name="desktop_context", description="What is on the desktop right now: active application/window and the recent desktop actions TARS took. Use for 'what am I looking at', 'which app is open'."),
-        decl(name="desktop_open_app", description="Launch a Windows application by executable name (e.g. notepad, chrome, terminal64 for MetaTrader).",
-             parameters=obj(target=("STRING", "Executable name or full .exe path"))),
-        decl(name="desktop_focus_window", description="Bring an already running application/window to the front (switch to it).",
-             parameters=obj(target=("STRING", "Application or window title, e.g. tradingview, chrome, metatrader"))),
+        decl(name="desktop_resolve_app", description="Look up whether an application name resolves to a specific installed Windows application, without opening it. Use this if you are unsure an app is installed, or to check before telling the user something is or isn't available.",
+             parameters=obj(target=("STRING", "The app's plain spoken name, e.g. clock, calculator, tradingview, mt5"))),
+        decl(name="desktop_list_installed_apps", description="List installed Windows applications TARS can open, optionally filtered by a search term. Use this to answer 'what apps do you see' or to find the right name before opening.",
+             parameters=obj(query=("STRING", "Optional filter, e.g. 'chrome' or leave empty to list common ones"))),
+        decl(name="desktop_open_app", description="Open/launch a Windows application by its plain spoken name (e.g. clock, calculator, tradingview, mt5, vs code). TARS resolves the real installed application itself -- NEVER pass a guessed .exe filename or path, and NEVER call browser_open_url or browser_search as a substitute if this returns NOT_INSTALLED or is ambiguous; tell the user what happened and ask instead.",
+             parameters=obj(target=("STRING", "The app's plain spoken name, exactly as the user said it"))),
+        decl(name="desktop_focus_window", description="Bring an already running application/window to the front (switch to it). Use the plain spoken app name here too.",
+             parameters=obj(target=("STRING", "Application name, e.g. tradingview, chrome, metatrader"))),
+        decl(name="desktop_close_app", description="Close a running application's window by its plain spoken name.",
+             parameters=obj(target=("STRING", "Application name, e.g. calculator, notepad"))),
         decl(name="desktop_list_controls", description="List clickable/typeable UI controls of the active or a named window (Windows UI Automation). Use before clicking.",
              parameters=obj(target=("STRING", "Optional window to inspect"))),
         decl(name="desktop_click_control", description="Click a control found via desktop_list_controls. Needs the user's confirmation. Never usable for MT5 order controls.",

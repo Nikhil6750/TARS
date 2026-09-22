@@ -44,6 +44,22 @@ async def test_open_app_goes_through_action_runtime_and_reports_done():
     assert t.recent[-1]["result"] == "DONE"
 
 
+async def test_resolve_app_and_list_installed_apps_go_through_action_runtime_read_only():
+    t, rt, _ = tools({
+        ("windows_app", "resolve"): (ActionStatus.SUCCEEDED, {"outcome": "MATCH", "app": {"display_name": "Clock"}}, None),
+        ("windows_app", "list_installed"): (ActionStatus.SUCCEEDED, {"apps": ["Calculator", "Clock"]}, None),
+    })
+    resolved = await t.desktop_resolve_app("clock")
+    assert resolved["status"] == "DONE"
+    assert rt.requests[0].arguments == {"target": "clock"}
+    assert rt.requests[0].action == "resolve"
+
+    listed = await t.desktop_list_installed_apps("cal")
+    assert listed["status"] == "DONE"
+    assert rt.requests[1].arguments == {"query": "cal"}
+    assert rt.requests[1].action == "list_installed"
+
+
 async def test_outcomes_are_truthful_not_found_blocked_failed():
     t, _, _ = tools({("windows_app", "focus"): (ActionStatus.FAILED, {}, "No running window found for x"),
                      ("terminal", "run_command"): (ActionStatus.BLOCKED, {}, "blocked"),
@@ -115,6 +131,29 @@ async def test_tars_tools_route_desktop_names_and_drop_unknown_args():
     out = await tt.call("desktop_open_app", {"target": "notepad", "evil": "x"})
     assert out["status"] == "DONE" and state.action_runtime.requests[0].arguments == {"target": "notepad"}
     assert "error" in await tt.call("place_order", {})
+
+
+async def test_tars_tools_route_resolve_and_list_installed_apps():
+    state = SimpleNamespace(action_runtime=Runtime())
+    tt = TarsTools(state, "s")
+    out = await tt.call("desktop_resolve_app", {"target": "tradingview"})
+    assert out["status"] == "DONE"
+    assert state.action_runtime.requests[0].skill == "windows_app"
+    assert state.action_runtime.requests[0].action == "resolve"
+    out2 = await tt.call("desktop_list_installed_apps", {"query": "code"})
+    assert out2["status"] == "DONE"
+    assert state.action_runtime.requests[1].action == "list_installed"
+
+
+def test_no_desktop_tool_declaration_invents_an_executable_name_or_path():
+    """Item 1/6: Gemini must never be told to pass an executable name or path -- only a plain
+    spoken app name, which TARS itself resolves."""
+    from voice.gemini_live import _tool_declarations
+
+    decls = {f.name: f for t in _tool_declarations() for f in t.function_declarations}
+    desc = decls["desktop_open_app"].description.lower()
+    assert "spoken name" in desc
+    assert "never pass a guessed" in desc
 
 
 def test_ticker_resolution_is_contextual_and_conservative():

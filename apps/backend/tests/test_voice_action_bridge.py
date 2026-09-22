@@ -43,9 +43,21 @@ def bridge(client):
 
 
 async def test_voice_open_notepad_reaches_action_runtime_and_launches_real_process(bridge):
+    """A fresh launch and an already-running app being focused instead of duplicated are both
+    correct outcomes (WindowsAppResolver's ALREADY_RUNNING handling) -- which one happens depends
+    on whether Notepad already had a window open on this machine, not on TARS's correctness."""
+    from skills.windows_app import _enum_visible_windows
+    import win32gui
+
     spoken = await bridge._handle_transcript("open notepad")
     assert "notepad" in spoken.lower()
-    assert "launched" in spoken.lower() or "pid" in spoken.lower()
+    text = spoken.lower()
+    assert "opened" in text or "already open" in text
+
+    # Never leave a spawned Notepad window behind for the next test run to trip over.
+    for w in _enum_visible_windows():
+        if (w["executable"] or "").lower() == "notepad.exe":
+            win32gui.PostMessage(w["hwnd"], 0x0010, 0, 0)  # WM_CLOSE
 
 
 async def test_voice_safe_browser_request_reaches_action_runtime(bridge):

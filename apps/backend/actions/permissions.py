@@ -17,7 +17,10 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
     "windows_app": {
         "launch": RiskLevel.LOW_RISK,
         "focus": RiskLevel.LOW_RISK,
+        "close": RiskLevel.LOW_RISK,
         "list_running": RiskLevel.READ_ONLY,
+        "resolve": RiskLevel.READ_ONLY,
+        "list_installed": RiskLevel.READ_ONLY,
         "capture_active_window": RiskLevel.READ_ONLY,
         "get_monitors": RiskLevel.READ_ONLY,
         "get_ui_elements": RiskLevel.READ_ONLY,

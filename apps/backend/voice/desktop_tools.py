@@ -23,10 +23,10 @@ from uuid import UUID
 from app.action_contracts import ActionRequest, ActionSource, ActionStatus, RiskLevel
 
 DESKTOP_TOOL_NAMES = {
-    "desktop_context", "desktop_open_app", "desktop_focus_window", "desktop_list_controls",
-    "desktop_click_control", "desktop_type_text", "desktop_scroll", "browser_open_url", "browser_search",
-    "files_list", "files_read_open", "run_terminal", "analyze_chart", "confirm_pending_action",
-    "cancel_pending_action",
+    "desktop_context", "desktop_resolve_app", "desktop_list_installed_apps", "desktop_open_app",
+    "desktop_focus_window", "desktop_close_app", "desktop_list_controls", "desktop_click_control",
+    "desktop_type_text", "desktop_scroll", "browser_open_url", "browser_search", "files_list",
+    "files_read_open", "run_terminal", "analyze_chart", "confirm_pending_action", "cancel_pending_action",
 }
 
 _TRADE_WORDS = re.compile(
@@ -122,12 +122,23 @@ class DesktopTools:
         ctx = await self.desktop_context()
         return bool(_MT5_WINDOW.search(json.dumps(ctx.get("active_window", {}), default=str)))
 
+    # ---- read-only: app resolution --------------------------------------------
+    async def desktop_resolve_app(self, target: str = "") -> dict:
+        return await self._submit("windows_app", "resolve", {"target": target}, describe=f"resolve {target}")
+
+    async def desktop_list_installed_apps(self, query: str = "") -> dict:
+        return await self._submit("windows_app", "list_installed", {"query": query},
+                                  describe="list installed applications")
+
     # ---- low-risk actions -----------------------------------------------------
     async def desktop_open_app(self, target: str = "") -> dict:
         return await self._submit("windows_app", "launch", {"target": target}, describe=f"open {target}")
 
     async def desktop_focus_window(self, target: str = "") -> dict:
         return await self._submit("windows_app", "focus", {"target": target}, describe=f"switch to {target}")
+
+    async def desktop_close_app(self, target: str = "") -> dict:
+        return await self._submit("windows_app", "close", {"target": target}, describe=f"close {target}")
 
     async def desktop_list_controls(self, target: str = "") -> dict:
         args = {"max_controls": 60, "max_depth": 5}
