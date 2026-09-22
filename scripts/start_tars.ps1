@@ -382,6 +382,43 @@ if (Test-Path $exe) {
         Write-Error "Native process started but the TARS Ready webview marker did not appear."
         exit 1
     }
+
+    # A live window marker is not proof the process keeps running: a panic on the main thread
+    # (e.g. during tray/menu setup) can still bring the whole app down a moment later. Re-check
+    # after a short delay so READY is never reported over a process that has since exited.
+    Start-Sleep -Seconds 2
+    $stillAlive = $false
+    try {
+        $recheck = Get-Process -Id $nativeProc.Id -ErrorAction Stop
+        $stillAlive = -not $recheck.HasExited
+    } catch {
+        $stillAlive = $false
+    }
+    if (-not $stillAlive) {
+        Write-Error "Native process (PID $($nativeProc.Id)) exited shortly after startup. Not reporting READY."
+        exit 1
+    }
+    Write-Ok "  Native process still alive 2s after the webview marker appeared (PID $($nativeProc.Id))."
+
+    # Best-effort tray icon check: Windows records every app that has ever called
+    # Shell_NotifyIcon under this registry key, keyed by the executable path. Presence here means
+    # the tray icon was actually registered with the shell (not just that build(app) returned Ok);
+    # it cannot prove the icon is currently pinned/visible vs. tucked in the overflow area, so a
+    # miss is a warning, not a hard failure -- some Windows builds/policies do not populate it.
+    $trayRegistered = $false
+    try {
+        $trayRegistered = Get-ChildItem 'HKCU:\Control Panel\NotifyIconSettings' -ErrorAction SilentlyContinue |
+            Where-Object {
+                (Get-ItemProperty -Path $_.PSPath -Name ExecutablePath -ErrorAction SilentlyContinue).ExecutablePath -eq $exe
+            } | Select-Object -First 1
+    } catch {
+        $trayRegistered = $false
+    }
+    if ($trayRegistered) {
+        Write-Ok "  Tray icon registered with the shell for $exe."
+    } else {
+        Write-Warn "  Could not confirm a tray icon registration for $exe (not conclusive -- check the notification area, including the hidden-icons overflow)."
+    }
 } else {
     Write-Error "Native release binary was not found at $exe"
     exit 1

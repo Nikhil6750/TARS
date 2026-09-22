@@ -1496,6 +1496,12 @@ pub fn run() {
     let ptt_setup = ptt_shortcut.clone();
 
     tauri::Builder::default()
+        // Must be the first plugin registered (per tauri-plugin-single-instance docs): a second
+        // launch hands its args/cwd to this callback on the ALREADY-RUNNING instance and then exits
+        // immediately on its own, instead of spawning a second process/window/tray icon.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = summon_smart(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1576,46 +1582,63 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit TARS", true, None::<&str>)?;
             let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &workspace_i, &mute_i, &mic_i, &sep1, &quit_i])?;
 
-            let icon = app.default_window_icon().cloned().unwrap();
-            let _tray = TrayIconBuilder::new()
-                .menu(&tray_menu)
-                .show_menu_on_left_click(false)
-                .icon(icon)
-                .tooltip("TARS Windows Assistant (Running in Background)")
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show_tars" => {
-                        let _ = summon_smart(app);
+            // A stable, explicit id is required: TrayIconBuilder::new() (no id) defaults to
+            // "{process_id}-{counter}", a different identity every single launch. Windows treats
+            // an unrecognized identity as a brand-new icon and defaults it to the hidden/overflow
+            // area -- so with a PID-derived id the tray icon silently "never" appears, every run,
+            // even though it is technically registered. A fixed id lets Windows (and the user's
+            // "always show" preference for it) recognize the same icon across restarts.
+            //
+            // Tray creation must never be allowed to take the whole app down with it (it used to,
+            // via `.build(app)?` / `default_window_icon().unwrap()`): log visibly and keep running
+            // with no tray rather than crash the whole process over an icon.
+            match app.default_window_icon().cloned() {
+                None => eprintln!("[TARS][tray] no default window icon available; tray icon skipped, app continues"),
+                Some(icon) => {
+                    let built = TrayIconBuilder::with_id("tars-tray")
+                        .menu(&tray_menu)
+                        .show_menu_on_left_click(false)
+                        .icon(icon)
+                        .tooltip("TARS Windows Assistant (Running in Background)")
+                        .on_menu_event(|app, event| match event.id.as_ref() {
+                            "show_tars" => {
+                                let _ = summon_smart(app);
+                            }
+                            "hide_tars" => {
+                                let _ = hide_orb(app);
+                            }
+                            "open_workspace" => {
+                                let _ = show_main_impl(app);
+                            }
+                            "mic_test" => {
+                                let _ = show_main_impl(app);
+                                let _ = app.emit("tars://open-mic-test", ());
+                            }
+                            "toggle_mute" => {
+                                apply_mic_muted(app, !wake_engine::is_muted());
+                            }
+                            "quit" => {
+                                app.exit(0);
+                            }
+                            _ => {}
+                        })
+                        .on_tray_icon_event(|tray, event| {
+                            if let TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } = event
+                            {
+                                let app = tray.app_handle();
+                                let _ = summon_smart(app);
+                            }
+                        })
+                        .build(app);
+                    if let Err(e) = built {
+                        eprintln!("[TARS][tray] tray icon creation failed: {e}; app continues without a tray icon");
                     }
-                    "hide_tars" => {
-                        let _ = hide_orb(app);
-                    }
-                    "open_workspace" => {
-                        let _ = show_main_impl(app);
-                    }
-                    "mic_test" => {
-                        let _ = show_main_impl(app);
-                        let _ = app.emit("tars://open-mic-test", ());
-                    }
-                    "toggle_mute" => {
-                        apply_mic_muted(app, !wake_engine::is_muted());
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        let _ = summon_smart(app);
-                    }
-                })
-                .build(app)?;
+                }
+            }
 
             // Register global shortcuts
             #[cfg(desktop)]
