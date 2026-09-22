@@ -128,3 +128,34 @@ def test_router_mute_message_is_applied_to_the_session(monkeypatch):
         diag = client.get("/api/v1/voice/realtime/diagnostics").json()
         assert diag["microphone_muted"] is True and diag["mic"]["frames"] == 0
         assert opened["n"] == 0
+
+
+def test_router_survives_a_long_mute_without_tearing_down_the_session(monkeypatch):
+    """Regression: the realtime loop used a 5s receive timeout to detect a dead microphone, assuming
+    audio bytes always flow. Muting stops those bytes by design, so a mute held past 5s used to read as
+    a disconnect and tear down the whole voice session/websocket -- exactly the symptom of "the mic no
+    longer works" after muting for more than a few seconds."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.routers import realtime
+
+    monkeypatch.setattr(realtime, "SileroStreamingVAD", lambda: lambda pcm: pcm[0] != 0)
+    monkeypatch.setattr(realtime, "get_settings", lambda: SimpleNamespace(
+        voice_provider="gemini_live", gemini_api_key="k", gemini_live_model="m", gemini_live_idle_seconds=30.0,
+        sherpa_model_dir=""))
+    app = FastAPI()
+    app.state.voice_providers = SimpleNamespace(stt=SimpleNamespace(name="x"), tts=SimpleNamespace(name="y"), ready=asyncio.Event())
+    app.state.turn_controller = SimpleNamespace()
+    app.state.gemini_connect_override = FakeConnect()
+    app.include_router(realtime.router)
+    with TestClient(app) as client, client.websocket_connect("/api/v1/voice/realtime") as ws:
+        ws.send_text('{"type":"mute","muted":true}')
+        import time as _time
+        _time.sleep(5.5)  # longer than the receive timeout; a muted mic sends nothing at all
+        # The session must still be the same live session, not torn down and reconnected.
+        diag = client.get("/api/v1/voice/realtime/diagnostics").json()
+        assert diag["session"] is not None and diag["microphone_muted"] is True
+        ws.send_text('{"type":"mute","muted":false}')
+        diag = client.get("/api/v1/voice/realtime/diagnostics").json()
+        assert diag["microphone_muted"] is False  # unmute reached the SAME session, no reconnect needed

@@ -153,8 +153,14 @@ async def realtime(websocket: WebSocket):
                                    voice_provider="LOCAL_STREAMING",
                                    detail=f"Using LOCAL_STREAMING voice: {fallback_reason}")
         while True:
-            # Missing capture is an honest microphone disconnect, not CONNECTED forever.
-            message = await asyncio.wait_for(websocket.receive(), 5)
+            # Missing capture is an honest microphone disconnect, not CONNECTED forever -- but a muted
+            # microphone is expected to send nothing at all, so it must never be mistaken for one.
+            try:
+                message = await asyncio.wait_for(websocket.receive(), 5)
+            except TimeoutError:
+                if getattr(session, "microphone_muted", False):
+                    continue
+                raise
             if message["type"] == "websocket.disconnect":
                 break
             if sender.done():

@@ -671,8 +671,11 @@ class GeminiLiveVoiceSession:
                 await self.transition(VoiceState.LISTENING)
         else:
             self.provider_status["microphone"] = "STARTING"  # health() takes over once frames arrive
-            self.mic["last_frame_at"] = 0.0
-            self.mic["first_frame_at"] = 0.0
+            # Not 0.0: with frames already > 0 from before the mute, a zero timestamp reads as
+            # "last frame 40+ years ago" and mic_health() would report DISCONNECTED until the next
+            # frame overwrites it -- a false alarm for what is otherwise an instant, clean resume.
+            self.mic["last_frame_at"] = time.monotonic()
+            self.mic["first_frame_at"] = time.monotonic()
         await self._status(detail="Microphone muted" if muted else "Microphone active", microphone_muted=muted)
 
     async def wake(self):
