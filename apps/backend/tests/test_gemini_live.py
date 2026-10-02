@@ -247,3 +247,37 @@ async def test_tars_tools_report_missing_sources_truthfully_and_ask_claude_deleg
     assert ctx["quote"] is None and "MT5 DISCONNECTED" in ctx["quote_note"]
     assert (await tools.call("ask_claude", {"question": "EURUSD outlook?"}))["answer"] == "Claude says range-bound."
     assert "error" in await tools.call("place_trade", {})
+
+
+async def test_ask_claude_with_symbol_builds_one_market_context_evidence_package():
+    # Mission section 10/22: a named symbol builds the full MT5+TradingView+
+    # Calendar+News evidence package and still makes exactly one Claude call.
+    class Monitors:
+        news = None
+
+        async def status(self):
+            return {"mt5": {"state": "CONNECTED", "quotes": {"XAUUSD": {"bid": 2650.0, "ask": 2650.5, "spread": 5}},
+                            "positions": [], "floating_pnl": None},
+                    "calendar": {"next": {"currency": "USD", "event": "CPI", "at": "2026-01-01T13:30:00+00:00",
+                                          "importance": "High"}}}
+
+    class Adapter:
+        async def monitor_chart(self):
+            return {"monitoring": True, "symbol": "XAUUSD", "timeframe": "15m", "freshness": "hot"}
+
+    captured = {}
+
+    class Turns:
+        async def stream_text(self, text, **kw):
+            captured["text"] = text
+            yield SimpleNamespace(type="complete", response=SimpleNamespace(
+                display_text="Gold is holding near highs.", status=SimpleNamespace(value="completed")))
+
+    tools = TarsTools(SimpleNamespace(monitors=Monitors(), tradingview_adapter=Adapter(), turn_controller=Turns()), "s1")
+    out = await tools.call("ask_claude", {"question": "analyze gold", "symbol": "XAUUSD"})
+    assert out["answer"] == "Gold is holding near highs."
+    # The real evidence landed in the single prompt sent to Claude -- not a separate call per source.
+    assert "2650.0" in captured["text"] and "2650.5" in captured["text"]
+    assert "CPI" in captured["text"]
+    assert "Research standard" in captured["text"]
+    assert "OBSERVATION" in captured["text"] and "HYPOTHESIS" in captured["text"]

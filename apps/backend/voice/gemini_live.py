@@ -73,6 +73,12 @@ Style
   "strategy" or anything long, say a brief lead-in ("Let me dig into that") and call ask_claude, then explain the
   result in plain natural speech. Never read markdown, bullets, asterisks or lists aloud: turn long analysis into
   two to four flowing sentences with the key takeaway first.
+- Simple, structured questions never need Claude: "what's EURUSD bid/ask", "do I have a position", "what's my
+  floating P&L", "what's my equity", "when is CPI", "any major events today", "latest gold news" -- answer those
+  directly from get_mt5_state/get_market_context/get_economic_calendar/get_news. Call ask_claude only when the
+  question genuinely needs synthesis across sources (an "analyze"/"outlook"/"what do you think" question), and
+  when it names or clearly implies one instrument, pass that as ask_claude's `symbol` so it gets the real
+  MT5+TradingView+Calendar+News evidence in that one call instead of you gathering it turn by turn.
 
 Trading vocabulary (spoken -> symbol; use for understanding only, never for placing trades)
 EURUSD "euro dollar", "euro U.S. dollar"; GBPUSD "pound dollar", "sterling dollar", "cable"; USDJPY "dollar yen";
@@ -158,9 +164,10 @@ def _tool_declarations():
              parameters=obj(hours_ahead=("INTEGER", "Look-ahead window in hours, default 24"))),
         decl(name="get_news", description="Recent financial news headlines from TARS's live news monitor, optionally filtered to one symbol. Use for 'check the latest news about X' -- prefer this over browser_search for financial headlines.",
              parameters=obj(symbol=("STRING", "Optional symbol/asset to filter by, e.g. XAUUSD or gold"))),
-        decl(name="ask_claude", description="Delegate deep trading/chart analysis, strategy research or complex synthesis to Claude. Takes a few seconds.",
+        decl(name="ask_claude", description="Delegate deep trading/chart analysis, strategy research or complex synthesis to Claude. Pass `symbol` for trading questions (e.g. 'analyze gold considering the chart, my position, upcoming events and news') -- this builds the full real MT5+TradingView+Calendar+News evidence package for Claude in the same single call, rather than a separate call per source. Takes a few seconds.",
              parameters=obj(question=("STRING", "The full question to analyse"),
-                            context=("STRING", "Optional extra context from the conversation"))),
+                            context=("STRING", "Optional extra context from the conversation"),
+                            symbol=("STRING", "Symbol to analyze, e.g. EURUSD or XAUUSD -- only for trading analysis questions"))),
         decl(name="desktop_context", description="What is on the desktop right now: active application/window and the recent desktop actions TARS took. Use for 'what am I looking at', 'which app is open'."),
         decl(name="desktop_resolve_app", description="Look up whether an application name resolves to a specific installed Windows application, without opening it. Use this if you are unsure an app is installed, or to check before telling the user something is or isn't available.",
              parameters=obj(target=("STRING", "The app's plain spoken name, e.g. clock, calculator, tradingview, mt5"))),
@@ -325,16 +332,37 @@ class TarsTools:
                 "items": [{"headline": r["headline"], "url": r["url"], "published_at": r["published_at"].isoformat(),
                           "source": r["source"]} for r in rows]}
 
-    async def ask_claude(self, question: str = "", context: str = "") -> dict:
+    async def ask_claude(self, question: str = "", context: str = "", symbol: str = "") -> dict:
         turns = getattr(self.state, "turn_controller", None)
         if turns is None or not question.strip():
             return {"error": "Claude backend unavailable or empty question"}
         live_context = ""
-        status = await self._status()
-        if status:
-            quote = status.get("quote")
-            live_context = (f"[TARS live context: quote={quote}; mt5={status['mt5']['state']}; "
-                            f"tradingview={status['tradingview']['state']}; next_event={status['calendar'].get('next')}] ")
+        monitors = getattr(self.state, "monitors", None)
+        tradingview_adapter = getattr(self.state, "tradingview_adapter", None)
+        if symbol.strip() and monitors is not None and tradingview_adapter is not None:
+            # A named symbol means this is trading analysis: build the one
+            # compact MT5+TradingView+Calendar+News evidence package
+            # (mission section 8/10) instead of the generic status line --
+            # still exactly one Claude call below, never one per source.
+            from trading.market_context import build_market_context
+
+            market = await build_market_context(monitors, tradingview_adapter, symbol)
+            live_context = (
+                "[TARS evidence package -- real, current state; do not restate numbers not listed here:\n"
+                f"{market.as_evidence_text()}]\n"
+                "Research standard: label every claim OBSERVATION (a fact listed above), HYPOTHESIS (a "
+                "reasoned guess), RISK, or MISSING INFORMATION (state plainly what you don't have). Never "
+                "assume a chart pattern or indicator (FVG, order block, liquidity sweep, RSI, SMC, ICT, "
+                "support/resistance) has automatic predictive edge -- if you cite one, call it a Hypothesis "
+                "or Preliminary Evidence, never a Validated Finding, unless the evidence above actually "
+                "validates it. Never invent a price, event or headline not in the evidence above.\n"
+            )
+        else:
+            status = await self._status()
+            if status:
+                quote = status.get("quote")
+                live_context = (f"[TARS live context: quote={quote}; mt5={status['mt5']['state']}; "
+                                f"tradingview={status['tradingview']['state']}; next_event={status['calendar'].get('next')}] ")
         text = (f"{live_context}{context.strip() + ' ' if context else ''}{question.strip()} "
                 '(Reply for a voice assistant to read aloud: at most 5 short sentences, no markdown, no lists.)')
         answer = ""

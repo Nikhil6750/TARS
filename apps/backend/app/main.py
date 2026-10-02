@@ -370,6 +370,16 @@ async def lifespan(app: FastAPI):
         symbols=[s.strip() for s in settings.event_relevant_symbols.split(",") if s.strip()] or None)
     app.state.monitors = monitors
 
+    from trading.tradingview_adapter import TradingViewAdapter
+
+    tradingview_skill = action_registry.get("tradingview")
+    trading_skill = action_registry.get("trading")
+    if tradingview_skill is not None and trading_skill is not None:
+        app.state.tradingview_adapter = TradingViewAdapter(
+            tradingview_skill, trading_skill, monitors.hot_chart_store)
+    else:
+        app.state.tradingview_adapter = None
+
     from events.correlation import CorrelationEngine
 
     correlation_engine = CorrelationEngine(realtime_events, monitors)

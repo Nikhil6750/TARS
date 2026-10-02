@@ -94,7 +94,9 @@ def test_mt5_states_are_truthful():
     c = Collector()
     missing = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: None)
     assert missing.poll_once()["state"] is MT5State.NOT_INSTALLED
-    down = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: FakeMT5(ok=False))
+    # No MT5 process at all (process_checker=False, explicit): truly unreachable.
+    down = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: FakeMT5(ok=False),
+                       process_checker=lambda: False)
     snap = down.poll_once()
     assert snap["state"] is MT5State.DISCONNECTED and "not reachable" in snap["detail"]
 
@@ -102,8 +104,21 @@ def test_mt5_states_are_truthful():
         def account_info(self):
             raise RuntimeError("x")
 
-    err = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: Boom())
+    err = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: Boom(),
+                      process_checker=lambda: False)
     assert err.poll_once()["state"] is MT5State.ERROR
+
+
+def test_mt5_terminal_running_but_unauthenticated_is_distinguished():
+    # Confirmed live on this machine: terminal64.exe running, mt5.initialize()
+    # failing with "Authorization failed" -- the fix is "log into MT5", not
+    # "install/start MT5", so this must not collapse into plain DISCONNECTED.
+    c = Collector()
+    auth_required = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: FakeMT5(ok=False),
+                                process_checker=lambda: True)
+    snap = auth_required.poll_once()
+    assert snap["state"] is MT5State.DISCONNECTED_AUTH_REQUIRED
+    assert "not authenticated" in snap["detail"]
 
 
 async def test_mt5_snapshot_masks_account_and_emits_only_meaningful_events():
@@ -133,6 +148,36 @@ async def test_mt5_position_open_close_events():
     fake._positions = []
     await provider._apply(provider.poll_once())
     assert [e.kind for e in c.events] == ["position.opened", "position.closed"]
+
+
+async def test_mt5_position_includes_side_current_price_sl_tp():
+    # Mission's explicit field list for an open position: ticket, symbol,
+    # side, volume, entry, current price, SL, TP, floating P&L.
+    c, fake = Collector(), FakeMT5()
+    fake._positions = [SimpleNamespace(ticket=7, symbol="EURUSD", type=0, volume=0.1, price_open=1.1000,
+                                       price_current=1.1050, sl=1.0950, tp=1.1100, profit=5.0)]
+    provider = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: fake)
+    snap = provider.poll_once()
+    pos = snap["positions"][0]
+    assert pos["ticket"] == 7 and pos["symbol"] == "EURUSD"
+    assert pos["side"] == "BUY"
+    assert pos["volume"] == 0.1
+    assert pos["entry"] == 1.1000
+    assert pos["current_price"] == 1.1050
+    assert pos["sl"] == 1.0950 and pos["tp"] == 1.1100
+    assert pos["profit"] == 5.0
+
+
+async def test_mt5_position_with_no_sl_tp_reports_none_not_zero():
+    # MT5 represents "no stop/target set" as 0.0 on the wire -- that must
+    # never be shown as a real price of zero.
+    c, fake = Collector(), FakeMT5()
+    fake._positions = [SimpleNamespace(ticket=8, symbol="EURUSD", type=1, volume=0.2, price_open=1.1,
+                                       price_current=1.095, sl=0.0, tp=0.0, profit=-1.0)]
+    provider = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: fake)
+    pos = provider.poll_once()["positions"][0]
+    assert pos["sl"] is None and pos["tp"] is None
+    assert pos["side"] == "SELL"
 
 
 async def test_mt5_loop_survives_a_crashing_module():

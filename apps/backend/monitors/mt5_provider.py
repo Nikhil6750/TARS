@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import time
 from collections import deque
 from collections.abc import Callable
@@ -22,12 +23,36 @@ from events.core import EventSource, NormalizedEvent
 
 logger = logging.getLogger("tars.monitors.mt5")
 
+_MT5_PROCESS_NAMES = ("terminal64.exe", "terminal.exe")
+
 
 class MT5State(str, Enum):
     CONNECTED = "CONNECTED"
     DISCONNECTED = "DISCONNECTED"
+    # The terminal process is running (confirmed via the OS process list, not
+    # guessed) but mt5.initialize() itself failed -- the most common real
+    # cause is that no account is logged in / the saved session needs
+    # re-authentication, not that MT5 is absent. Distinguished from plain
+    # DISCONNECTED because the fix is "log into MT5 yourself", not "install
+    # or start MT5" (confirmed live on this machine: terminal64.exe running,
+    # initialize() -> error -6 "Authorization failed").
+    DISCONNECTED_AUTH_REQUIRED = "DISCONNECTED_AUTH_REQUIRED"
     NOT_INSTALLED = "NOT INSTALLED"
     ERROR = "ERROR"
+
+
+def _mt5_terminal_process_running() -> bool:
+    """True if a real MT5 terminal process is in the OS process list. Never
+    raises -- a failed check just means "can't confirm", reported as plain
+    DISCONNECTED rather than guessing AUTH_REQUIRED."""
+    try:
+        proc = subprocess.run(  # noqa: S603, S607
+            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    names = proc.stdout.lower()
+    return any(name in names for name in _MT5_PROCESS_NAMES)
 
 
 def mask_account(login: int | str | None) -> str | None:
@@ -49,11 +74,13 @@ def load_mt5():
 class MT5Provider:
     def __init__(self, symbols: list[str], publish, on_state, *, module_loader: Callable = load_mt5,
                  poll_seconds: float = 1.0, move_pct: float = 0.15, move_window: float = 60.0,
-                 spread_factor: float = 3.0, clock: Callable[[], float] = time.monotonic):
+                 spread_factor: float = 3.0, clock: Callable[[], float] = time.monotonic,
+                 process_checker: Callable[[], bool] = _mt5_terminal_process_running):
         self.symbols = [s.strip().upper() for s in symbols if s.strip()]
         self.publish = publish            # async (NormalizedEvent) -> bool
         self.on_state = on_state          # async (MT5State) -> None
         self.module_loader = module_loader
+        self.process_checker = process_checker
         self.poll_seconds = poll_seconds
         self.move_pct, self.move_window, self.spread_factor = move_pct, move_window, spread_factor
         self.clock = clock
@@ -116,8 +143,12 @@ class MT5Provider:
         try:
             if not mt5.terminal_info():
                 if not mt5.initialize():
+                    error = mt5.last_error()
+                    if self.process_checker():
+                        return {"state": MT5State.DISCONNECTED_AUTH_REQUIRED,
+                                "detail": f"MT5 terminal is running but not authenticated: {error}"}
                     return {"state": MT5State.DISCONNECTED,
-                            "detail": f"MT5 terminal not reachable: {mt5.last_error()}"}
+                            "detail": f"MT5 terminal not reachable: {error}"}
             terminal = mt5.terminal_info()
             if terminal is not None and not getattr(terminal, "connected", True):
                 return {"state": MT5State.DISCONNECTED, "detail": "MT5 terminal is not connected to a broker"}
@@ -133,8 +164,12 @@ class MT5Provider:
                 quotes[symbol] = {"bid": tick.bid, "ask": tick.ask,
                                   "spread": round((tick.ask - tick.bid) / point, 1) if point else None,
                                   "time": getattr(tick, "time", None)}
-            positions = [{"ticket": p.ticket, "symbol": p.symbol, "type": "BUY" if p.type == 0 else "SELL",
-                          "volume": p.volume, "price_open": p.price_open, "profit": p.profit}
+            positions = [{"ticket": p.ticket, "symbol": p.symbol,
+                          "side": "BUY" if p.type == 0 else "SELL", "type": "BUY" if p.type == 0 else "SELL",
+                          "volume": p.volume, "entry": p.price_open, "price_open": p.price_open,
+                          "current_price": getattr(p, "price_current", None),
+                          "sl": getattr(p, "sl", None) or None, "tp": getattr(p, "tp", None) or None,
+                          "profit": p.profit}
                          for p in (mt5.positions_get() or [])]
             orders = [{"ticket": o.ticket, "symbol": o.symbol, "volume": o.volume_current,
                        "price": o.price_open, "type": o.type} for o in (mt5.orders_get() or [])]
