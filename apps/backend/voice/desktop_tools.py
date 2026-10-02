@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from collections import deque
@@ -23,13 +24,26 @@ from uuid import UUID
 from app.action_contracts import ActionRequest, ActionSource, ActionStatus, RiskLevel
 from skills.app_resolver import ALIASES, _normalize
 
+logger = logging.getLogger("tars.desktop_tools")
+
 DESKTOP_TOOL_NAMES = {
     "desktop_context", "desktop_resolve_app", "desktop_list_installed_apps", "desktop_open_app",
     "desktop_focus_window", "desktop_close_app", "desktop_list_controls", "desktop_click_control",
     "desktop_type_text", "desktop_scroll", "browser_open_url", "browser_search", "files_list",
     "files_read_open", "run_terminal", "analyze_chart", "confirm_pending_action", "cancel_pending_action",
     "tradingview_status", "tradingview_set_symbol", "tradingview_set_timeframe",
+    "web_get_context", "web_list_tabs", "web_focus_tab", "web_new_tab", "web_close_tab",
+    "web_navigate", "web_back", "web_forward", "web_refresh",
+    "web_find", "web_click", "web_type", "web_select", "web_scroll", "web_wait_for",
+    "web_extract_text", "web_extract_table", "web_get_links",
 }
+
+# Fast-path tools: a direct deterministic action with no reasoning/planning
+# call involved (mission item 11/26 "fast path") -- every desktop_/web_/
+# tradingview_/browser_ tool above already qualifies, since each one maps
+# straight onto one ActionRequest; this set exists only to tag the
+# diagnostics log line (item 17/26), not to change dispatch.
+FAST_PATH_TOOLS = DESKTOP_TOOL_NAMES - {"analyze_chart", "confirm_pending_action", "cancel_pending_action"}
 
 # Which resolved app aliases count as "the current trading app" for context tracking (item 1 of
 # the trading-desktop mission: current_trading_app must survive normal voice turns so "switch it
@@ -54,9 +68,15 @@ def _state(result) -> str:
         return "NEEDS_CONFIRMATION"
     if status in (ActionStatus.DENIED, ActionStatus.BLOCKED):
         return "BLOCKED"
-    text = f"{result.error or ''} {result.summary}".lower()
-    if status is ActionStatus.FAILED and re.search(r"not found|no such|no running|not_found|could not find|no match", text):
-        return "NOT_FOUND"
+    outcome = str((result.data or {}).get("outcome") or "")
+    text = f"{result.error or ''} {result.summary} {outcome}".lower()
+    if status is ActionStatus.FAILED:
+        if re.search(r"\bambiguous\b", text):
+            return "AMBIGUOUS"
+        if re.search(r"not found|no such|no running|not_found|could not find|no match", text):
+            return "NOT_FOUND"
+        if re.search(r"\bpartial\b", text):
+            return "PARTIAL"
     return "FAILED"
 
 
@@ -83,6 +103,11 @@ class DesktopTools:
         self.current_trading_app: str | None = None
         self.current_symbol: str | None = None
         self.current_timeframe: str | None = None
+        # Browser agent context (section 4): mirrors the trading-app fields
+        # above for the web skill -- so "open the first result" after
+        # "search YouTube for..." targets the tab TARS itself just opened,
+        # without the caller re-stating it.
+        self.active_browser_tab: dict | None = None
 
     # ---- core submit ------------------------------------------------------
     async def _submit(self, skill: str, action: str, arguments: dict, *, describe: str) -> dict:
@@ -90,15 +115,18 @@ class DesktopTools:
         if runtime is None:
             return {"status": "FAILED", "summary": "The action runtime is not running"}
         request = ActionRequest(skill=skill, action=action, arguments=arguments, source=self.source)
+        action_started = time.monotonic()
         try:
             result = await asyncio.wait_for(runtime.submit(request), 45)
         except TimeoutError:
             outcome = {"status": "FAILED", "summary": f"{describe} timed out"}
             self._remember(describe, outcome["status"])
+            self._log_diagnostics(skill, action, arguments, outcome["status"], action_started)
             return outcome
         except Exception as exc:  # validation errors etc. are reported, never hidden
             outcome = {"status": "FAILED", "summary": f"{describe} was rejected: {type(exc).__name__}: {str(exc)[:200]}"}
             self._remember(describe, outcome["status"])
+            self._log_diagnostics(skill, action, arguments, outcome["status"], action_started)
             return outcome
         state = _state(result)
         outcome = {"status": state, "summary": result.summary, "risk": result.risk_level.value if result.risk_level else None}
@@ -112,13 +140,30 @@ class DesktopTools:
         if result.error and state != "DONE":
             outcome["error"] = result.error[:300]
         self._remember(describe, state)
+        self._log_diagnostics(skill, action, arguments, state, action_started)
         return outcome
+
+    def _log_diagnostics(self, skill: str, action: str, arguments: dict, result: str, started: float) -> None:
+        # Mission item 17/26: one structured line per action -- skill/action
+        # pair (the deterministic "method" Codex actually dispatched, i.e.
+        # what the fast-path router chose), target, truthful result, and
+        # latency from action-start to verified-result.
+        target = arguments.get("target") or arguments.get("url") or arguments.get("control_id") or ""
+        logger.info(
+            "[diagnostics] skill=%s action=%s target=%r result=%s latency_ms=%.0f",
+            skill, action, target, result, (time.monotonic() - started) * 1000,
+        )
 
     def _remember(self, describe: str, state: str):
         self.recent.append({"action": describe, "result": state, "at": time.strftime("%H:%M:%S")})
 
     async def call(self, name: str, args: dict) -> dict:
-        return await getattr(self, name)(**args)
+        started = time.monotonic()
+        try:
+            return await getattr(self, name)(**args)
+        finally:
+            logger.info("[diagnostics] tool=%s fast_path=%s total_latency_ms=%.0f",
+                       name, name in FAST_PATH_TOOLS, (time.monotonic() - started) * 1000)
 
     # ---- context ------------------------------------------------------------
     async def desktop_context(self) -> dict:
@@ -133,6 +178,7 @@ class DesktopTools:
         return {"active_window": active, "recent_actions": list(self.recent),
                 "last_target_app": self.last_target_app, "current_trading_app": self.current_trading_app,
                 "current_symbol": self.current_symbol, "current_timeframe": self.current_timeframe,
+                "active_browser_tab": self.active_browser_tab,
                 "note": "Desktop is inspected only when asked; no continuous screenshots are taken."}
 
     def _note_target_app(self, target: str) -> None:
@@ -198,6 +244,89 @@ class DesktopTools:
             self.current_symbol = data["symbol"]
         if data.get("timeframe"):
             self.current_timeframe = data["timeframe"]
+
+    # ---- BrowserAgent: real Chrome via CDP (skills/web_browser.py) --------
+    def _sync_browser_tab(self, out: dict) -> None:
+        data = out.get("data") or {}
+        url, title = data.get("url"), data.get("title")
+        if url or title:
+            self.active_browser_tab = {"url": url, "title": title, "id": data.get("id") or data.get("active_tab_id")}
+
+    async def web_get_context(self) -> dict:
+        out = await self._submit("web", "get_context", {}, describe="check the browser")
+        self._sync_browser_tab(out)
+        return out
+
+    async def web_list_tabs(self) -> dict:
+        return await self._submit("web", "list_tabs", {}, describe="list browser tabs")
+
+    async def web_focus_tab(self, target: str = "") -> dict:
+        out = await self._submit("web", "focus_tab", {"target": target}, describe=f"switch to tab '{target}'")
+        self._sync_browser_tab(out)
+        return out
+
+    async def web_new_tab(self, url: str = "") -> dict:
+        out = await self._submit("web", "new_tab", {"url": url}, describe=f"open a new tab{f' at {url}' if url else ''}")
+        self._sync_browser_tab(out)
+        return out
+
+    async def web_close_tab(self, target: str = "") -> dict:
+        return await self._submit("web", "close_tab", {"target": target}, describe="close the browser tab")
+
+    async def web_navigate(self, url: str = "") -> dict:
+        out = await self._submit("web", "navigate", {"url": url}, describe=f"go to {url}")
+        self._sync_browser_tab(out)
+        return out
+
+    async def web_back(self) -> dict:
+        out = await self._submit("web", "back", {}, describe="go back")
+        self._sync_browser_tab(out)
+        return out
+
+    async def web_forward(self) -> dict:
+        out = await self._submit("web", "forward", {}, describe="go forward")
+        self._sync_browser_tab(out)
+        return out
+
+    async def web_refresh(self) -> dict:
+        out = await self._submit("web", "refresh", {}, describe="refresh the page")
+        self._sync_browser_tab(out)
+        return out
+
+    async def web_find(self, target: str = "") -> dict:
+        return await self._submit("web", "find", {"target": target}, describe=f"find '{target}' on the page")
+
+    async def web_click(self, target: str = "") -> dict:
+        out = await self._submit("web", "click", {"target": target}, describe=f"click '{target}'")
+        self._sync_browser_tab(out)
+        return out
+
+    async def web_type(self, target: str = "", text: str = "", submit: bool = False) -> dict:
+        return await self._submit("web", "type", {"target": target, "text": text, "submit": submit},
+                                  describe=f"type into '{target}'")
+
+    async def web_select(self, target: str = "", value: str = "") -> dict:
+        return await self._submit("web", "select", {"target": target, "value": value},
+                                  describe=f"select '{value}' in '{target}'")
+
+    async def web_scroll(self, direction: str = "down", target: str = "") -> dict:
+        args = {"direction": direction}
+        if target:
+            args["target"] = target
+        return await self._submit("web", "scroll", args, describe=f"scroll {direction}" if not target else f"scroll to '{target}'")
+
+    async def web_wait_for(self, target: str = "", timeout: float = 10.0) -> dict:
+        return await self._submit("web", "wait_for", {"target": target, "timeout": timeout},
+                                  describe=f"wait for '{target}'")
+
+    async def web_extract_text(self, mode: str = "summary") -> dict:
+        return await self._submit("web", "extract_text", {"mode": mode}, describe="read the page text")
+
+    async def web_extract_table(self, target: str = "") -> dict:
+        return await self._submit("web", "extract_table", {"target": target}, describe="extract a table from the page")
+
+    async def web_get_links(self) -> dict:
+        return await self._submit("web", "get_links", {}, describe="list links on the page")
 
     async def desktop_list_controls(self, target: str = "") -> dict:
         args = {"max_controls": 60, "max_depth": 5}

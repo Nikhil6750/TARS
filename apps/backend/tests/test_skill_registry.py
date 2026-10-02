@@ -9,6 +9,10 @@ _DB_INDEPENDENT_SKILLS = {
     "browser",
     "terminal",
     "desktop_control",
+    # "web" (BrowserAgent, skills/web_browser.py) needs no live app.state
+    # dependency either -- its BrowserSession launches/connects to Chrome
+    # lazily on first real action, never at construction or import time.
+    "web",
     # "trading" is always registered too (Trading Intelligence foundation) --
     # it needs no live app.state dependency to construct, same as the other
     # five; any action needing an unwired MemoryService/ChartAnalysisService/

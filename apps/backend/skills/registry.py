@@ -31,6 +31,7 @@ from skills.browser import BrowserSkill
 from skills.desktop_control import DesktopControlSkill
 from skills.filesystem import FilesystemSkill
 from skills.terminal import TerminalSkill
+from skills.web_browser import WebBrowserSkill
 from skills.windows_app import WindowsAppSkill
 
 if TYPE_CHECKING:
@@ -69,6 +70,7 @@ def build_registry(
         "browser": BrowserSkill(bridge=frontend_bridge),
         "terminal": TerminalSkill(),
         "desktop_control": DesktopControlSkill(),
+        "web": WebBrowserSkill(),
     }
     if memory_service is not None:
         from skills.obsidian import ObsidianSkill

@@ -47,6 +47,29 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         "click": RiskLevel.LOW_RISK,
         "type": RiskLevel.LOW_RISK,
     },
+    "web": {
+        "get_context": RiskLevel.READ_ONLY,
+        "list_tabs": RiskLevel.READ_ONLY,
+        "find": RiskLevel.READ_ONLY,
+        "extract_text": RiskLevel.READ_ONLY,
+        "extract_table": RiskLevel.READ_ONLY,
+        "get_links": RiskLevel.READ_ONLY,
+        "focus_tab": RiskLevel.LOW_RISK,
+        "new_tab": RiskLevel.LOW_RISK,
+        "close_tab": RiskLevel.LOW_RISK,
+        "navigate": RiskLevel.LOW_RISK,
+        "back": RiskLevel.LOW_RISK,
+        "forward": RiskLevel.LOW_RISK,
+        "refresh": RiskLevel.LOW_RISK,
+        "select": RiskLevel.LOW_RISK,
+        "scroll": RiskLevel.LOW_RISK,
+        "wait_for": RiskLevel.LOW_RISK,
+        # Floor only -- WebBrowserSkill.classify_risk() elevates these to
+        # CONFIRM_REQUIRED dynamically for state-changing click targets and
+        # sensitive type fields; classify() takes max(declared, this floor).
+        "click": RiskLevel.LOW_RISK,
+        "type": RiskLevel.LOW_RISK,
+    },
     "filesystem": {
         "list": RiskLevel.READ_ONLY,
         "list_files": RiskLevel.READ_ONLY,

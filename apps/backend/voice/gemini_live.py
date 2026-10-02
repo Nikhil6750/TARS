@@ -114,6 +114,24 @@ Desktop control (all through TARS's guarded action layer)
   cancel_pending_action. Never confirm on your own.
 - If a control cannot be found or you are unsure which one to click, say so and ask; do not guess.
 
+Browser agent (web_* tools -- a real, separate Chrome, not TARS's own panel)
+- "Open Chrome" is an application -> desktop_open_app. Once a page is open (or to go straight to a site), use
+  web_navigate/web_find/web_click/web_type/web_select/web_scroll/web_extract_text/web_get_links/web_extract_table --
+  these control a real, separate Chrome window over its DevTools Protocol, resolving your plain description (e.g.
+  "the search box", "the first result", "the login button") against the live page every time. Never invent a CSS
+  selector, an element id or a screen coordinate -- you do not have those, only plain descriptions.
+  "Search Google/YouTube for X" -> web_navigate to the site (or a search URL) then web_find/web_type into the search
+  box, or web_navigate straight to a search results URL when that is simpler; "open the first result" -> web_click
+  with a plain description, using web_get_context/web_list_tabs to know what's currently open if unsure. These calls
+  target the tab TARS itself last acted on -- you do not need to re-say the URL or re-open the tab for a same-session
+  follow-up.
+- Report web_* results the same honest way: DONE/SUCCESS, NOT_FOUND ("that wasn't on the page"), AMBIGUOUS
+  (multiple things matched -- ask which one), PARTIAL (it navigated/went back but the page was still loading when
+  checked), or FAILED. Never say a click or navigation worked when the tool reported anything else.
+- Before a consequential web action (purchase, payment, sending a message/email, submitting an important form,
+  deleting data, changing credentials) the same confirmation rule applies -- these report NEEDS_CONFIRMATION/
+  CONFIRM_REQUIRED and must not be assumed pre-approved.
+
 Hard limits
 - Live trading is read-only. You cannot and must never place, modify, close or cancel orders or positions, and must
   not click order buttons in MetaTrader. If asked, say trading stays in the user's hands.
@@ -179,6 +197,32 @@ def _tool_declarations():
              parameters=obj(timeframe=("STRING", "Timeframe as the user said it, e.g. 15m, 1h, 1D"))),
         decl(name="confirm_pending_action", description="Run the action waiting for confirmation. ONLY after the user has clearly said yes."),
         decl(name="cancel_pending_action", description="Cancel the action waiting for confirmation (user said no)."),
+        decl(name="web_get_context", description="The real browser's current URL, title and tab count. Use for 'what page am I on', or before a follow-up like 'open the first result' to confirm you're still on a results page."),
+        decl(name="web_list_tabs", description="List open tabs in the real browser."),
+        decl(name="web_focus_tab", description="Switch to an already-open tab.", parameters=obj(target=("STRING", "Tab index, or a word from its title/URL"))),
+        decl(name="web_new_tab", description="Open a new browser tab, optionally at a URL.", parameters=obj(url=("STRING", "Optional URL; leave empty for a blank tab"))),
+        decl(name="web_close_tab", description="Close a tab.", parameters=obj(target=("STRING", "Tab index/title word; leave empty for the current tab"))),
+        decl(name="web_navigate", description="Go to a URL in the real browser (e.g. after 'open Chrome', 'go to YouTube'). Verified against the page actually loading -- do not claim success if it reports it did not finish loading.",
+             parameters=obj(url=("STRING", "Full http(s) URL"))),
+        decl(name="web_back", description="Browser back."),
+        decl(name="web_forward", description="Browser forward."),
+        decl(name="web_refresh", description="Reload the current page."),
+        decl(name="web_find", description="Check whether something matching a plain description is on the current page, without acting on it. Use when unsure before web_click.",
+             parameters=obj(target=("STRING", "Plain description, e.g. 'the login button', 'the first video result'"))),
+        decl(name="web_click", description="Click something on the real page by plain description (e.g. 'the first result', 'the login button'), resolved against the live page -- never guess a CSS selector or coordinates. Reports NOT_FOUND/AMBIGUOUS honestly rather than guessing.",
+             parameters=obj(target=("STRING", "Plain description of what to click"))),
+        decl(name="web_type", description="Type text into an input/search box on the real page, identified by plain description.",
+             parameters=obj(target=("STRING", "Plain description of the field, e.g. 'the search box'"),
+                            text=("STRING", "Text to type"), submit=("BOOLEAN", "Press Enter / submit the form after typing, default false"))),
+        decl(name="web_select", description="Choose an option in a dropdown on the real page.",
+             parameters=obj(target=("STRING", "Plain description of the dropdown"), value=("STRING", "Option text or value to select"))),
+        decl(name="web_scroll", description="Scroll the real page, or scroll a described element into view.",
+             parameters=obj(direction=("STRING", "up/down/top/bottom, default down"), target=("STRING", "Optional: scroll this element into view instead"))),
+        decl(name="web_wait_for", description="Wait briefly for something to appear on the page (e.g. after a search, before clicking a result).",
+             parameters=obj(target=("STRING", "Plain description of what to wait for"), timeout=("NUMBER", "Seconds to wait, default 10, max 30"))),
+        decl(name="web_extract_text", description="Read the current page's visible text.", parameters=obj(mode=("STRING", "all/summary/headings, default summary"))),
+        decl(name="web_extract_table", description="Extract a table from the current page as rows of cell text.", parameters=obj(target=("STRING", "Optional word to find the right table if there are several"))),
+        decl(name="web_get_links", description="List the links on the current page (text + URL)."),
     ])]
 
 
@@ -204,7 +248,7 @@ class TarsTools:
         try:
             if name in DESKTOP_TOOL_NAMES:
                 allowed = {"target", "control_id", "label", "text", "direction", "url", "query", "path", "command",
-                          "question", "symbol", "timeframe"}
+                          "question", "symbol", "timeframe", "value", "submit", "timeout", "mode"}
                 return await self.desktop.call(name, {k: v for k, v in (args or {}).items() if k in allowed})
             return await getattr(self, name)(**{k: v for k, v in (args or {}).items()
                                                 if k in {"symbol", "limit", "hours_ahead", "question", "context"}})
