@@ -35,8 +35,10 @@ from app.action_contracts import (
     SkillExecutionError,
     SkillValidationError,
 )
+from browser.bridge_server import BridgeNotConnected
 from browser.cdp import CDPError
-from browser.session import BrowserLaunchError, BrowserSession
+from browser.provider import BrowserProvider
+from browser.session import BrowserLaunchError
 
 # Same heuristics `skills/browser.py` uses for the embedded webview, applied
 # to the *requested* target description (classify_risk runs before
@@ -60,17 +62,23 @@ class WebBrowserSkill(BaseSkill):
         "navigate", "back", "forward", "refresh",
         "find", "click", "type", "select", "scroll", "wait_for",
         "extract_text", "extract_table", "get_links",
+        "download", "get_last_download",
     )
 
-    def __init__(self, session: BrowserSession | None = None) -> None:
-        self._session = session or BrowserSession()
+    def __init__(self, session: BrowserProvider | None = None) -> None:
+        self._session = session or BrowserProvider()
 
     async def health(self) -> dict[str, Any]:
-        return {"available": True, "note": "Chrome is launched on first use, not at startup."}
+        return {"available": True, "active_provider": self._session.active_provider_name,
+                "note": "Chrome (CDP) is launched on first use, not at startup; the browser bridge "
+                        "extension, if paired, is preferred automatically when connected."}
 
     def classify_risk(self, action: str, arguments: dict[str, Any]) -> RiskLevel:
-        if action in ("get_context", "list_tabs", "find", "extract_text", "extract_table", "get_links"):
+        if action in ("get_context", "list_tabs", "find", "extract_text", "extract_table", "get_links",
+                      "get_last_download"):
             return RiskLevel.READ_ONLY
+        if action == "download":
+            return RiskLevel.CONFIRM_REQUIRED
         if action == "click":
             target = str(arguments.get("target") or "")
             return RiskLevel.CONFIRM_REQUIRED if _STATE_CHANGING_TARGET.search(target) else RiskLevel.LOW_RISK
@@ -118,6 +126,10 @@ class WebBrowserSkill(BaseSkill):
                 raise SkillValidationError(f"'mode' must be one of {_EXTRACT_MODES}")
         elif action == "extract_table":
             _optional_str(arguments, "target")
+        elif action == "download":
+            _require_str(arguments, "target")
+        elif action == "get_last_download":
+            return
         else:
             raise SkillValidationError(f"unsupported web action '{action}'")
 
@@ -192,10 +204,29 @@ class WebBrowserSkill(BaseSkill):
                 out = await self._session.get_links()
                 return self._result(request, ActionStatus.SUCCEEDED, f"Found {len(out['links'])} link(s).",
                                     risk_level=RiskLevel.READ_ONLY, data=out, started_at=started)
+            if action == "download":
+                return self._execute_download(request, started, args.get("target", ""),
+                                              await self._session.download(args["target"]))
+            if action == "get_last_download":
+                out = self._session.get_last_download()
+                status = ActionStatus.SUCCEEDED if out.get("ok") else ActionStatus.FAILED
+                return self._result(request, status,
+                                    f"Last download: {out.get('filename')} at {out.get('path')}." if out.get("ok")
+                                    else "Nothing has been downloaded yet this session.",
+                                    risk_level=RiskLevel.READ_ONLY, data=out, started_at=started)
         except BrowserLaunchError as exc:
             return self._result(request, ActionStatus.FAILED, f"Could not start the browser: {exc}",
                                 risk_level=RiskLevel.LOW_RISK, error=str(exc),
                                 data={"outcome": "NOT_FOUND"}, started_at=started)
+        except BridgeNotConnected as exc:
+            # Narrow race: BrowserProvider saw the bridge connected when it
+            # chose a provider, but the extension disconnected before the
+            # call landed. Reported honestly rather than silently retried
+            # against CDP mid-action, which could duplicate a state-changing
+            # action (a click, a submit) on the wrong tab/page.
+            return self._result(request, ActionStatus.FAILED, f"The paired browser disconnected: {exc}",
+                                risk_level=RiskLevel.LOW_RISK, error=str(exc),
+                                data={"outcome": "FAILED"}, started_at=started)
         except CDPError as exc:
             return self._result(request, ActionStatus.FAILED, f"Browser control failed: {exc}",
                                 risk_level=RiskLevel.LOW_RISK, error=str(exc),
@@ -238,6 +269,34 @@ class WebBrowserSkill(BaseSkill):
                             risk_level=RiskLevel.LOW_RISK, error="navigation not verified",
                             data={**out, "outcome": "PARTIAL"}, started_at=started)
 
+    def _execute_download(self, request: ActionRequest, started: datetime, target: str, out: dict) -> ActionResult:
+        status_word = out.get("status", "FAILED")
+        if status_word == "COMPLETED":
+            return self._result(
+                request, ActionStatus.SUCCEEDED,
+                f"Downloaded '{out['filename']}' ({out['size_bytes']} bytes) to {out['path']}.",
+                risk_level=RiskLevel.CONFIRM_REQUIRED, data={**out, "outcome": "SUCCESS"}, started_at=started,
+            )
+        if status_word == "DOWNLOADING":
+            return self._result(
+                request, ActionStatus.FAILED, f"Still downloading '{target}' -- not finished yet.",
+                risk_level=RiskLevel.CONFIRM_REQUIRED, error="download in progress",
+                data={**out, "outcome": "PARTIAL"}, started_at=started,
+            )
+        reason = out.get("reason", "FAILED")
+        if reason in ("NOT_FOUND", "AMBIGUOUS"):
+            return self._result(
+                request, ActionStatus.FAILED, f"Could not download '{target}': {reason.lower().replace('_', ' ')}.",
+                risk_level=RiskLevel.CONFIRM_REQUIRED, error=reason,
+                data={**out, "outcome": reason}, started_at=started,
+            )
+        return self._result(
+            request, ActionStatus.FAILED,
+            f"Clicked '{target}' but no download started within the timeout.",
+            risk_level=RiskLevel.CONFIRM_REQUIRED, error="no download started",
+            data={**out, "outcome": "FAILED"}, started_at=started,
+        )
+
     def _from_resolution(
         self, request: ActionRequest, started: datetime, out: dict, args: dict, *, verb: str, sensitive: bool = False
     ) -> ActionResult:
@@ -248,10 +307,25 @@ class WebBrowserSkill(BaseSkill):
                 matched["text"] = "[REDACTED]"
                 out = {**out, "value_after": "[REDACTED]"} if "value_after" in out else out
             desc = matched.get("name") or matched.get("text") or matched.get("tag") or target
+            # A click on a real link is only a claim of success at the DOM
+            # level (event dispatched) until BrowserSession's own brief poll
+            # confirms the page actually changed -- confirmed live that some
+            # sites (Google's result-redirect links) take a couple of
+            # seconds, so "navigated" being present and False means the
+            # click happened but nothing was observed to follow from it yet.
+            if "navigated" in out:
+                if out["navigated"]:
+                    summary = f"{verb.capitalize()} '{desc}', which opened '{out.get('title_after') or out.get('url_after')}'."
+                    outcome = "SUCCESS"
+                else:
+                    summary = f"{verb.capitalize()} '{desc}', but no resulting page change was observed."
+                    outcome = "PARTIAL"
+            else:
+                summary, outcome = f"{verb.capitalize()} '{desc}'.", "SUCCESS"
             return self._result(
-                request, ActionStatus.SUCCEEDED, f"{verb.capitalize()} '{desc}'.",
+                request, ActionStatus.SUCCEEDED if outcome == "SUCCESS" else ActionStatus.FAILED, summary,
                 risk_level=RiskLevel.LOW_RISK if verb != "find" else RiskLevel.READ_ONLY,
-                data={**out, "matched": matched, "outcome": "SUCCESS"}, started_at=started,
+                data={**out, "matched": matched, "outcome": outcome}, started_at=started,
             )
         reason = out.get("reason", "NOT_FOUND")
         if reason == "SCRIPT_ERROR":

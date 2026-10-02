@@ -81,3 +81,22 @@ async def test_web_scroll_with_and_without_target():
     assert rt.requests[-1].arguments == {"direction": "down"}
     await t.web_scroll("down", "the footer")
     assert rt.requests[-1].arguments == {"direction": "down", "target": "the footer"}
+
+
+async def test_execution_trace_recorded_for_done_not_for_failed():
+    # Mission section 21's learning hook: a successful (DONE) tool call
+    # through DesktopTools.call() should leave a bounded, in-memory trace in
+    # the shape a future Skill Learning system would consume; a failed one
+    # should not.
+    t, rt = tools({("web", "navigate"): (ActionStatus.SUCCEEDED, {"outcome": "SUCCESS", "url": "https://x/"}, None),
+                   ("web", "click"): (ActionStatus.FAILED, {"outcome": "NOT_FOUND"}, "target not found")})
+    await t.call("web_navigate", {"url": "https://x"})
+    await t.call("web_click", {"target": "missing"})
+
+    assert len(t.execution_traces) == 1
+    trace = t.execution_traces[0]
+    assert trace["trigger"] == "web_navigate"
+    assert trace["parameters"] == {"url": "https://x"}
+    assert trace["verification"] == "SUCCESS"
+    assert trace["provider"] == "web"
+    assert isinstance(trace["duration_ms"], int)

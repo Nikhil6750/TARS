@@ -4,7 +4,7 @@ fakes) so these exercise skills/web_browser.py's own logic, not the real
 CDP/Chrome path."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -29,9 +29,12 @@ class _FakeSession:
             "get_context", "list_tabs", "focus_tab", "new_tab", "close_tab",
             "navigate", "back", "forward", "refresh",
             "find", "click", "type_text", "select", "scroll", "scroll_to", "wait_for",
-            "extract_text", "extract_table", "get_links",
+            "extract_text", "extract_table", "get_links", "download",
         ):
             setattr(self, name, AsyncMock())
+        self.get_last_download = Mock(return_value={"ok": False, "reason": "NOT_FOUND",
+                                                     "detail": "nothing has been downloaded yet this session"})
+        self.active_provider_name = "cdp"
 
 
 def _skill(session: _FakeSession | None = None) -> WebBrowserSkill:
@@ -85,6 +88,14 @@ async def test_validate_rejects_unknown_action():
     skill = _skill()
     with pytest.raises(SkillValidationError):
         await skill.validate("teleport", {})
+
+
+async def test_health_reports_active_provider():
+    session = _FakeSession()
+    session.active_provider_name = "extension"
+    health = await _skill(session).health()
+    assert health["available"] is True
+    assert health["active_provider"] == "extension"
 
 
 # ---- risk classification ---------------------------------------------------
@@ -205,6 +216,72 @@ async def test_execute_extract_table_not_found():
     session.extract_table.return_value = {"ok": False, "reason": "NOT_FOUND"}
     result = await _skill(session).execute(_request("extract_table", {}))
     assert result.status == ActionStatus.FAILED
+
+
+# ---- execute(): downloads -----------------------------------------------------
+
+async def test_execute_download_completed():
+    session = _FakeSession()
+    session.download.return_value = {"ok": True, "status": "COMPLETED", "filename": "report.pdf",
+                                      "path": "C:\\Downloads\\report.pdf", "size_bytes": 1234,
+                                      "source_url": "https://x/report.pdf"}
+    result = await _skill(session).execute(_request("download", {"target": "the report"}))
+    assert result.status == ActionStatus.SUCCEEDED
+    assert result.data["outcome"] == "SUCCESS"
+    assert "report.pdf" in result.summary
+
+
+async def test_execute_download_still_downloading():
+    session = _FakeSession()
+    session.download.return_value = {"ok": True, "status": "DOWNLOADING", "source_url": "https://x/big.zip"}
+    result = await _skill(session).execute(_request("download", {"target": "the zip"}))
+    assert result.status == ActionStatus.FAILED
+    assert result.data["outcome"] == "PARTIAL"
+
+
+async def test_execute_download_not_found():
+    session = _FakeSession()
+    session.download.return_value = {"ok": False, "status": "FAILED", "reason": "NOT_FOUND", "candidates": []}
+    result = await _skill(session).execute(_request("download", {"target": "nonexistent"}))
+    assert result.status == ActionStatus.FAILED
+    assert result.data["outcome"] == "NOT_FOUND"
+
+
+async def test_execute_download_no_download_started():
+    session = _FakeSession()
+    session.download.return_value = {"ok": False, "status": "FAILED", "reason": "NO_DOWNLOAD_STARTED"}
+    result = await _skill(session).execute(_request("download", {"target": "not a download link"}))
+    assert result.status == ActionStatus.FAILED
+    assert result.data["outcome"] == "FAILED"
+
+
+async def test_execute_get_last_download_before_any_download():
+    session = _FakeSession()
+    result = await _skill(session).execute(_request("get_last_download", {}))
+    assert result.status == ActionStatus.FAILED
+
+
+async def test_execute_get_last_download_after_a_download():
+    session = _FakeSession()
+    session.get_last_download = Mock(return_value={"ok": True, "status": "COMPLETED", "filename": "x.pdf",
+                                                    "path": "C:\\Downloads\\x.pdf", "size_bytes": 10,
+                                                    "source_url": "https://x/x.pdf"})
+    result = await _skill(session).execute(_request("get_last_download", {}))
+    assert result.status == ActionStatus.SUCCEEDED
+    assert result.data["filename"] == "x.pdf"
+
+
+def test_download_risk_requires_confirmation():
+    skill = _skill()
+    assert skill.classify_risk("download", {}) == RiskLevel.CONFIRM_REQUIRED
+    assert skill.classify_risk("get_last_download", {}) == RiskLevel.READ_ONLY
+
+
+async def test_validate_download_requires_target():
+    skill = _skill()
+    with pytest.raises(SkillValidationError):
+        await skill.validate("download", {})
+    await skill.validate("download", {"target": "the PDF"})
 
 
 # ---- execute(): launch/transport failures surface honestly -----------------

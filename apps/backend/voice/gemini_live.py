@@ -223,6 +223,9 @@ def _tool_declarations():
         decl(name="web_extract_text", description="Read the current page's visible text.", parameters=obj(mode=("STRING", "all/summary/headings, default summary"))),
         decl(name="web_extract_table", description="Extract a table from the current page as rows of cell text.", parameters=obj(target=("STRING", "Optional word to find the right table if there are several"))),
         decl(name="web_get_links", description="List the links on the current page (text + URL)."),
+        decl(name="web_download", description="Download a file by clicking a described link/button (e.g. 'the PDF', 'the first download link') and waiting for it to actually finish -- never claim it downloaded just because the link was clicked.",
+             parameters=obj(target=("STRING", "Plain description of what to click to start the download"))),
+        decl(name="web_get_last_download", description="The most recent completed download this session: filename, local path and size. Use for 'where did it download' / 'what did I just download'."),
     ])]
 
 

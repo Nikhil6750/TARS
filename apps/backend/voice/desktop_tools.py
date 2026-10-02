@@ -36,6 +36,7 @@ DESKTOP_TOOL_NAMES = {
     "web_navigate", "web_back", "web_forward", "web_refresh",
     "web_find", "web_click", "web_type", "web_select", "web_scroll", "web_wait_for",
     "web_extract_text", "web_extract_table", "web_get_links",
+    "web_download", "web_get_last_download",
 }
 
 # Fast-path tools: a direct deterministic action with no reasoning/planning
@@ -94,6 +95,14 @@ class DesktopTools:
         self.source = source
         self.pending: dict | None = None
         self.recent: deque[dict] = deque(maxlen=10)
+        # Mission section 21's learning hook: an in-memory-only record of
+        # each successful tool call, in the shape a future Skill Learning
+        # system would consume ({trigger, intent, parameters, steps,
+        # verification, duration, provider}). Deliberately NOT a database
+        # table or a file -- the mission is explicit that nothing should be
+        # persisted yet -- just a seam with the right shape for when that
+        # work happens. Bounded so it cannot grow across a long session.
+        self.execution_traces: deque[dict] = deque(maxlen=50)
         self._ctx_cache: tuple[float, dict] | None = None
         # Session-scoped desktop/trading context (item 1: survives normal voice turns; Gemini's
         # own conversation memory handles pronoun resolution across turns, this is what backs a
@@ -159,11 +168,27 @@ class DesktopTools:
 
     async def call(self, name: str, args: dict) -> dict:
         started = time.monotonic()
+        result = {}
         try:
-            return await getattr(self, name)(**args)
+            result = await getattr(self, name)(**args)
+            return result
         finally:
-            logger.info("[diagnostics] tool=%s fast_path=%s total_latency_ms=%.0f",
-                       name, name in FAST_PATH_TOOLS, (time.monotonic() - started) * 1000)
+            latency_ms = (time.monotonic() - started) * 1000
+            logger.info("[diagnostics] tool=%s fast_path=%s total_latency_ms=%.0f", name, name in FAST_PATH_TOOLS, latency_ms)
+            if isinstance(result, dict) and result.get("status") == "DONE":
+                self._record_execution_trace(name, args, result, latency_ms)
+
+    def _record_execution_trace(self, name: str, args: dict, result: dict, latency_ms: float) -> None:
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        self.execution_traces.append({
+            "trigger": name, "intent": name, "parameters": args,
+            "steps": [{"action": name, "result": "DONE"}],
+            "verification": data.get("outcome", "SUCCESS"),
+            "duration_ms": round(latency_ms),
+            "provider": data.get("provider") or ("web" if name.startswith("web_") else
+                                                   "tradingview" if name.startswith("tradingview_") else
+                                                   "desktop"),
+        })
 
     # ---- context ------------------------------------------------------------
     async def desktop_context(self) -> dict:
@@ -327,6 +352,12 @@ class DesktopTools:
 
     async def web_get_links(self) -> dict:
         return await self._submit("web", "get_links", {}, describe="list links on the page")
+
+    async def web_download(self, target: str = "") -> dict:
+        return await self._submit("web", "download", {"target": target}, describe=f"download '{target}'")
+
+    async def web_get_last_download(self) -> dict:
+        return await self._submit("web", "get_last_download", {}, describe="check the last download")
 
     async def desktop_list_controls(self, target: str = "") -> dict:
         args = {"max_controls": 60, "max_depth": 5}

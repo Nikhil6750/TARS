@@ -34,7 +34,7 @@ class _FakeHTTP:
         self.closed: list[str] = []
 
     async def version(self, *, timeout: float = 2.0):
-        return {"Browser": "fake"} if self.alive else None
+        return {"Browser": "fake", "webSocketDebuggerUrl": "ws://fake/browser"} if self.alive else None
 
     async def aclose(self):
         pass
@@ -108,6 +108,25 @@ async def test_new_tab_becomes_active_and_validates_scheme():
     assert session._active_target_id == out["id"]
     with pytest.raises(Exception):
         await session.new_tab("javascript:alert(1)")
+
+
+async def test_new_tab_as_the_very_first_call_launches_chrome():
+    # Regression: new_tab() used to skip ensure_started(), so calling it
+    # before any other method (nothing had launched Chrome yet) failed --
+    # found live when a test fixture called new_tab() first.
+    http = _FakeHTTP(alive=False)
+    session = _session(http)
+
+    def _launch(*_args, **_kwargs):
+        http.alive = True  # simulates Chrome becoming reachable after launch
+
+    with patch("browser.session.subprocess.Popen", side_effect=_launch) as popen:
+        out = await session.new_tab("https://news.example")
+    assert out["ok"] is True
+    # subprocess.Popen is also what the (unmocked) real app resolver's own
+    # Get-StartApps discovery runs through internally -- assert a Chrome
+    # launch happened among the calls, not that it was the only one.
+    assert any("chrome.exe" in str(call).lower() for call in popen.call_args_list)
 
 
 async def test_close_tab_defaults_to_active():
@@ -184,11 +203,43 @@ async def test_click_success_reports_matched_element():
 
 async def test_click_not_found():
     session = _session()
-    with patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval:
+    with patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval, \
+         patch("browser.resolution.RESOLUTION_RETRY_DELAY", 0):
         fake_eval.return_value = {"ok": False, "reason": "NOT_FOUND", "candidates": []}
         out = await session.click("a button that does not exist")
     assert out["ok"] is False
     assert out["reason"] == "NOT_FOUND"
+    assert out["recovery_attempts"] == 2  # the bounded recovery retry (mission section 11) ran once, then gave up
+
+
+async def test_click_recovers_from_a_transient_not_found():
+    # Mission section 11: a NOT_FOUND right after e.g. a page still
+    # rendering should get one bounded retry, re-resolving fresh, before
+    # giving up -- never more than that, and never for AMBIGUOUS. Every
+    # `_execute()` attempt costs 3 `evaluate()` calls (before-url, before-
+    # title, then the actual resolve-and-act), so two attempts need six
+    # scripted responses; only the 3rd and 6th (the resolve-and-act calls)
+    # matter for this test.
+    session = _session()
+    with patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval, \
+         patch("browser.resolution.RESOLUTION_RETRY_DELAY", 0):
+        fake_eval.side_effect = [
+            "", "", {"ok": False, "reason": "NOT_FOUND", "candidates": []},
+            "", "", {"ok": True, "matched": {"tag": "button", "text": "Submit"}},
+        ]
+        out = await session.click("submit")
+    assert out["ok"] is True
+    assert out["recovery_attempts"] == 2
+
+
+async def test_ambiguous_is_never_retried():
+    session = _session()
+    with patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval, \
+         patch("browser.resolution.RESOLUTION_RETRY_DELAY", 0):
+        fake_eval.return_value = {"ok": False, "reason": "AMBIGUOUS", "candidates": [{"text": "A"}, {"text": "B"}]}
+        out = await session.click("buy now")
+    assert out["reason"] == "AMBIGUOUS"
+    assert "recovery_attempts" not in out  # no retry for an ambiguous result
 
 
 async def test_click_ambiguous_returns_candidates():
@@ -261,6 +312,131 @@ async def test_aclose_closes_all_cached_connections():
         await session.aclose()
         conn.close.assert_awaited_once()
         assert session._connections == {}
+
+
+# ---- downloads --------------------------------------------------------------
+
+def _download_session(tmp_path, http=None):
+    return BrowserSession(http=http or _FakeHTTP(), profile_dir=tmp_path / "profile")
+
+
+async def test_download_completes_and_is_verified_on_disk(tmp_path):
+    import asyncio as _asyncio
+
+    session = _download_session(tmp_path)
+    with patch("browser.session.CDPTarget") as target_cls, \
+         patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval, \
+         patch("browser.session._CLICK_NAV_VERIFY_TIMEOUT", 0.01):
+        target_cls.return_value.send = AsyncMock(return_value={})
+        fake_eval.return_value = {"ok": True, "matched": {"tag": "a", "href": "https://x/file.pdf", "text": "PDF"}}
+
+        async def write_file_shortly():
+            await _asyncio.sleep(0.1)
+            session._downloads_dir.mkdir(parents=True, exist_ok=True)
+            (session._downloads_dir / "file.pdf").write_bytes(b"hello world")
+
+        writer = _asyncio.create_task(write_file_shortly())
+        out = await session.download("the PDF", timeout=2.0)
+        await writer
+
+    assert out == {
+        "ok": True, "status": "COMPLETED", "filename": "file.pdf",
+        "path": str(session._downloads_dir / "file.pdf"), "size_bytes": 11, "source_url": "https://x/file.pdf",
+    }
+    assert session.get_last_download() == {"ok": True, **out}
+
+
+async def test_download_detects_a_same_named_file_being_overwritten(tmp_path):
+    # Regression: Chrome overwrites a same-named download in place for an
+    # automation-driven click (no "keep both" prompt) -- a naive "is this
+    # filename new" check would silently miss every re-download of a file
+    # sharing a name with one already in the downloads folder. Found live
+    # when a repeated test run against the same fixture file failed.
+    import asyncio as _asyncio
+
+    import os
+
+    session = _download_session(tmp_path)
+    session._downloads_dir.mkdir(parents=True, exist_ok=True)
+    existing = session._downloads_dir / "report.pdf"
+    existing.write_bytes(b"old content")
+    old_mtime = existing.stat().st_mtime - 10
+    os.utime(existing, (old_mtime, old_mtime))  # back-date it so the overwrite produces a measurable mtime delta
+
+    with patch("browser.session.CDPTarget") as target_cls, \
+         patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval, \
+         patch("browser.session._CLICK_NAV_VERIFY_TIMEOUT", 0.01):
+        target_cls.return_value.send = AsyncMock(return_value={})
+        fake_eval.return_value = {"ok": True, "matched": {"tag": "a", "href": "https://x/report.pdf", "text": "report"}}
+
+        async def overwrite_shortly():
+            await _asyncio.sleep(0.1)
+            existing.write_bytes(b"new content, much longer than the old one")
+
+        writer = _asyncio.create_task(overwrite_shortly())
+        out = await session.download("report", timeout=2.0)
+        await writer
+
+    assert out["status"] == "COMPLETED"
+    assert out["filename"] == "report.pdf"
+    assert out["size_bytes"] == len(b"new content, much longer than the old one")
+    assert existing.stat().st_mtime != old_mtime
+
+
+async def test_download_reports_not_found_when_click_misses(tmp_path):
+    session = _download_session(tmp_path)
+    with patch("browser.session.CDPTarget") as target_cls, \
+         patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval:
+        target_cls.return_value.send = AsyncMock(return_value={})
+        fake_eval.return_value = {"ok": False, "reason": "NOT_FOUND", "candidates": []}
+        out = await session.download("a file that is not there", timeout=0.3)
+    assert out["ok"] is False
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "NOT_FOUND"
+
+
+async def test_download_reports_downloading_when_still_in_progress(tmp_path):
+    import asyncio as _asyncio
+
+    session = _download_session(tmp_path)
+    with patch("browser.session.CDPTarget") as target_cls, \
+         patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval, \
+         patch("browser.session._POLL_INTERVAL", 0.05), \
+         patch("browser.session._CLICK_NAV_VERIFY_TIMEOUT", 0.01):
+        target_cls.return_value.send = AsyncMock(return_value={})
+        fake_eval.return_value = {"ok": True, "matched": {"tag": "a", "href": "https://x/big.zip", "text": "ZIP"}}
+
+        async def write_partial_shortly():
+            await _asyncio.sleep(0.05)
+            session._downloads_dir.mkdir(parents=True, exist_ok=True)
+            (session._downloads_dir / "big.zip.crdownload").write_bytes(b"...")
+
+        writer = _asyncio.create_task(write_partial_shortly())
+        out = await session.download("the big file", timeout=0.3)
+        await writer
+
+    assert out["ok"] is True
+    assert out["status"] == "DOWNLOADING"
+
+
+async def test_download_reports_failed_when_nothing_appears(tmp_path):
+    session = _download_session(tmp_path)
+    with patch("browser.session.CDPTarget") as target_cls, \
+         patch("browser.session.evaluate", new_callable=AsyncMock) as fake_eval, \
+         patch("browser.session._POLL_INTERVAL", 0.02), \
+         patch("browser.session._CLICK_NAV_VERIFY_TIMEOUT", 0.01):
+        target_cls.return_value.send = AsyncMock(return_value={})
+        fake_eval.return_value = {"ok": True, "matched": {"tag": "a", "href": "https://x/y", "text": "not a download"}}
+        out = await session.download("not a download", timeout=0.1)
+    assert out["ok"] is False
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "NO_DOWNLOAD_STARTED"
+
+
+async def test_get_last_download_before_any_download(tmp_path):
+    session = _download_session(tmp_path)
+    assert session.get_last_download() == {"ok": False, "reason": "NOT_FOUND",
+                                             "detail": "nothing has been downloaded yet this session"}
 
 
 async def test_cdp_error_propagates_from_evaluate():

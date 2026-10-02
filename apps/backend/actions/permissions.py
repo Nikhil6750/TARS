@@ -69,6 +69,8 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         # sensitive type fields; classify() takes max(declared, this floor).
         "click": RiskLevel.LOW_RISK,
         "type": RiskLevel.LOW_RISK,
+        "get_last_download": RiskLevel.READ_ONLY,
+        "download": RiskLevel.CONFIRM_REQUIRED,
     },
     "filesystem": {
         "list": RiskLevel.READ_ONLY,
