@@ -9,6 +9,7 @@ from app.action_contracts import Skill
 if TYPE_CHECKING:
     from actions.frontend_bridge import FrontendCommandBridge
     from assistant.chart_analysis import ChartAnalysisService
+    from assistant.hot_chart_state_store import HotChartStateStore
     from memory.service import MemoryService
     from skill_registry.manager import SkillManager
     from trading.context import TradingContextBuilder
@@ -77,6 +78,7 @@ def build_skill_registry(
     chart_analysis_service: ChartAnalysisService | None = None,
     trading_context_builder: TradingContextBuilder | None = None,
     skill_manager: SkillManager | None = None,
+    hot_chart_store: HotChartStateStore | None = None,
 ) -> SkillRegistry:
     """Load Claude's skill package when present, while keeping this branch bootable alone.
 
@@ -108,6 +110,7 @@ def build_skill_registry(
             chart_analysis_service=chart_analysis_service,
             trading_context_builder=trading_context_builder,
             skill_manager=skill_manager,
+            hot_chart_store=hot_chart_store,
         )
     else:
         exported = getattr(module, "SKILLS", None)

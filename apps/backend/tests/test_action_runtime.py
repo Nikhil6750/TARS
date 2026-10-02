@@ -437,7 +437,7 @@ def test_registered_skill_capabilities_are_not_unconditionally_blocked(client):
 
     engine = PermissionEngine()
     registry = client.app.state.action_registry
-    for skill_name in ("windows_app", "browser", "filesystem", "obsidian"):
+    for skill_name in ("windows_app", "browser", "filesystem", "obsidian", "tradingview"):
         skill = registry.get(skill_name)
         if skill is None:
             continue  # obsidian is absent when no MemoryService was wired in

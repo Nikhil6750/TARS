@@ -103,6 +103,12 @@ Desktop control (all through TARS's guarded action layer)
 - You can open/switch apps, inspect and list controls, scroll, open URLs, search the web, list/open files and run
   bounded terminal commands. Tell the user in a few words what you did and report the tool's real result: DONE,
   NOT_FOUND, NEEDS_CONFIRMATION, BLOCKED or FAILED. Never pretend it worked.
+- TradingView: once it is open, "switch to EURUSD" / "show gold" -> tradingview_set_symbol; "make it fifteen
+  minutes" / "go to the one-hour chart" -> tradingview_set_timeframe; "what am I looking at" (when TradingView is
+  the app in view) -> tradingview_status first (fast, no vision call) before falling back to analyze_chart. These
+  always target the currently open TradingView window -- you do not need to re-open or re-name it for a follow-up
+  in the same conversation. If a symbol/timeframe change reports NOT_VERIFIED, say you asked for the change but
+  couldn't confirm it took effect; do not claim it worked.
 - If a click, typing or other state-changing action returns NEEDS_CONFIRMATION, ask the user plainly ("Click Save in
   Notepad, yes?"). Only after they clearly say yes call confirm_pending_action; if they say no call
   cancel_pending_action. Never confirm on your own.
@@ -132,6 +138,8 @@ def _tool_declarations():
         decl(name="get_tradingview_state", description="Whether the TradingView chart window is being monitored and the latest chart state."),
         decl(name="get_economic_calendar", description="Upcoming economic events with currency, importance, previous, forecast and actual.",
              parameters=obj(hours_ahead=("INTEGER", "Look-ahead window in hours, default 24"))),
+        decl(name="get_news", description="Recent financial news headlines from TARS's live news monitor, optionally filtered to one symbol. Use for 'check the latest news about X' -- prefer this over browser_search for financial headlines.",
+             parameters=obj(symbol=("STRING", "Optional symbol/asset to filter by, e.g. XAUUSD or gold"))),
         decl(name="ask_claude", description="Delegate deep trading/chart analysis, strategy research or complex synthesis to Claude. Takes a few seconds.",
              parameters=obj(question=("STRING", "The full question to analyse"),
                             context=("STRING", "Optional extra context from the conversation"))),
@@ -164,13 +172,18 @@ def _tool_declarations():
              parameters=obj(command=("STRING", "The command"))),
         decl(name="analyze_chart", description="Analyse the TradingView/visible chart with TARS's chart pipeline. Use for 'look at the chart', 'what changed'.",
              parameters=obj(question=("STRING", "What to look for, e.g. 'the 15 minute chart, what changed'"))),
+        decl(name="tradingview_status", description="The TradingView window's current symbol and timeframe, from TARS's own background chart monitor -- fast, no vision call. Use for 'what am I looking at' when TradingView is the current trading app, or to check before changing it."),
+        decl(name="tradingview_set_symbol", description="Change the symbol on the running TradingView chart (e.g. switch to EURUSD, show gold). TradingView must already be open -- open it first if it is not the current trading app.",
+             parameters=obj(symbol=("STRING", "Symbol/ticker as the user said it, e.g. EURUSD, gold, XAUUSD"))),
+        decl(name="tradingview_set_timeframe", description="Change the timeframe/interval on the running TradingView chart (e.g. make it fifteen minutes, go to the one-hour chart).",
+             parameters=obj(timeframe=("STRING", "Timeframe as the user said it, e.g. 15m, 1h, 1D"))),
         decl(name="confirm_pending_action", description="Run the action waiting for confirmation. ONLY after the user has clearly said yes."),
         decl(name="cancel_pending_action", description="Cancel the action waiting for confirmation (user said no)."),
     ])]
 
 
 BASE_TOOL_NAMES = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
-                   "get_economic_calendar", "ask_claude"}
+                   "get_economic_calendar", "get_news", "ask_claude"}
 TOOL_NAMES = BASE_TOOL_NAMES | DESKTOP_TOOL_NAMES
 
 
@@ -190,7 +203,8 @@ class TarsTools:
             return {"error": f"unknown tool {name}"}
         try:
             if name in DESKTOP_TOOL_NAMES:
-                allowed = {"target", "control_id", "label", "text", "direction", "url", "query", "path", "command", "question"}
+                allowed = {"target", "control_id", "label", "text", "direction", "url", "query", "path", "command",
+                          "question", "symbol", "timeframe"}
                 return await self.desktop.call(name, {k: v for k, v in (args or {}).items() if k in allowed})
             return await getattr(self, name)(**{k: v for k, v in (args or {}).items()
                                                 if k in {"symbol", "limit", "hours_ahead", "question", "context"}})
@@ -253,6 +267,16 @@ class TarsTools:
                 "events": [{"currency": e.currency, "event": e.event, "at": e.timestamp.isoformat(),
                             "importance": e.importance, "previous": e.previous, "forecast": e.forecast,
                             "actual": e.actual, "replay": e.replay} for e in events[:12]]}
+
+    async def get_news(self, symbol: str = "") -> dict:
+        monitors = getattr(self.state, "monitors", None)
+        news = getattr(monitors, "news", None) if monitors else None
+        if news is None:
+            return {"items": [], "detail": "news monitor not running"}
+        rows = news.latest(symbols=[symbol] if symbol else None, limit=8)
+        return {"source": news.provider.name, "state": news.state,
+                "items": [{"headline": r["headline"], "url": r["url"], "published_at": r["published_at"].isoformat(),
+                          "source": r["source"]} for r in rows]}
 
     async def ask_claude(self, question: str = "", context: str = "") -> dict:
         turns = getattr(self.state, "turn_controller", None)

@@ -218,6 +218,7 @@ async def lifespan(app: FastAPI):
         chart_analysis_service=chart_analysis_service,
         trading_context_builder=trading_context_builder,
         skill_manager=skill_manager,
+        hot_chart_store=HotChartStateStore(db.conn),
     )
     app.state.action_registry = action_registry
     action_runtime = ActionRuntime(
@@ -365,14 +366,23 @@ async def lifespan(app: FastAPI):
     monitors = MonitorManager(
         realtime_events, HotChartStateStore(db.conn),
         mt5_enabled=settings.mt5_enabled, calendar_enabled=settings.calendar_enabled,
+        news_enabled=settings.news_enabled,
         symbols=[s.strip() for s in settings.event_relevant_symbols.split(",") if s.strip()] or None)
     app.state.monitors = monitors
+
+    from events.correlation import CorrelationEngine
+
+    correlation_engine = CorrelationEngine(realtime_events, monitors)
+    app.state.correlation_engine = correlation_engine
     if settings.monitors_enabled and os.environ.get("TARS_DISABLE_MONITORS") != "1":
         await monitors.start()
+        if settings.correlation_enabled:
+            correlation_engine.start()
 
     try:
         yield
     finally:
+        correlation_engine.stop()
         await monitors.stop()
         await realtime_events.close()
         session = getattr(app.state, "realtime_session", None)

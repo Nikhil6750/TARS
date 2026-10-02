@@ -219,7 +219,7 @@ def test_tools_are_bounded_and_none_can_trade():
     from voice.desktop_tools import DESKTOP_TOOL_NAMES
 
     base = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
-            "get_economic_calendar", "ask_claude"}
+            "get_economic_calendar", "get_news", "ask_claude"}
     assert TOOL_NAMES == base | DESKTOP_TOOL_NAMES
     assert not any(re.search(r"trade|order|buy|sell", n) for n in TOOL_NAMES)
     for name in ("voice/gemini_live.py", "voice/desktop_tools.py"):

@@ -156,6 +156,81 @@ def test_no_desktop_tool_declaration_invents_an_executable_name_or_path():
     assert "never pass a guessed" in desc
 
 
+# ---- desktop/trading context tracker (mission item 1: survives normal voice turns) ------------
+
+async def test_opening_tradingview_sets_current_trading_app():
+    t, rt, _ = tools()
+    out = await t.desktop_open_app("tradingview")
+    assert out["status"] == "DONE"
+    assert t.current_trading_app == "TradingView"
+    assert t.last_target_app == "tradingview"
+
+
+async def test_opening_mt5_alias_sets_current_trading_app():
+    t, rt, _ = tools()
+    await t.desktop_open_app("mt5")
+    assert t.current_trading_app == "MetaTrader 5"
+
+
+async def test_opening_an_unrelated_app_does_not_touch_trading_context():
+    t, rt, _ = tools()
+    await t.desktop_open_app("calculator")
+    assert t.current_trading_app is None
+    assert t.last_target_app == "calculator"
+
+
+async def test_failed_open_does_not_update_context():
+    t, rt, _ = tools({("windows_app", "launch"): (ActionStatus.FAILED, {}, "not found: no installed application matches 'x'")})
+    await t.desktop_open_app("nonexistent app")
+    assert t.last_target_app is None
+    assert t.current_trading_app is None
+
+
+async def test_focus_window_also_sets_trading_context():
+    t, rt, _ = tools()
+    await t.desktop_focus_window("TradingView")
+    assert t.current_trading_app == "TradingView"
+
+
+async def test_tradingview_set_symbol_updates_context_and_survives_a_followup():
+    """The acceptance scenario: open TradingView, then a bare "switch to EURUSD" / "make it
+    fifteen minutes" without re-naming the app -- desktop_context() must reflect it afterward."""
+    t, rt, _ = tools({
+        ("tradingview", "set_symbol"): (ActionStatus.SUCCEEDED, {"outcome": "SUCCESS", "symbol": "EURUSD"}, None),
+        ("tradingview", "set_timeframe"): (ActionStatus.SUCCEEDED, {"outcome": "SUCCESS", "symbol": "EURUSD", "timeframe": "15m"}, None),
+        ("desktop_control", "inspect_current_window"): (ActionStatus.SUCCEEDED, {"window": "TradingView"}, None),
+    })
+    await t.desktop_open_app("tradingview")
+    out1 = await t.tradingview_set_symbol("EURUSD")
+    assert out1["status"] == "DONE"
+    assert t.current_symbol == "EURUSD"
+
+    out2 = await t.tradingview_set_timeframe("15m")
+    assert out2["status"] == "DONE"
+    assert t.current_timeframe == "15m"
+
+    ctx = await t.desktop_context()
+    assert ctx["current_trading_app"] == "TradingView"
+    assert ctx["current_symbol"] == "EURUSD"
+    assert ctx["current_timeframe"] == "15m"
+
+
+async def test_tradingview_status_syncs_context_without_changing_anything():
+    t, rt, _ = tools({("tradingview", "status"): (ActionStatus.SUCCEEDED, {"symbol": "XAUUSD", "timeframe": "1h"}, None)})
+    out = await t.tradingview_status()
+    assert out["status"] == "DONE"
+    assert t.current_symbol == "XAUUSD" and t.current_timeframe == "1h"
+    assert rt.requests[0].action == "status"
+
+
+async def test_switching_to_mt5_after_tradingview_changes_current_trading_app():
+    t, rt, _ = tools()
+    await t.desktop_open_app("tradingview")
+    assert t.current_trading_app == "TradingView"
+    await t.desktop_open_app("mt5")
+    assert t.current_trading_app == "MetaTrader 5"
+
+
 def test_ticker_resolution_is_contextual_and_conservative():
     assert resolve_trading_terms("What is happening with The Rusty?") == "What is happening with EURUSD?"
     assert resolve_trading_terms("check the you are USD chart") == "check EURUSD chart"

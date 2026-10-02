@@ -36,6 +36,7 @@ from skills.windows_app import WindowsAppSkill
 if TYPE_CHECKING:
     from actions.frontend_bridge import FrontendCommandBridge
     from assistant.chart_analysis import ChartAnalysisService
+    from assistant.hot_chart_state_store import HotChartStateStore
     from memory.service import MemoryService
     from skill_registry.manager import SkillManager
     from trading.context import TradingContextBuilder
@@ -48,6 +49,7 @@ def build_registry(
     chart_analysis_service: ChartAnalysisService | None = None,
     trading_context_builder: TradingContextBuilder | None = None,
     skill_manager: SkillManager | None = None,
+    hot_chart_store: HotChartStateStore | None = None,
 ) -> dict[str, Skill]:
     """Constructs the skill registry. Pass a live `MemoryService` (and
     optionally its vault path -- defaults to `get_settings().obsidian_vault_path`
@@ -89,6 +91,12 @@ def build_registry(
     from skills.skill_registry_skill import SkillRegistrySkill
 
     skills["skills"] = SkillRegistrySkill(manager=skill_manager)
+
+    if hot_chart_store is not None:
+        from skills.tradingview_control import TradingViewControlSkill
+
+        skills["tradingview"] = TradingViewControlSkill(hot_chart_store)
+
     return skills
 
 

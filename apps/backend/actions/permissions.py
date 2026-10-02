@@ -25,6 +25,12 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         "get_monitors": RiskLevel.READ_ONLY,
         "get_ui_elements": RiskLevel.READ_ONLY,
     },
+    "tradingview": {
+        "status": RiskLevel.READ_ONLY,
+        "focus": RiskLevel.LOW_RISK,
+        "set_symbol": RiskLevel.LOW_RISK,
+        "set_timeframe": RiskLevel.LOW_RISK,
+    },
     "browser": {
         "open_url": RiskLevel.LOW_RISK,
         "search": RiskLevel.LOW_RISK,

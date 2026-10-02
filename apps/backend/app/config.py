@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     monitors_enabled: bool = True
     mt5_enabled: bool = True
     calendar_enabled: bool = True
+    news_enabled: bool = True
+    correlation_enabled: bool = True
 
     # ---- quant_brain (future) ----
     quant_brain_base_url: str | None = None

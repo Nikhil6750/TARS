@@ -15,35 +15,42 @@ from monitors.calendar import (
     CalendarMonitor,
     EconomicCalendarProvider,
     FaireconomyCalendarProvider,
+    NewsProvider,
     ReplayCalendarProvider,
 )
 from monitors.mt5_provider import MT5Provider, MT5State
+from monitors.news import NewsMonitor, RssNewsProvider
+
+DEFAULT_NEWS_FEED_URL = "https://www.fxstreet.com/rss/news"
 
 logger = logging.getLogger("tars.monitors")
 
 
 class MonitorManager:
-    def __init__(self, core, hot_chart_store, *, mt5_enabled=True, calendar_enabled=True,
+    def __init__(self, core, hot_chart_store, *, mt5_enabled=True, calendar_enabled=True, news_enabled=True,
                  symbols: list[str] | None = None, mt5_loader=None,
-                 calendar_provider: EconomicCalendarProvider | None = None):
+                 calendar_provider: EconomicCalendarProvider | None = None,
+                 news_provider: NewsProvider | None = None):
         self.core, self.hot_chart_store = core, hot_chart_store
         self.symbols = symbols or ["EURUSD", "XAUUSD"]
         kwargs = {"module_loader": mt5_loader} if mt5_loader else {}
         self.mt5 = MT5Provider(self.symbols, core.publish, self._mt5_state, **kwargs) if mt5_enabled else None
         self.calendar = CalendarMonitor(calendar_provider or FaireconomyCalendarProvider(), core.publish,
                                         self._calendar_state, self.symbols) if calendar_enabled else None
+        self.news = NewsMonitor(news_provider or RssNewsProvider(DEFAULT_NEWS_FEED_URL), core.publish,
+                                self._news_state, self.symbols) if news_enabled else None
         self.replay_calendar: CalendarMonitor | None = None
         self.replay_quote: dict | None = None
         self._replay_task: asyncio.Task | None = None
 
     async def start(self):
-        for monitor in (self.mt5, self.calendar):
+        for monitor in (self.mt5, self.calendar, self.news):
             if monitor:
                 await monitor.start()
 
     async def stop(self):
         await self.stop_replay()
-        for monitor in (self.mt5, self.calendar):
+        for monitor in (self.mt5, self.calendar, self.news):
             if monitor:
                 await monitor.stop()
 
@@ -54,6 +61,11 @@ class MonitorManager:
 
     async def _calendar_state(self, state: str):
         await self.core.set_provider_status(EventSource.ECONOMIC_CALENDAR, {
+            "CONNECTED": ProviderStatus.CONNECTED, "ERROR": ProviderStatus.ERROR,
+        }.get(state, ProviderStatus.DISCONNECTED))
+
+    async def _news_state(self, state: str):
+        await self.core.set_provider_status(EventSource.NEWS, {
             "CONNECTED": ProviderStatus.CONNECTED, "ERROR": ProviderStatus.ERROR,
         }.get(state, ProviderStatus.DISCONNECTED))
 
@@ -84,8 +96,8 @@ class MonitorManager:
             quote = {**self.replay_quote, "source": "DEMO REPLAY"}
         elif mt5["state"] == MT5State.CONNECTED.value and symbol in mt5["quotes"]:
             quote = {"symbol": symbol, **mt5["quotes"][symbol], "source": "MT5"}
-        return {"mt5": mt5, "tradingview": await self.tradingview_status(), "calendar": cal,
-                "news": {"state": "NOT CONFIGURED", "detail": "No live headline provider configured"},
+        news = self.news.snapshot() if self.news else {"state": "NOT CONFIGURED", "detail": "No live headline provider configured"}
+        return {"mt5": mt5, "tradingview": await self.tradingview_status(), "calendar": cal, "news": news,
                 "quote": quote, "replay": self.replay_quote is not None or self._replay_task is not None and not self._replay_task.done(),
                 "providers": self.core.providers}
 

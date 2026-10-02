@@ -21,13 +21,20 @@ from typing import Any
 from uuid import UUID
 
 from app.action_contracts import ActionRequest, ActionSource, ActionStatus, RiskLevel
+from skills.app_resolver import ALIASES, _normalize
 
 DESKTOP_TOOL_NAMES = {
     "desktop_context", "desktop_resolve_app", "desktop_list_installed_apps", "desktop_open_app",
     "desktop_focus_window", "desktop_close_app", "desktop_list_controls", "desktop_click_control",
     "desktop_type_text", "desktop_scroll", "browser_open_url", "browser_search", "files_list",
     "files_read_open", "run_terminal", "analyze_chart", "confirm_pending_action", "cancel_pending_action",
+    "tradingview_status", "tradingview_set_symbol", "tradingview_set_timeframe",
 }
+
+# Which resolved app aliases count as "the current trading app" for context tracking (item 1 of
+# the trading-desktop mission: current_trading_app must survive normal voice turns so "switch it
+# to EURUSD" after "open TradingView" doesn't need the app named again).
+_TRADING_APPS = {"tradingview": "TradingView", "metatrader 5": "MetaTrader 5"}
 
 _TRADE_WORDS = re.compile(
     r"\b(buy|sell|order|new order|place|modify|close|close all|delete|cancel|trade|deal|market execution|"
@@ -68,6 +75,14 @@ class DesktopTools:
         self.pending: dict | None = None
         self.recent: deque[dict] = deque(maxlen=10)
         self._ctx_cache: tuple[float, dict] | None = None
+        # Session-scoped desktop/trading context (item 1: survives normal voice turns; Gemini's
+        # own conversation memory handles pronoun resolution across turns, this is what backs a
+        # truthful answer when asked outright, and what a same-app follow-up tool call implicitly
+        # targets without needing the app named again).
+        self.last_target_app: str | None = None
+        self.current_trading_app: str | None = None
+        self.current_symbol: str | None = None
+        self.current_timeframe: str | None = None
 
     # ---- core submit ------------------------------------------------------
     async def _submit(self, skill: str, action: str, arguments: dict, *, describe: str) -> dict:
@@ -116,7 +131,16 @@ class DesktopTools:
             active = out
             self._ctx_cache = (now, out)
         return {"active_window": active, "recent_actions": list(self.recent),
+                "last_target_app": self.last_target_app, "current_trading_app": self.current_trading_app,
+                "current_symbol": self.current_symbol, "current_timeframe": self.current_timeframe,
                 "note": "Desktop is inspected only when asked; no continuous screenshots are taken."}
+
+    def _note_target_app(self, target: str) -> None:
+        self.last_target_app = target
+        canonical = ALIASES.get(_normalize(target), _normalize(target))
+        trading_name = _TRADING_APPS.get(canonical)
+        if trading_name:
+            self.current_trading_app = trading_name
 
     async def _active_is_mt5(self) -> bool:
         ctx = await self.desktop_context()
@@ -132,13 +156,48 @@ class DesktopTools:
 
     # ---- low-risk actions -----------------------------------------------------
     async def desktop_open_app(self, target: str = "") -> dict:
-        return await self._submit("windows_app", "launch", {"target": target}, describe=f"open {target}")
+        out = await self._submit("windows_app", "launch", {"target": target}, describe=f"open {target}")
+        if out["status"] == "DONE":
+            self._note_target_app(target)
+        return out
 
     async def desktop_focus_window(self, target: str = "") -> dict:
-        return await self._submit("windows_app", "focus", {"target": target}, describe=f"switch to {target}")
+        out = await self._submit("windows_app", "focus", {"target": target}, describe=f"switch to {target}")
+        if out["status"] == "DONE":
+            self._note_target_app(target)
+        return out
 
     async def desktop_close_app(self, target: str = "") -> dict:
         return await self._submit("windows_app", "close", {"target": target}, describe=f"close {target}")
+
+    # ---- TradingView (item 5/6: read via the existing HotChartState/BackgroundChartWatcher
+    # vision pipeline, write via real keystroke simulation -- see skills/tradingview_control.py) --
+    async def tradingview_status(self) -> dict:
+        out = await self._submit("tradingview", "status", {}, describe="check TradingView")
+        self._sync_tradingview(out)
+        return out
+
+    async def tradingview_set_symbol(self, symbol: str = "") -> dict:
+        out = await self._submit("tradingview", "set_symbol", {"symbol": symbol}, describe=f"switch TradingView to {symbol}")
+        if out["status"] == "DONE":
+            self.current_trading_app = "TradingView"
+        self._sync_tradingview(out)
+        return out
+
+    async def tradingview_set_timeframe(self, timeframe: str = "") -> dict:
+        out = await self._submit("tradingview", "set_timeframe", {"timeframe": timeframe},
+                                 describe=f"set TradingView timeframe to {timeframe}")
+        if out["status"] == "DONE":
+            self.current_trading_app = "TradingView"
+        self._sync_tradingview(out)
+        return out
+
+    def _sync_tradingview(self, out: dict) -> None:
+        data = out.get("data") or {}
+        if data.get("symbol"):
+            self.current_symbol = data["symbol"]
+        if data.get("timeframe"):
+            self.current_timeframe = data["timeframe"]
 
     async def desktop_list_controls(self, target: str = "") -> dict:
         args = {"max_controls": 60, "max_depth": 5}
