@@ -7,6 +7,8 @@ export interface OrbBubble {
   replay?: boolean;
 }
 
+export type ActivityKind = 'acting' | 'done' | 'error' | null;
+
 export interface OrbSnapshot {
   state: OrbState;
   connected: boolean;
@@ -18,6 +20,12 @@ export interface OrbSnapshot {
   confirm: { text: string } | null;
   flashUntil: number;
   lastAlert: OrbBubble | null;
+  /** Truthful, backend-derived description of what TARS is doing right now
+   * (mission: "activity text must be driven by actual execution state", see
+   * voice/activity.py) -- "Opening Chrome…", "Done", "Couldn't find Calculator".
+   * Null when there is nothing to show (collapses the pill back to the orb). */
+  activityText: string | null;
+  activityKind: ActivityKind;
 }
 
 /** Minimal shape of the realtime events the store understands (subset of VoiceEvent). */
@@ -41,6 +49,9 @@ const BUBBLE_MS = 7000;
 const ALERT_PULSE_MS = 1900;
 const ATTENTION_MS = 9000;
 const FLASH_MS = 1100;
+/** How long "Done"/an error line lingers before the pill collapses back to
+ * the orb (mission: "remain expanded briefly (~1.5-2 sec) then collapse"). */
+const ACTIVITY_SETTLE_MS = 1800;
 
 const tail = (text: string, max: number) => (text.length > max ? '…' + text.slice(text.length - max + 1).trimStart() : text);
 
@@ -55,6 +66,9 @@ export class OrbStore {
   private confirm: { text: string } | null = null;
   private flashUntil = 0;
   private lastAlert: OrbBubble | null = null;
+  private activityText = '';
+  private activityKind: ActivityKind = null;
+  private activityAt = 0;
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private snap: OrbSnapshot;
@@ -75,6 +89,10 @@ export class OrbStore {
   private build(): OrbSnapshot {
     const now = this.clock();
     this.inputs.now = now;
+    // "acting" has no timeout -- it stays until the tool actually finishes
+    // (multi-step tasks can run long); "done"/"error" linger briefly then
+    // collapse the pill back to the orb.
+    const activityLive = this.activityKind === 'acting' || (this.activityKind !== null && now - this.activityAt < ACTIVITY_SETTLE_MS);
     return {
       state: deriveOrbState(this.inputs),
       connected: this.inputs.connected,
@@ -86,6 +104,8 @@ export class OrbStore {
       confirm: this.confirm,
       flashUntil: this.flashUntil,
       lastAlert: this.lastAlert,
+      activityText: activityLive ? this.activityText : null,
+      activityKind: activityLive ? this.activityKind : null,
     };
   }
 
@@ -95,7 +115,7 @@ export class OrbStore {
     const same = next.state === prev.state && next.connected === prev.connected && next.provider === prev.provider
       && next.muted === prev.muted && next.transcript === prev.transcript && next.caption === prev.caption
       && next.bubble === prev.bubble && next.confirm === prev.confirm && next.flashUntil === prev.flashUntil
-      && next.lastAlert === prev.lastAlert;
+      && next.lastAlert === prev.lastAlert && next.activityText === prev.activityText && next.activityKind === prev.activityKind;
     if (!same) {
       this.snap = next;
       this.listeners.forEach(fn => fn());
@@ -114,6 +134,7 @@ export class OrbStore {
       this.inputs.alertUntil,
       this.inputs.attentionUntil,
       this.flashUntil,
+      this.activityKind && this.activityKind !== 'acting' && this.activityAt + ACTIVITY_SETTLE_MS,
     ].filter((t): t is number => typeof t === 'number' && t > now);
     if (due.length) this.timer = setTimeout(() => this.commit(), Math.max(30, Math.min(...due) - now + 5));
   }
@@ -157,14 +178,26 @@ export class OrbStore {
         break;
       case 'tool_call':
         this.inputs.tool = ev.name ?? 'tool';
+        // Always overwrites, even mid-settle of a previous "Done"/error --
+        // a multi-step task's next real action replaces that immediately
+        // rather than waiting out the linger (mission: update the pill as
+        // each real action begins, never show a stale state).
+        this.activityText = ev.text ?? '';
+        this.activityKind = 'acting';
+        this.activityAt = now;
         break;
       case 'tool_result':
         this.inputs.tool = null;
         if (ev.status === 'DONE') {
           this.flashUntil = now + FLASH_MS;
+          this.activityKind = 'done';
         } else if (ev.status && ev.status !== 'NEEDS_CONFIRMATION') {
-          this.setBubble({ text: `Couldn't do that (${ev.status.toLowerCase().replace('_', ' ')})`, kind: 'error', at: now });
+          this.activityKind = 'error';
+        } else {
+          this.activityKind = null; // NEEDS_CONFIRMATION: the confirm card speaks for this, not the pill
         }
+        this.activityText = ev.text ?? this.activityText;
+        this.activityAt = now;
         break;
       case 'confirmation_pending':
         this.confirm = { text: ev.text ?? 'Confirm this action?' };
@@ -175,6 +208,8 @@ export class OrbStore {
       case 'interrupt':
         this.inputs.tool = null;
         this.caption = '';
+        this.activityText = '';
+        this.activityKind = null;
         break;
       default:
         return;
@@ -229,6 +264,9 @@ export class OrbStore {
     this.bubble = this.lastAlert = null;
     this.confirm = null;
     this.flashUntil = 0;
+    this.activityText = '';
+    this.activityKind = null;
+    this.activityAt = 0;
     this.commit();
   }
 }

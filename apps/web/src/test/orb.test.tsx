@@ -105,15 +105,29 @@ describe('waveform and transcript are situational', () => {
     expect(screen.queryByTestId('orb-waveform')).toBeNull();
   });
 
-  it('shows a short live transcript then fades it away; long text never becomes a card', () => {
+  it('shows a short live transcript in the pill, then falls back to "Listening…" once it expires', () => {
+    // The pill (mission: a single evolving status element) now carries this
+    // text instead of a separate transcript card -- it never becomes a
+    // permanent card, and it never disappears to nothing while the user is
+    // still speaking (mission: "While listening: show: Listening…").
     vi.useFakeTimers();
     const { store, clock } = liveStore('USER_SPEAKING');
     render(<OrbCompanion store={store} actions={actions()} />);
     act(() => store.apply({ type: 'partial_transcript', text: 'check gold' }));
-    expect(screen.getByTestId('orb-transcript').textContent).toContain('check gold');
+    expect(screen.getByTestId('orb-pill').textContent).toContain('check gold');
     clock.now += 3000;
     act(() => { vi.advanceTimersByTime(3200); });
-    expect(screen.queryByTestId('orb-transcript')).toBeNull();
+    expect(screen.getByTestId('orb-pill').textContent).toContain('Listening…');
+  });
+
+  it('shows "Muted" in the pill while muted, and it is click-through', () => {
+    const { store } = liveStore('IDLE', 'IDLE');
+    render(<OrbCompanion store={store} actions={actions()} />);
+    expect(screen.queryByTestId('orb-pill')).toBeNull();
+    act(() => store.setMuted(true));
+    const pillEl = screen.getByTestId('orb-pill');
+    expect(pillEl.textContent).toContain('Muted');
+    expect(pillEl.className).toContain('pointer-events-none');
   });
 });
 

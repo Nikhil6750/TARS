@@ -71,20 +71,92 @@ describe('orb store consumes real backend events', () => {
     expect(store.getSnapshot().state).toBe('DISCONNECTED');
   });
 
-  it('desktop actions: tool use, success flash, failure bubble, confirmation card', () => {
+  it('desktop actions: tool use, success flash, pill activity text, confirmation card', () => {
     const { t, store } = make();
     store.apply({ type: 'connection', connected: true });
-    store.apply({ type: 'tool_call', name: 'desktop_open_app' });
+    store.apply({ type: 'tool_call', name: 'desktop_open_app', text: 'Opening Calculator…' });
     expect(store.getSnapshot().state).toBe('TOOL_USE');
-    store.apply({ type: 'tool_result', name: 'desktop_open_app', status: 'DONE' });
+    expect(store.getSnapshot().activityText).toBe('Opening Calculator…');
+    expect(store.getSnapshot().activityKind).toBe('acting');
+    store.apply({ type: 'tool_result', name: 'desktop_open_app', status: 'DONE', text: 'Done' });
     expect(store.getSnapshot().flashUntil).toBeGreaterThan(t.now);
-    store.apply({ type: 'tool_call', name: 'desktop_focus_window' });
-    store.apply({ type: 'tool_result', name: 'desktop_focus_window', status: 'NOT_FOUND' });
-    expect(store.getSnapshot().bubble?.kind).toBe('error');
+    expect(store.getSnapshot().activityKind).toBe('done');
+    store.apply({ type: 'tool_call', name: 'desktop_focus_window', text: 'Switching to Calculator…' });
+    store.apply({ type: 'tool_result', name: 'desktop_focus_window', status: 'NOT_FOUND', text: "Couldn't find Calculator" });
+    // The pill carries the error now, truthfully, instead of a separate bubble (mission).
+    expect(store.getSnapshot().activityKind).toBe('error');
+    expect(store.getSnapshot().activityText).toBe("Couldn't find Calculator");
     store.apply({ type: 'confirmation_pending', text: 'Click Save?' });
     expect(store.getSnapshot().confirm?.text).toBe('Click Save?');
     store.apply({ type: 'confirmation_cleared' });
     expect(store.getSnapshot().confirm).toBeNull();
+  });
+
+  it('the activity pill collapses back to idle after the "done"/"error" linger window', () => {
+    vi.useFakeTimers();
+    const { t, store } = make();
+    store.apply({ type: 'connection', connected: true });
+    store.apply({ type: 'tool_call', name: 'desktop_open_app', text: 'Opening Calculator…' });
+    store.apply({ type: 'tool_result', name: 'desktop_open_app', status: 'DONE', text: 'Done' });
+    expect(store.getSnapshot().activityText).toBe('Done');
+    t.now += 2000;
+    vi.advanceTimersByTime(2000);
+    expect(store.getSnapshot().activityText).toBeNull();
+    expect(store.getSnapshot().activityKind).toBeNull();
+  });
+
+  it('a new tool call always replaces a settling "done"/"error", never waits it out', () => {
+    const { store } = make();
+    store.apply({ type: 'connection', connected: true });
+    store.apply({ type: 'tool_call', name: 'web_navigate', text: 'Opening YouTube…' });
+    store.apply({ type: 'tool_result', name: 'web_navigate', status: 'DONE', text: 'Done' });
+    expect(store.getSnapshot().activityText).toBe('Done');
+    store.apply({ type: 'tool_call', name: 'web_type', text: 'Searching for Formula 1 highlights…' });
+    expect(store.getSnapshot().activityText).toBe('Searching for Formula 1 highlights…');
+    expect(store.getSnapshot().activityKind).toBe('acting');
+  });
+
+  it('mission Phase 3 acceptance script, step by step: "open Chrome" through "open Calculator"', () => {
+    // Simulates the exact backend event sequence the live voice acceptance
+    // script produces, since this harness has no microphone/speaker to
+    // actually speak to TARS with -- every text value here is exactly what
+    // voice/activity.py's describe_tool_call/describe_tool_result would
+    // really send for these calls (see test_voice_activity.py).
+    const { store } = make();
+    store.apply({ type: 'connection', connected: true });
+
+    // 1. "TARS, open Chrome."
+    store.apply({ type: 'tool_call', name: 'desktop_open_app', text: 'Opening Chrome…' });
+    expect(store.getSnapshot().activityText).toBe('Opening Chrome…');
+    store.apply({ type: 'tool_result', name: 'desktop_open_app', status: 'DONE', text: 'Done' });
+    expect(store.getSnapshot().activityText).toBe('Done');
+
+    // 2. "Go to YouTube and search for Formula 1 highlights."
+    store.apply({ type: 'tool_call', name: 'web_navigate', text: 'Opening YouTube…' });
+    expect(store.getSnapshot().activityText).toBe('Opening YouTube…'); // replaces "Done" immediately
+    store.apply({ type: 'tool_result', name: 'web_navigate', status: 'DONE', text: 'Done' });
+    store.apply({ type: 'tool_call', name: 'web_type', text: 'Searching for Formula 1 highlights…' });
+    expect(store.getSnapshot().activityText).toBe('Searching for Formula 1 highlights…');
+    store.apply({ type: 'tool_result', name: 'web_type', status: 'DONE', text: 'Done' });
+
+    // 3. "Open the first result."
+    store.apply({ type: 'tool_call', name: 'web_click', text: 'Opening the first result…' });
+    expect(store.getSnapshot().activityText).toBe('Opening the first result…');
+    store.apply({ type: 'tool_result', name: 'web_click', status: 'DONE', text: 'Done' });
+    expect(store.getSnapshot().activityText).toBe('Done');
+
+    // 4. "Open Calculator."
+    store.apply({ type: 'tool_call', name: 'desktop_open_app', text: 'Opening Calculator…' });
+    expect(store.getSnapshot().activityText).toBe('Opening Calculator…');
+    store.apply({ type: 'tool_result', name: 'desktop_open_app', status: 'DONE', text: 'Done' });
+    expect(store.getSnapshot().activityText).toBe('Done');
+
+    // 6. A harmless NOT_FOUND: clear error, no stale card.
+    store.apply({ type: 'tool_call', name: 'desktop_open_app', text: 'Opening Nonexistentapp…' });
+    store.apply({ type: 'tool_result', name: 'desktop_open_app', status: 'NOT_FOUND', text: "Couldn't find Nonexistentapp" });
+    expect(store.getSnapshot().activityKind).toBe('error');
+    expect(store.getSnapshot().activityText).toBe("Couldn't find Nonexistentapp");
+    expect(store.getSnapshot().bubble).toBeNull(); // the pill carries it, not a separate card
   });
 
   it('transcript is temporary and short-lived', () => {

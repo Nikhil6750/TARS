@@ -108,7 +108,7 @@ export const OrbCompanion: React.FC<Props> = ({ store = defaultStore, actions })
       if (el) regions.push([el.offsetLeft, el.offsetTop, el.offsetWidth, el.offsetHeight]);
     }
     void orbNative.setHitRegions(regions);
-  }, [snap.bubble, snap.confirm, snap.transcript, snap.caption, menu]);
+  }, [snap.bubble, snap.confirm, snap.transcript, snap.caption, snap.activityText, menu]);
 
   useEffect(() => {
     if (!menu) return;
@@ -135,6 +135,19 @@ export const OrbCompanion: React.FC<Props> = ({ store = defaultStore, actions })
   const line = snap.transcript || snap.caption;
   const stateLabel = snap.state.toLowerCase().replace(/_/g, ' ');
 
+  // The pill's text/icon: always derived from facts already on the snapshot
+  // (mission: "activity text must be driven by actual execution state"),
+  // never invented here. Precedence: a real tool call/result outranks the
+  // generic voice-lifecycle captions, which outrank nothing else.
+  const pill: { text: string; icon: 'dot' | 'check' | 'error' } | null = snap.activityText
+    ? { text: snap.activityText, icon: snap.activityKind === 'done' ? 'check' : snap.activityKind === 'error' ? 'error' : 'dot' }
+    : snap.muted ? { text: 'Muted', icon: 'dot' }
+    : snap.state === 'LISTENING' ? { text: snap.transcript || 'Listening…', icon: 'dot' }
+    : snap.state === 'USER_SPEAKING' ? { text: snap.transcript || 'Listening…', icon: 'dot' }
+    : snap.state === 'THINKING' ? { text: 'Understanding…', icon: 'dot' }
+    : snap.state === 'ASSISTANT_SPEAKING' ? { text: 'Speaking…', icon: 'dot' }
+    : null;
+
   return (
     <div
       ref={rootRef}
@@ -143,6 +156,7 @@ export const OrbCompanion: React.FC<Props> = ({ store = defaultStore, actions })
       className="relative select-none"
       style={{ width: ORB_WINDOW.w, height: ORB_WINDOW.h, background: 'transparent' }}
     >
+      <style>{'@keyframes tars-pill-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }'}</style>
       {/* The orb: the only permanent element. */}
       <div style={{ position: 'absolute', left: (ORB_WINDOW.w - CANVAS) / 2, top: 0, opacity: snap.muted ? 0.72 : 1, transition: 'opacity 250ms' }}>
         <TarsOrb state={snap.state} flashUntil={snap.flashUntil} size={CANVAS} />
@@ -212,6 +226,32 @@ export const OrbCompanion: React.FC<Props> = ({ store = defaultStore, actions })
             <button type="button" onClick={() => actions.confirm(true)} className="flex-1 rounded-md bg-sky-500/80 hover:bg-sky-400 text-[11px] text-white" style={{ padding: '4px 0' }}>Yes</button>
             <button type="button" onClick={() => actions.confirm(false)} className="flex-1 rounded-md bg-white/10 hover:bg-white/20 text-[11px]" style={{ padding: '4px 0' }}>No</button>
           </div>
+        </div>
+      ) : pill ? (
+        <div
+          data-testid="orb-pill"
+          data-activity-kind={snap.activityKind ?? 'voice'}
+          role="status"
+          aria-live="polite"
+          className="absolute rounded-full backdrop-blur shadow-lg flex items-center gap-2 pointer-events-none"
+          style={{
+            left: 16, top: CANVAS + 6, width: ORB_WINDOW.w - 32, padding: '7px 14px',
+            background: 'rgba(15,23,42,0.82)', border: '1px solid rgba(255,255,255,0.10)',
+            transition: 'opacity 220ms ease, transform 220ms ease',
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              flex: '0 0 auto', width: 7, height: 7, borderRadius: '50%',
+              background: pill.icon === 'error' ? 'rgb(248,113,113)' : pill.icon === 'check' ? 'rgb(74,222,128)' : 'rgb(125,211,252)',
+              boxShadow: pill.icon === 'dot' ? '0 0 6px rgba(125,211,252,0.8)' : 'none',
+              animation: pill.icon === 'dot' ? 'tars-pill-pulse 1.6s ease-in-out infinite' : 'none',
+            }}
+          />
+          <span className="text-[11.5px] leading-snug text-slate-100 line-clamp-2" style={{ flex: '1 1 auto' }}>
+            {pill.icon === 'check' ? '✓ ' : pill.icon === 'error' ? '! ' : ''}{pill.text}
+          </span>
         </div>
       ) : snap.bubble ? (
         <button

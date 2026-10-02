@@ -694,8 +694,12 @@ class GeminiLiveVoiceSession:
     # ---- tools --------------------------------------------------------------
     async def _run_tool(self, call):
         from google.genai import types
+        from voice.activity import describe_tool_call
+
         name, args = call.name, dict(call.args or {})
-        await self.send("tool_call", name=name)
+        # The displayed text is derived from the real call about to run, not
+        # invented by Gemini -- see voice/activity.py's module docstring.
+        await self.send("tool_call", name=name, text=describe_tool_call(name, args))
         if self.state in (VoiceState.LISTENING, VoiceState.USER_SPEAKING):
             await self.transition(VoiceState.THINKING)
         started = time.perf_counter()
@@ -707,8 +711,11 @@ class GeminiLiveVoiceSession:
             self._tool_tasks.pop(call.id, None)
         self.metrics.latest[f"tool_{name}_ms"] = round((time.perf_counter() - started) * 1000, 1)
         # UI-only signals (orb state, confirmation card). They never influence Gemini or the tools.
+        from voice.activity import describe_tool_result
+
         status = result.get("status") if isinstance(result, dict) else None
-        await self.send("tool_result", name=name, status=status or ("FAILED" if "error" in result else "DONE"))
+        final_status = status or ("FAILED" if "error" in result else "DONE")
+        await self.send("tool_result", name=name, status=final_status, text=describe_tool_result(name, args, final_status))
         desktop = getattr(self.tools, "desktop", None)
         if status == "NEEDS_CONFIRMATION" and desktop is not None and desktop.pending:
             await self.send("confirmation_pending", text=desktop.pending["describe"])
