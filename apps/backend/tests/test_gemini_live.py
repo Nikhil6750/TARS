@@ -281,3 +281,73 @@ async def test_ask_claude_with_symbol_builds_one_market_context_evidence_package
     assert "CPI" in captured["text"]
     assert "Research standard" in captured["text"]
     assert "OBSERVATION" in captured["text"] and "HYPOTHESIS" in captured["text"]
+
+
+# ---- mission section 4/5: ask_claude resolves the asset via AssetResolver ----
+
+async def test_ask_claude_resolves_a_spoken_asset_name_not_just_an_exact_ticker():
+    """Universal Market Explainer: "gold" (not just "XAUUSD") must build the
+    same evidence package -- AssetResolver, not Gemini's own hardcoded
+    vocabulary, is the one resolution layer."""
+    class Monitors:
+        news = None
+
+        async def status(self):
+            return {"mt5": {"state": "CONNECTED", "quotes": {"XAUUSD": {"bid": 2650.0, "ask": 2650.5, "spread": 5}},
+                            "positions": [], "floating_pnl": None},
+                    "calendar": {"next": None}}
+
+    class Adapter:
+        async def monitor_chart(self):
+            return {"monitoring": True, "symbol": "XAUUSD", "timeframe": "15m", "freshness": "hot"}
+
+    captured = {}
+
+    class Turns:
+        async def stream_text(self, text, **kw):
+            captured["text"] = text
+            yield SimpleNamespace(type="complete", response=SimpleNamespace(
+                display_text="Gold is quiet.", status=SimpleNamespace(value="completed")))
+
+    tools = TarsTools(SimpleNamespace(monitors=Monitors(), tradingview_adapter=Adapter(), turn_controller=Turns()), "s1")
+    out = await tools.call("ask_claude", {"question": "what's happening", "symbol": "gold"})
+    assert out["answer"] == "Gold is quiet."
+    assert "2650.0" in captured["text"]  # the XAUUSD evidence package was actually built
+
+
+async def test_ask_claude_reports_ambiguous_asset_without_guessing():
+    class Monitors:
+        news = None
+
+        async def status(self):
+            return {"mt5": {"state": "DISCONNECTED", "quotes": {}}, "tradingview": {"state": "NOT FOUND"},
+                    "calendar": {"next": None}}
+
+    class Adapter:
+        async def monitor_chart(self):
+            return {"monitoring": False, "symbol": None, "timeframe": None}
+
+    tools = TarsTools(SimpleNamespace(monitors=Monitors(), tradingview_adapter=Adapter(),
+                                       turn_controller=SimpleNamespace()), "s1")
+    out = await tools.call("ask_claude", {"question": "what's happening", "symbol": "nasdaq"})
+    assert "error" in out
+    assert "nasdaq" in out["error"].lower()
+
+
+async def test_ask_claude_reports_not_found_asset_without_inventing_a_ticker():
+    class Monitors:
+        news = None
+
+        async def status(self):
+            return {"mt5": {"state": "DISCONNECTED", "quotes": {}}, "tradingview": {"state": "NOT FOUND"},
+                    "calendar": {"next": None}}
+
+    class Adapter:
+        async def monitor_chart(self):
+            return {"monitoring": False, "symbol": None, "timeframe": None}
+
+    tools = TarsTools(SimpleNamespace(monitors=Monitors(), tradingview_adapter=Adapter(),
+                                       turn_controller=SimpleNamespace()), "s1")
+    out = await tools.call("ask_claude", {"question": "what's happening", "symbol": "purple elephant currency"})
+    assert "error" in out
+    assert "recognize" in out["error"].lower()

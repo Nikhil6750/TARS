@@ -129,3 +129,28 @@ def test_resolver_works_with_no_monitors_at_all():
     assert out.symbol == "XAUUSD"
     out2 = AssetResolver(None).resolve("nasdaq")
     assert out2.outcome == "AMBIGUOUS"
+
+
+def test_literal_ticker_not_currently_known_still_resolves_via_alias_table():
+    # Mission section 4: "never invent a ticker" -- but a symbol this table
+    # already vouches for (it is some alias's own destination) must still
+    # resolve when typed literally, even if not actively monitored. This is
+    # what lets an existing caller (e.g. Gemini passing "XAUUSD" directly
+    # from its own trading vocabulary) keep working without AssetResolver
+    # rejecting it just because it isn't in the live-monitored set.
+    out = _resolver(symbols=("EURUSD",)).resolve("XAUUSD")
+    assert out == ResolvedAsset("RESOLVED", "XAUUSD", query="XAUUSD")
+
+    out2 = _resolver(symbols=("EURUSD",)).resolve("GBPJPY")
+    assert out2.symbol == "GBPJPY"
+
+    out3 = _resolver(symbols=("EURUSD",)).resolve("NVDA")
+    assert out3.symbol == "NVDA"
+
+
+def test_unknown_uppercase_word_is_still_not_found_never_guessed():
+    # The reverse-alias-value fallback must not turn every capitalized
+    # word into an accepted "ticker" -- only symbols this table already
+    # lists as some alias's destination.
+    out = _resolver().resolve("ZZZFAKE")
+    assert out.outcome == "NOT_FOUND"

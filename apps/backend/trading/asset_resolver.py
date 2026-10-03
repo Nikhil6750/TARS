@@ -75,6 +75,16 @@ def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
+# Every literal symbol this resolver already knows how to reach via some
+# alias (e.g. "gold" -> XAUUSD means XAUUSD itself is also a recognized
+# symbol) -- lets a caller that already resolved a ticker itself (e.g.
+# Gemini's own trading vocabulary passing "XAUUSD" directly) still resolve
+# it here even when it is not in the live `known` set, without treating
+# every random uppercase word as a plausible ticker (mission: "never
+# invent a ticker" -- only symbols this table already vouches for).
+_ALL_ALIAS_VALUES: frozenset[str] = frozenset(c for candidates in _ALIASES.values() for c in candidates)
+
+
 class AssetResolver:
     def __init__(self, monitors=None) -> None:
         self.monitors = monitors
@@ -117,7 +127,11 @@ class AssetResolver:
             return ResolvedAsset("RESOLVED", bare, query=raw)
 
         # 3. known alias (exact phrase, then substring, longest phrase first
-        # so "s p 500" is not shadowed by a shorter accidental match).
+        # so "s p 500" is not shadowed by a shorter accidental match). A
+        # phrase like "wti" is both a spoken alias key AND one of its own
+        # multi-broker candidate values, so this must run BEFORE the plain
+        # alias-value fallback below -- it alone knows how to disambiguate
+        # "WTI" against whichever of USOIL/WTI/CL is actually known.
         if norm in _ALIASES:
             resolved = self._resolve_candidates(_ALIASES[norm], known, raw)
             if resolved is not None:
@@ -127,6 +141,18 @@ class AssetResolver:
                 resolved = self._resolve_candidates(_ALIASES[phrase], known, raw)
                 if resolved is not None:
                     return resolved
+
+        # 3b. not a known symbol and not matched via any alias phrase, but
+        # the literal text is itself a symbol this table already vouches
+        # for as *someone's* alias destination (e.g. "XAUUSD"/"NVDA"/
+        # "GBPJPY" typed directly, as Gemini's own trading vocabulary
+        # already does for majors) -- resolves even when not currently
+        # monitored. Deliberately after the alias-phrase step above, not
+        # before: a multi-candidate case like "wti" must still go through
+        # _resolve_candidates' known-set disambiguation rather than always
+        # resolving to itself.
+        if bare and bare in _ALL_ALIAS_VALUES:
+            return ResolvedAsset("RESOLVED", bare, query=raw)
 
         # 4. currently active trading context (pronoun-only reference).
         if norm in _PRONOUNS:

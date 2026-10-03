@@ -76,11 +76,17 @@ Style
 - Simple, structured questions never need Claude: "what's EURUSD bid/ask", "do I have a position", "what's my
   floating P&L", "what's my equity", "when is CPI", "any major events today", "latest gold news" -- answer those
   directly from get_mt5_state/get_market_context/get_economic_calendar/get_news. Call ask_claude only when the
-  question genuinely needs synthesis across sources (an "analyze"/"outlook"/"what do you think" question), and
-  when it names or clearly implies one instrument, pass that as ask_claude's `symbol` so it gets the real
-  MT5+TradingView+Calendar+News evidence in that one call instead of you gathering it turn by turn.
+  question genuinely needs synthesis across sources (an "analyze"/"outlook"/"what's happening with" question),
+  and when it names or clearly implies one instrument, pass that as ask_claude's `symbol` so it gets the real
+  MT5+TradingView+Calendar+News evidence in that one call instead of you gathering it turn by turn. `symbol` is
+  NOT limited to the FX majors below -- pass the instrument exactly as the user said it (a company name like
+  "Nvidia", "gold", "bitcoin", "the Nasdaq", a ticker, or a cross you don't recognize); TARS's own AssetResolver
+  does the real resolution against what this instance actually supports, and reports back if it's ambiguous (ask
+  the user which one) or not a real instrument (say so plainly) -- never guess a ticker yourself for an asset
+  you don't recognize, just pass the name through as-is and let ask_claude's result tell you.
 
-Trading vocabulary (spoken -> symbol; use for understanding only, never for placing trades)
+Trading vocabulary (spoken -> symbol; the common/fast cases -- understand these yourself, but ask_claude's
+AssetResolver also covers far more: other FX crosses, silver, crypto, major indices, oil, and large-cap equities)
 EURUSD "euro dollar", "euro U.S. dollar"; GBPUSD "pound dollar", "sterling dollar", "cable"; USDJPY "dollar yen";
 EURJPY "euro yen"; GBPJPY "pound yen"; XAUUSD "gold", "gold dollar"; XAGUSD "silver"; BTCUSD "bitcoin dollar";
 ETHUSD "ether", "ethereum dollar"; SPX "S&P 500"; NDX/NASDAQ "Nasdaq"; DXY "U.S. Dollar Index".
@@ -347,6 +353,26 @@ class TarsTools:
         monitors = getattr(self.state, "monitors", None)
         tradingview_adapter = getattr(self.state, "tradingview_adapter", None)
         if symbol.strip() and monitors is not None and tradingview_adapter is not None:
+            # Universal Market Explainer (mission section 4/5): resolve
+            # whatever asset name was given -- a ticker Gemini already
+            # formed itself (e.g. "XAUUSD"), or any spoken name AssetResolver
+            # covers (gold, Nvidia, Nasdaq, bitcoin, ...) -- against this
+            # TARS instance's actually-known symbols before ever building an
+            # evidence package for it. Never guesses: AMBIGUOUS/NOT_FOUND are
+            # reported honestly instead of silently picking one or inventing
+            # a ticker.
+            from trading.asset_resolver import AssetResolver
+
+            desktop = getattr(self, "desktop", None)
+            active_symbol = getattr(desktop, "current_symbol", None) if desktop else None
+            resolved = AssetResolver(monitors).resolve(symbol, active_symbol=active_symbol)
+            if resolved.outcome == "AMBIGUOUS":
+                names = ", ".join(resolved.candidates) or "more than one instrument"
+                return {"error": f"'{symbol}' matches more than one instrument ({names}) -- ask which one."}
+            if resolved.outcome == "NOT_FOUND":
+                return {"error": f"'{symbol}' isn't a tradable instrument TARS recognizes."}
+            symbol = resolved.symbol or symbol
+
             # A named symbol means this is trading analysis: build the one
             # compact MT5+TradingView+Calendar+News evidence package
             # (mission section 8/10) instead of the generic status line --
