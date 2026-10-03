@@ -161,6 +161,19 @@ Browser agent (web_* tools -- a real, separate Chrome, not TARS's own panel)
   deleting data, changing credentials) the same confirmation rule applies -- these report NEEDS_CONFIRMATION/
   CONFIRM_REQUIRED and must not be assumed pre-approved.
 
+Background watching and daily brief
+- "Watch gold" / "watch Bitcoin" / "watch this for me" -> watch_market. Omit `asset` for "watch this" to reuse
+  the current instrument in context (same follow-up logic as analyze_market) -- never guess an instrument if
+  there is no current one, ask instead. This is different from watch_this_chart: watch_market adds the
+  instrument to TARS's persistent background watchlist (proactive alerts later, across restarts), it never
+  touches TradingView. "Stop watching gold" -> unwatch_market. "What are you watching?" -> list_watched_markets.
+  "Pause market monitoring" / "resume monitoring" -> pause_market_watching / resume_market_watching (pausing
+  keeps the watchlist, it just stops proactive alerts). A watched instrument may later raise a proactive alert
+  on its own (get_recent_events shows these) -- TARS only escalates to deep reasoning for a genuinely
+  correlated, multi-factor story, never for an ordinary single price tick or a routine calendar reminder.
+- "Give me today's market brief" / "give me today's briefing again" -> get_daily_market_brief. Works any time,
+  regardless of whether TARS already sent one automatically today.
+
 Hard limits
 - Live trading is read-only. You cannot and must never place, modify, close or cancel orders or positions, and must
   not click order buttons in MetaTrader. If asked, say trading stays in the user's hands.
@@ -199,6 +212,15 @@ def _tool_declarations():
              parameters=obj(asset=("STRING", "Optional instrument to filter to; omit to use the current asset in context, or for general market news if there is none"))),
         decl(name="explain_move", description="'Why did that move?' / 'what caused that drop/spike?' / 'what caused that candle?' -- bounded historical search (+/-15 then 30 then 60 minutes around now) across persisted calendar/news/price events for the current asset, with an honest uncertainty-aware answer (never a bare causal claim the evidence doesn't support).",
              parameters=obj(question=("STRING", "Optional: the specific move/question being asked about"))),
+        decl(name="watch_market", description="'Watch gold.' / 'watch this for me.' / 'watch Bitcoin.' Adds an instrument to TARS's persistent background watchlist, which raises a proactive alert later if something significant happens -- never touches TradingView itself. Omit `asset` for 'watch this' to reuse the current instrument in context.",
+             parameters=obj(asset=("STRING", "The instrument as the user said it -- company name, 'gold', 'bitcoin', a ticker. Omit to mean 'the current asset'."))),
+        decl(name="unwatch_market", description="'Stop watching gold.' / 'stop watching Bitcoin.' Removes an instrument from the background watchlist.",
+             parameters=obj(asset=("STRING", "The instrument as the user said it, or omit to mean 'the current asset'."))),
+        decl(name="list_watched_markets", description="'What are you watching?' -- the current persistent watchlist and whether background watching is paused."),
+        decl(name="pause_market_watching", description="'Pause market monitoring.' Stops the background watcher's proactive alerts without deleting the watchlist."),
+        decl(name="resume_market_watching", description="'Resume monitoring.' Resumes background watching after a pause."),
+        decl(name="get_watcher_status", description="Full background watcher status: paused or active, which instruments are watched, basic activity counters."),
+        decl(name="get_daily_market_brief", description="'Give me today's market brief.' / 'give me today's briefing again.' Always returns a fresh brief when explicitly asked, regardless of whether one was already sent automatically today."),
         decl(name="desktop_context", description="What is on the desktop right now: active application/window and the recent desktop actions TARS took. Use for 'what am I looking at', 'which app is open'."),
         decl(name="desktop_resolve_app", description="Look up whether an application name resolves to a specific installed Windows application, without opening it. Use this if you are unsure an app is installed, or to check before telling the user something is or isn't available.",
              parameters=obj(target=("STRING", "The app's plain spoken name, e.g. clock, calculator, tradingview, mt5"))),
@@ -270,7 +292,10 @@ def _tool_declarations():
 
 BASE_TOOL_NAMES = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
                    "get_economic_calendar", "get_news", "ask_claude",
-                   "analyze_market", "get_today_market_news", "explain_move"}
+                   "analyze_market", "get_today_market_news", "explain_move",
+                   "watch_market", "unwatch_market", "list_watched_markets",
+                   "pause_market_watching", "resume_market_watching",
+                   "get_watcher_status", "get_daily_market_brief"}
 TOOL_NAMES = BASE_TOOL_NAMES | DESKTOP_TOOL_NAMES
 
 
@@ -558,6 +583,97 @@ class TarsTools:
                     if event.response.status.value == "failed":
                         return {"error": "Could not work out a cause right now"}
         return {"answer": answer[:2500], "symbol": symbol, "window_minutes": window_minutes, "events_found": len(events)}
+
+    # ---- TARS Watcher Intelligence: watchlist/daily brief (all deterministic, no LLM call) ----
+
+    async def watch_market(self, asset: str = "") -> dict:
+        """"Watch gold." / "watch this for me." Resolves the asset (any
+        instrument, same AssetResolver as analyze_market) and adds it to
+        TARS's persistent background watchlist -- never TradingView itself,
+        this never touches the chart."""
+        service = getattr(self.state, "market_watch_service", None)
+        if service is None:
+            return {"error": "Market watching isn't available right now."}
+        query = asset.strip() or self.desktop.current_symbol or ""
+        if not query:
+            return {"error": "Which instrument? There's no current asset in context yet."}
+        result = await service.watch(query, active_symbol=self.desktop.current_symbol)
+        resolved = result if not isinstance(result, tuple) else result[0]
+        if resolved.outcome == "AMBIGUOUS":
+            names = ", ".join(resolved.candidates) or "more than one instrument"
+            return {"status": "AMBIGUOUS", "error": f"'{query}' matches more than one instrument ({names}) -- ask which one."}
+        if resolved.outcome == "NOT_FOUND":
+            return {"status": "NOT_FOUND", "error": f"'{query}' isn't a tradable instrument TARS recognizes."}
+        _resolved, entry = result
+        self.desktop.current_symbol = entry.canonical_symbol
+        return {"status": "WATCHING", "symbol": entry.canonical_symbol}
+
+    async def unwatch_market(self, asset: str = "") -> dict:
+        """"Stop watching gold." Removes it from the persistent watchlist."""
+        service = getattr(self.state, "market_watch_service", None)
+        if service is None:
+            return {"error": "Market watching isn't available right now."}
+        query = asset.strip() or self.desktop.current_symbol or ""
+        if not query:
+            return {"error": "Which instrument? There's no current asset in context yet."}
+        result = await service.unwatch(query, active_symbol=self.desktop.current_symbol)
+        resolved = result if not isinstance(result, tuple) else result[0]
+        if resolved.outcome == "AMBIGUOUS":
+            names = ", ".join(resolved.candidates) or "more than one instrument"
+            return {"status": "AMBIGUOUS", "error": f"'{query}' matches more than one instrument ({names}) -- ask which one."}
+        if resolved.outcome == "NOT_FOUND":
+            return {"status": "NOT_FOUND", "error": f"'{query}' isn't a tradable instrument TARS recognizes."}
+        _resolved, removed = result
+        return {"status": "STOPPED" if removed else "NOT_WATCHED", "symbol": resolved.symbol}
+
+    async def list_watched_markets(self) -> dict:
+        """"What are you watching?" -- the persisted watchlist, and whether
+        watching is currently paused."""
+        service = getattr(self.state, "market_watch_service", None)
+        if service is None:
+            return {"watched": [], "detail": "market watching isn't available"}
+        status = await service.status()
+        return status
+
+    async def pause_market_watching(self) -> dict:
+        """"Pause market monitoring." Stops the watcher's own alerting --
+        the watchlist itself is kept, nothing is deleted."""
+        service = getattr(self.state, "market_watch_service", None)
+        if service is None:
+            return {"error": "Market watching isn't available right now."}
+        await service.pause()
+        return {"status": "PAUSED"}
+
+    async def resume_market_watching(self) -> dict:
+        """"Resume monitoring."""
+        service = getattr(self.state, "market_watch_service", None)
+        if service is None:
+            return {"error": "Market watching isn't available right now."}
+        await service.resume()
+        return {"status": "RESUMED"}
+
+    async def get_watcher_status(self) -> dict:
+        """Full watcher status: paused/active, watched symbols, and basic
+        activity counters."""
+        service = getattr(self.state, "market_watch_service", None)
+        if service is None:
+            return {"available": False}
+        return {"available": True, **await service.status()}
+
+    async def get_daily_market_brief(self) -> dict:
+        """"Give me today's market brief." / "Give me today's briefing
+        again." Every call through this voice tool is an explicit request,
+        so it always regenerates regardless of whether one was already
+        auto-sent today (mission: an explicit request must always work
+        regardless of the once-per-day dedupe); the automatic once-per-day
+        brief is a separate, non-voice-tool path (DailyMarketBriefService.
+        maybe_generate_on_startup, called once per backend startup)."""
+        service = getattr(self.state, "daily_brief_service", None)
+        if service is None:
+            return {"error": "The daily brief isn't available right now."}
+        result = await service.generate(force=True)
+        return {"status": result.status, "date": result.date, "brief": result.text,
+                "degraded_sources": list(result.degraded_sources)}
 
 
 class GeminiLiveVoiceSession:

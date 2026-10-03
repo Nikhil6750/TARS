@@ -220,7 +220,10 @@ def test_tools_are_bounded_and_none_can_trade():
 
     base = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
             "get_economic_calendar", "get_news", "ask_claude",
-            "analyze_market", "get_today_market_news", "explain_move"}
+            "analyze_market", "get_today_market_news", "explain_move",
+            "watch_market", "unwatch_market", "list_watched_markets",
+            "pause_market_watching", "resume_market_watching",
+            "get_watcher_status", "get_daily_market_brief"}
     assert TOOL_NAMES == base | DESKTOP_TOOL_NAMES
     assert not any(re.search(r"trade|order|buy|sell", n) for n in TOOL_NAMES)
     for name in ("voice/gemini_live.py", "voice/desktop_tools.py"):
@@ -520,3 +523,155 @@ async def test_explain_move_stops_at_the_first_window_with_evidence():
     out = await tools.call("explain_move", {})
     assert out["window_minutes"] == 15
     assert out["events_found"] == 1
+
+
+# ---- TARS Watcher Intelligence: watch/unwatch/list/pause/resume/brief tools ----
+
+class _FakeWatchService:
+    """Mirrors MarketWatchService's real watch()/unwatch() contract: a bare
+    ResolvedAsset when not RESOLVED, a (resolved, entry_or_removed) tuple
+    when it is -- see trading/market_watch_service.py."""
+
+    def __init__(self):
+        self.watched: list[str] = []
+        self.paused = False
+
+    def _resolve(self, asset):
+        from trading.asset_resolver import ResolvedAsset
+
+        norm = asset.strip().lower()
+        if norm in ("nasdaq",):
+            return ResolvedAsset("AMBIGUOUS", candidates=("US100", "NAS100"), query=asset)
+        if norm in ("gold", "xauusd"):
+            return ResolvedAsset("RESOLVED", "XAUUSD", query=asset)
+        if norm in ("eurusd",):
+            return ResolvedAsset("RESOLVED", "EURUSD", query=asset)
+        return ResolvedAsset("NOT_FOUND", query=asset)
+
+    async def watch(self, asset, *, active_symbol=None):
+        from trading.asset_resolver import ResolvedAsset
+        from trading.watchlist import WatchEntry
+
+        query = asset if asset.strip().lower() not in ("it", "this") else (active_symbol or "")
+        resolved = self._resolve(query) if query else ResolvedAsset("NOT_FOUND", query=asset)
+        if resolved.outcome != "RESOLVED":
+            return resolved
+        self.watched.append(resolved.symbol)
+        return resolved, WatchEntry(asset=asset, canonical_symbol=resolved.symbol)
+
+    async def unwatch(self, asset, *, active_symbol=None):
+        resolved = self._resolve(asset)
+        if resolved.outcome != "RESOLVED":
+            return resolved
+        removed = resolved.symbol in self.watched
+        if removed:
+            self.watched.remove(resolved.symbol)
+        return resolved, removed
+
+    async def pause(self):
+        self.paused = True
+
+    async def resume(self):
+        self.paused = False
+
+    async def status(self):
+        return {"paused": self.paused, "watched": list(self.watched), "cycles": 3,
+                "events_considered": 1, "alerts_published": 0}
+
+
+class _FakeBriefService:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate(self, *, force=True):
+        self.calls += 1
+        from trading.daily_brief import DailyBriefResult
+
+        return DailyBriefResult(status="GENERATED", date="2026-03-05", text="Quiet overnight session.",
+                                provider="fake", degraded_sources=())
+
+
+async def test_watch_market_resolves_and_adds_to_the_watchlist():
+    service = _FakeWatchService()
+    tools = TarsTools(SimpleNamespace(market_watch_service=service), "s1")
+    out = await tools.call("watch_market", {"asset": "gold"})
+    assert out["status"] == "WATCHING"
+    assert out["symbol"] == "XAUUSD"
+    assert service.watched == ["XAUUSD"]
+
+
+async def test_watch_market_ambiguous_asset_never_adds_a_watch_entry():
+    service = _FakeWatchService()
+    tools = TarsTools(SimpleNamespace(market_watch_service=service), "s1")
+    out = await tools.call("watch_market", {"asset": "nasdaq"})
+    assert out["status"] == "AMBIGUOUS"
+    assert service.watched == []
+
+
+async def test_watch_this_uses_the_current_asset_in_conversation_context():
+    service = _FakeWatchService()
+    tools = TarsTools(SimpleNamespace(market_watch_service=service), "s1")
+    tools.desktop.current_symbol = "EURUSD"
+    out = await tools.call("watch_market", {"asset": "this"})
+    assert out["status"] == "WATCHING"
+    assert out["symbol"] == "EURUSD"
+
+
+async def test_watch_this_without_any_current_asset_asks_instead_of_guessing():
+    service = _FakeWatchService()
+    tools = TarsTools(SimpleNamespace(market_watch_service=service), "s1")
+    out = await tools.call("watch_market", {"asset": "this"})
+    assert "error" in out
+    assert service.watched == []
+
+
+async def test_unwatch_market_removes_a_watched_symbol():
+    service = _FakeWatchService()
+    tools = TarsTools(SimpleNamespace(market_watch_service=service), "s1")
+    await tools.call("watch_market", {"asset": "gold"})
+    out = await tools.call("unwatch_market", {"asset": "gold"})
+    assert out["status"] == "STOPPED"
+    assert service.watched == []
+
+
+async def test_list_watched_markets_reports_the_real_watchlist_and_pause_state():
+    service = _FakeWatchService()
+    tools = TarsTools(SimpleNamespace(market_watch_service=service), "s1")
+    await tools.call("watch_market", {"asset": "gold"})
+    out = await tools.call("list_watched_markets", {})
+    assert out["watched"] == ["XAUUSD"]
+    assert out["paused"] is False
+
+
+async def test_pause_and_resume_market_watching_round_trip():
+    service = _FakeWatchService()
+    tools = TarsTools(SimpleNamespace(market_watch_service=service), "s1")
+    out = await tools.call("pause_market_watching", {})
+    assert out["status"] == "PAUSED"
+    assert service.paused is True
+    out = await tools.call("resume_market_watching", {})
+    assert out["status"] == "RESUMED"
+    assert service.paused is False
+
+
+async def test_get_watcher_status_reports_availability_and_counters():
+    service = _FakeWatchService()
+    tools = TarsTools(SimpleNamespace(market_watch_service=service), "s1")
+    out = await tools.call("get_watcher_status", {})
+    assert out["available"] is True
+    assert out["cycles"] == 3
+
+
+async def test_get_watcher_status_when_unavailable_is_reported_honestly():
+    tools = TarsTools(SimpleNamespace(market_watch_service=None), "s1")
+    out = await tools.call("get_watcher_status", {})
+    assert out["available"] is False
+
+
+async def test_get_daily_market_brief_always_regenerates_on_explicit_request():
+    service = _FakeBriefService()
+    tools = TarsTools(SimpleNamespace(daily_brief_service=service), "s1")
+    out = await tools.call("get_daily_market_brief", {})
+    assert out["status"] == "GENERATED"
+    assert out["brief"] == "Quiet overnight session."
+    assert service.calls == 1

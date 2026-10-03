@@ -396,14 +396,37 @@ async def lifespan(app: FastAPI):
 
     correlation_engine = CorrelationEngine(realtime_events, monitors)
     app.state.correlation_engine = correlation_engine
+
+    from storage.app_state import AppStateStore
+    from trading.daily_brief import DailyMarketBriefService
+    from trading.market_watch_service import MarketWatchService
+    from trading.watchlist import WatchlistStore
+
+    app_state_store = AppStateStore(db.conn)
+    app.state.app_state_store = app_state_store
+    watchlist_store = WatchlistStore(app_state_store)
+    app.state.watchlist_store = watchlist_store
+    market_watch_service = MarketWatchService(
+        watchlist_store, AssetResolver(monitors), monitors, realtime_events, realtime_events.gate,
+        app_state_store=app_state_store,
+    )
+    app.state.market_watch_service = market_watch_service
+    daily_brief_service = DailyMarketBriefService(
+        app_state_store, watchlist_store, monitors, app.state.assistant_provider
+    )
+    app.state.daily_brief_service = daily_brief_service
+
     if settings.monitors_enabled and os.environ.get("TARS_DISABLE_MONITORS") != "1":
         await monitors.start()
         if settings.correlation_enabled:
             correlation_engine.start()
+        await market_watch_service.start()
+        asyncio.create_task(daily_brief_service.maybe_generate_on_startup())
 
     try:
         yield
     finally:
+        await market_watch_service.stop()
         correlation_engine.stop()
         await monitors.stop()
         await realtime_events.close()
