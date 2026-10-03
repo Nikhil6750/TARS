@@ -116,6 +116,31 @@ class RealtimeEventCore:
             self.recent.append({"event": json.loads(row[0]), "decision": row[1]})
         self._worker = asyncio.create_task(self._dispatch())
 
+    async def get_events_between(self, start: datetime, end: datetime, *, symbol: str | None = None,
+                                  limit: int = 50) -> list[dict]:
+        """Historical query for the move/catalyst explainer (mission
+        section 11/20D): events accepted (receiver clock, `accepted_at` --
+        not the source's own `timestamp`) between `start` and `end`,
+        optionally filtered to one symbol. Reads the durable table
+        directly, not `self.recent` (bounded to the last 200, in-memory
+        only, lost across a restart) -- a "why did that move" question
+        about something before a restart must still work."""
+        cursor = await self.conn.execute(
+            "SELECT event, decision, accepted_at FROM realtime_events "
+            "WHERE accepted_at >= ? AND accepted_at <= ? ORDER BY accepted_at ASC",
+            (start.isoformat(), end.isoformat()),
+        )
+        rows = await cursor.fetchall()
+        results = []
+        for row in rows:
+            event = json.loads(row[0])
+            if symbol and (event.get("symbol") or "").upper() != symbol.upper():
+                continue
+            results.append({"event": event, "decision": row[1], "accepted_at": row[2]})
+            if len(results) >= limit:
+                break
+        return results
+
     def subscribe(self, callback):
         self.subscribers.append(callback)
         return lambda: self.subscribers.remove(callback) if callback in self.subscribers else None
