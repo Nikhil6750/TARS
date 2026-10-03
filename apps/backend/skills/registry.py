@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from app.action_contracts import Skill
 from skills.browser import BrowserSkill
+from skills.calculator import CalculatorSkill
 from skills.desktop_control import DesktopControlSkill
 from skills.filesystem import FilesystemSkill
 from skills.terminal import TerminalSkill
@@ -71,6 +72,7 @@ def build_registry(
         "terminal": TerminalSkill(),
         "desktop_control": DesktopControlSkill(),
         "web": WebBrowserSkill(),
+        "calculator": CalculatorSkill(),
     }
     if memory_service is not None:
         from skills.obsidian import ObsidianSkill
