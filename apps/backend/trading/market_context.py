@@ -27,10 +27,17 @@ class MarketContext:
     calendar: list[dict[str, Any]]
     news: list[dict[str, Any]]
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    # True when TradingViewAdapter.monitor_chart() had to pick between a
+    # structured/control-verified symbol or timeframe and a disagreeing
+    # vision read (see mission section 2 -- the verified value always wins
+    # and is what's already in `timeframe`/`tradingview`; this flag only
+    # makes that substitution visible rather than silent).
+    vision_identity_conflict: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {"symbol": self.symbol, "timeframe": self.timeframe, "tradingview": self.tradingview,
-                "mt5": self.mt5, "calendar": self.calendar, "news": self.news, "generated_at": self.generated_at}
+                "mt5": self.mt5, "calendar": self.calendar, "news": self.news, "generated_at": self.generated_at,
+                "vision_identity_conflict": self.vision_identity_conflict}
 
     def as_evidence_text(self) -> str:
         """Compact plain-text evidence package for one Claude call -- every
@@ -43,6 +50,12 @@ class MarketContext:
                         f"{tv.get('timeframe') or ''}, chart freshness {tv.get('freshness', 'unknown')}.")
         else:
             lines.append("TradingView: not currently monitored (no fresh chart read available).")
+        if self.vision_identity_conflict:
+            lines.append(
+                "Note: the chart's own vision read of symbol/timeframe disagreed with TARS's "
+                "verified, deterministically-set value above -- the verified value is used here; "
+                "do not substitute a different reading of the chart image."
+            )
 
         mt5 = self.mt5
         if mt5.get("state") == "CONNECTED":
@@ -105,4 +118,5 @@ async def build_market_context(monitors, tradingview_adapter, symbol: str) -> Ma
     ]
 
     return MarketContext(symbol=symbol, timeframe=tv_block.get("timeframe"),
-                         tradingview=tv_block, mt5=mt5_block, calendar=calendar_events, news=news_block)
+                         tradingview=tv_block, mt5=mt5_block, calendar=calendar_events, news=news_block,
+                         vision_identity_conflict=bool(tv_block.get("vision_identity_conflict")))

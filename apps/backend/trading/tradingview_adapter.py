@@ -87,15 +87,44 @@ class TradingViewAdapter:
     async def monitor_chart(self) -> dict[str, Any]:
         """Whether the native background watcher currently has a fresh read
         of a TradingView chart -- never starts one (that is the Rust-side
-        watcher's job, wired independently; see assistant/chart_watch.py)."""
+        watcher's job, wired independently; see assistant/chart_watch.py).
+
+        Identity priority (mission section 2 -- live testing showed vision
+        misreading a tiny "5m" glyph as "6m" while TradingView was
+        verifiably, deterministically set to 5m): per field, a symbol or
+        timeframe TradingViewControlSkill itself just set and verified
+        (`verified_identity()`) always wins over this vision-derived read.
+        Vision is used only for whichever field has no verified value yet
+        (e.g. the user switched symbol by hand, never through TARS).
+        `identity_source` and `vision_identity_conflict` make the
+        substitution visible to callers rather than a silent swap."""
         latest = await self._store.get_latest()
+        verified = self._tv.verified_identity()
+
+        vision_symbol = latest.identity.symbol if latest else None
+        vision_timeframe = latest.identity.timeframe if latest else None
+
+        symbol = verified["symbol"] or vision_symbol
+        timeframe = verified["timeframe"] or vision_timeframe
+        conflict = bool(
+            (verified["symbol"] and vision_symbol and verified["symbol"].upper() != vision_symbol.upper())
+            or (verified["timeframe"] and vision_timeframe and verified["timeframe"] != vision_timeframe)
+        )
+        identity_source = "verified" if (verified["symbol"] or verified["timeframe"]) else "vision"
+
         if latest is None:
-            return {"monitoring": False, "state": "NOT FOUND", "detail": "No chart window observed yet",
-                    "symbol": None, "timeframe": None}
+            return {
+                "monitoring": False, "state": "NOT FOUND", "detail": "No chart window observed yet",
+                "symbol": symbol, "timeframe": timeframe,
+                "identity_source": identity_source, "vision_identity_conflict": conflict,
+            }
         freshness = latest.freshness().value
         age_s = round(latest.age_ms() / 1000)
-        label = f"{latest.identity.symbol or 'chart'} {latest.identity.timeframe or ''}".strip()
+        label = f"{symbol or 'chart'} {timeframe or ''}".strip()
         monitoring = freshness in ("hot", "warm")
-        return {"monitoring": monitoring, "state": "MONITORING" if monitoring else "NOT FOUND",
-                "detail": f"{label}, analysed {age_s}s ago", "freshness": freshness,
-                "symbol": latest.identity.symbol, "timeframe": latest.identity.timeframe}
+        return {
+            "monitoring": monitoring, "state": "MONITORING" if monitoring else "NOT FOUND",
+            "detail": f"{label}, analysed {age_s}s ago", "freshness": freshness,
+            "symbol": symbol, "timeframe": timeframe,
+            "identity_source": identity_source, "vision_identity_conflict": conflict,
+        }

@@ -25,10 +25,11 @@ class _FakeSkill:
     ActionResult -- the same shape the adapter's `_call` expects back from
     any real skill's `execute()`."""
 
-    def __init__(self, name: str, result: ActionResult | None = None):
+    def __init__(self, name: str, result: ActionResult | None = None, *, verified=None):
         self.name = name
         self.calls: list = []
         self._result = result
+        self._verified = verified or {"symbol": None, "timeframe": None, "verified_at": None}
 
     async def execute(self, request):
         self.calls.append(request)
@@ -36,6 +37,9 @@ class _FakeSkill:
             request_id=request.id, status=ActionStatus.SUCCEEDED, risk_level=RiskLevel.READ_ONLY,
             summary="ok", data={}, started_at=datetime.now(UTC),
         )
+
+    def verified_identity(self):
+        return self._verified
 
 
 class _FakeStore:
@@ -61,8 +65,8 @@ def _state(symbol="EURUSD", timeframe="15m", age_s=5) -> HotChartState:
     )
 
 
-def _adapter(tv_result=None, trading_result=None, store=None) -> tuple[TradingViewAdapter, _FakeSkill, _FakeSkill]:
-    tv = _FakeSkill("tradingview", tv_result)
+def _adapter(tv_result=None, trading_result=None, store=None, tv_verified=None) -> tuple[TradingViewAdapter, _FakeSkill, _FakeSkill]:
+    tv = _FakeSkill("tradingview", tv_result, verified=tv_verified)
     trading = _FakeSkill("trading", trading_result)
     adapter = TradingViewAdapter(tv, trading, store or _FakeStore())
     return adapter, tv, trading
@@ -136,7 +140,8 @@ async def test_monitor_chart_reports_not_found_when_nothing_observed():
     adapter, _, _ = _adapter(store=_FakeStore(None))
     out = await adapter.monitor_chart()
     assert out == {"monitoring": False, "state": "NOT FOUND", "detail": "No chart window observed yet",
-                   "symbol": None, "timeframe": None}
+                   "symbol": None, "timeframe": None,
+                   "identity_source": "vision", "vision_identity_conflict": False}
 
 
 async def test_monitor_chart_reports_monitoring_when_fresh():
@@ -154,3 +159,46 @@ async def test_monitor_chart_reports_not_found_when_stale():
     assert out["monitoring"] is False
     assert out["state"] == "NOT FOUND"
     assert out["freshness"] == "stale"
+
+
+# ---- mission section 2: verified structured identity outranks vision ----
+
+async def test_monitor_chart_prefers_verified_timeframe_over_disagreeing_vision():
+    """The exact live scenario: TradingView was deterministically set to
+    5m and verified, but the background vision watcher's chart read says
+    6m (a misread tiny glyph). The verified value must win, and the
+    disagreement must be surfaced, never silently swapped."""
+    adapter, _, _ = _adapter(
+        store=_FakeStore(_state(symbol="XAUUSD", timeframe="6m", age_s=3)),
+        tv_verified={"symbol": "XAUUSD", "timeframe": "5m", "verified_at": "2026-01-01T00:00:00Z"},
+    )
+    out = await adapter.monitor_chart()
+    assert out["symbol"] == "XAUUSD"
+    assert out["timeframe"] == "5m"
+    assert out["identity_source"] == "verified"
+    assert out["vision_identity_conflict"] is True
+
+
+async def test_monitor_chart_uses_vision_for_a_field_with_no_verified_value():
+    """Only the timeframe was ever deterministically verified -- the
+    symbol field has no verified value, so it falls through to vision."""
+    adapter, _, _ = _adapter(
+        store=_FakeStore(_state(symbol="EURUSD", timeframe="1h", age_s=3)),
+        tv_verified={"symbol": None, "timeframe": "1h", "verified_at": "2026-01-01T00:00:00Z"},
+    )
+    out = await adapter.monitor_chart()
+    assert out["symbol"] == "EURUSD"  # from vision, no verified symbol to prefer
+    assert out["timeframe"] == "1h"  # verified matches vision -- no conflict
+    assert out["vision_identity_conflict"] is False
+
+
+async def test_monitor_chart_reports_verified_identity_even_with_no_vision_at_all():
+    adapter, _, _ = _adapter(
+        store=_FakeStore(None),
+        tv_verified={"symbol": "GBPUSD", "timeframe": "15m", "verified_at": "2026-01-01T00:00:00Z"},
+    )
+    out = await adapter.monitor_chart()
+    assert out["symbol"] == "GBPUSD"
+    assert out["timeframe"] == "15m"
+    assert out["identity_source"] == "verified"
+    assert out["vision_identity_conflict"] is False

@@ -59,6 +59,13 @@ logger = logging.getLogger("tars.tradingview")
 _user32 = ctypes.windll.user32
 _TITLE_VERIFY_TIMEOUT = 6.0
 _VISION_VERIFY_TIMEOUT = 45.0  # generous: real vision analysis measured ~15-31s (hot_chart_state.py)
+# Mission section 3 (hardened symbol/timeframe switching): one initial
+# attempt plus up to two retries -- live testing found the keystroke
+# simulation occasionally typing into the wrong control state (a stale
+# autocomplete popup, a half-focused search box), landing on a garbled or
+# unrelated symbol. A bounded retry (re-focus, re-click, re-type) resolves
+# that without ever reporting SUCCESS on an unverified guess.
+_MAX_ATTEMPTS = 3
 
 
 def _force_foreground(hwnd: int) -> None:
@@ -127,6 +134,35 @@ class TradingViewControlSkill(BaseSkill):
 
     def __init__(self, hot_chart_store) -> None:
         self._store = hot_chart_store
+        # Structured/control-verified identity (mission section 2: vision
+        # must never be the authoritative source for symbol/timeframe when
+        # TARS itself just deterministically set and verified one). Set
+        # only on a confirmed _change() success -- the exact value TARS
+        # asked for and actually confirmed, never a vision guess. Each
+        # field is independent: changing the symbol does not clear a
+        # previously-verified timeframe, and vice versa. Session-scoped
+        # (in-memory, per backend process) -- a restart returns to "no
+        # verified identity yet," correctly falling back to vision.
+        self._verified_symbol: str | None = None
+        self._verified_timeframe: str | None = None
+        self._verified_at: str | None = None
+
+    def verified_identity(self) -> dict[str, str | None]:
+        """The last deterministically-set-and-confirmed symbol/timeframe,
+        if any -- see TradingViewAdapter.monitor_chart() for how this
+        outranks a HotChartState vision read."""
+        return {
+            "symbol": self._verified_symbol,
+            "timeframe": self._verified_timeframe,
+            "verified_at": self._verified_at,
+        }
+
+    def _record_verified(self, field: str, value: str) -> None:
+        if field == "symbol":
+            self._verified_symbol = value.strip().upper()
+        elif field == "timeframe":
+            self._verified_timeframe = value.strip()
+        self._verified_at = datetime.now(UTC).isoformat()
 
     async def health(self) -> dict[str, Any]:
         return {"available": True}
@@ -222,6 +258,15 @@ class TradingViewControlSkill(BaseSkill):
                                   keys=lambda: _send_keys(f"{timeframe}{{Enter}}"))
 
     async def _change(self, field: str, value: str, request: ActionRequest, started: datetime, *, keys) -> ActionResult:
+        """Deterministic action + verify-the-actual-result + bounded retry
+        (mission: "Never report SUCCESS merely because keystrokes were
+        sent"). Live testing found the previous title-based check reporting
+        SUCCESS whenever the title merely CHANGED (e.g. "O" -> "EURUS", a
+        garbled/incomplete type) rather than checking it changed to the
+        REQUESTED value -- _title_shows_symbol now requires an actual
+        match. Up to `_MAX_ATTEMPTS` full attempts (re-focus, re-click,
+        re-type, re-verify) before honestly reporting NOT_VERIFIED; a wrong
+        symbol/timeframe is never left silently active without it."""
         found = self._window()
         if found is None:
             return self._result(
@@ -229,52 +274,69 @@ class TradingViewControlSkill(BaseSkill):
                 risk_level=RiskLevel.LOW_RISK, error="tradingview window not found",
                 data={"outcome": "NOT_RUNNING"}, started_at=started,
             )
-        hwnd, _exe, before_title = found
-        try:
-            _force_foreground(hwnd)
-            time.sleep(0.3)
-            _click_to_focus(hwnd)
-            time.sleep(0.3)
-            keys()
-        except Exception as exc:
-            raise SkillExecutionError(f"failed to send {field} change to TradingView: {exc}") from exc
+        hwnd, _exe, _title = found
 
-        deadline = time.monotonic() + _TITLE_VERIFY_TIMEOUT
-        after_title = before_title
-        while time.monotonic() < deadline:
-            after_title = win32gui.GetWindowText(hwnd)
-            if after_title != before_title:
-                break
-            time.sleep(0.3)
-        if after_title != before_title:
-            logger.info("[tradingview] %s change verified via window title: %r -> %r", field, before_title, after_title)
-            return self._result(
-                request, ActionStatus.SUCCEEDED, f"TradingView now shows '{after_title}'.",
-                risk_level=RiskLevel.LOW_RISK,
-                data={"outcome": "SUCCESS", "requested": value, "window_title": after_title},
-                started_at=started,
-            )
+        last_summary = f"Asked TradingView to change {field} to {value}, but couldn't verify it took effect."
+        last_data: dict[str, Any] = {"requested": value}
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                _force_foreground(hwnd)
+                time.sleep(0.3)
+                _click_to_focus(hwnd)
+                time.sleep(0.3)
+                keys()
+            except Exception as exc:
+                raise SkillExecutionError(f"failed to send {field} change to TradingView: {exc}") from exc
 
-        # Title didn't change within the fast window -- fall back to the slower, authoritative
-        # vision-based confirmation the background chart watcher will produce on its own schedule,
-        # rather than immediately declaring failure over what might just be a slow UI response.
+            verified, summary, data = await self._verify_change(hwnd, field, value)
+            if verified:
+                logger.info("[tradingview] %s change verified on attempt %d/%d: %r",
+                            field, attempt, _MAX_ATTEMPTS, data)
+                self._record_verified(field, value)
+                return self._result(
+                    request, ActionStatus.SUCCEEDED, summary, risk_level=RiskLevel.LOW_RISK,
+                    data={**data, "outcome": "SUCCESS", "requested": value}, started_at=started,
+                )
+            last_summary, last_data = summary, data
+            logger.info("[tradingview] %s change attempt %d/%d not verified (requested %r, saw %r)",
+                        field, attempt, _MAX_ATTEMPTS, value, data)
+
+        return self._result(
+            request, ActionStatus.FAILED, last_summary,
+            risk_level=RiskLevel.LOW_RISK, error=f"{field} change not verified after {_MAX_ATTEMPTS} attempts",
+            data={**last_data, "outcome": "NOT_VERIFIED", "requested": value}, started_at=started,
+        )
+
+    async def _verify_change(self, hwnd: int, field: str, value: str) -> tuple[bool, str, dict[str, Any]]:
+        """One verification pass for one `_change` attempt. Symbol changes
+        get a fast path via the window title (TradingView's desktop app
+        puts the current symbol directly in it, confirmed live) -- but
+        only counts a match that actually STARTS WITH the requested symbol,
+        never merely "the title is different from before" (that accepted
+        a garbled/wrong type as success). Timeframe never appears in the
+        title at all, so it always falls through to the slower vision
+        confirmation, which already compares against the requested value."""
+        if field == "symbol":
+            deadline = time.monotonic() + _TITLE_VERIFY_TIMEOUT
+            target = value.strip().upper()
+            while time.monotonic() < deadline:
+                title = win32gui.GetWindowText(hwnd)
+                if title.strip().upper().startswith(target):
+                    return True, f"TradingView now shows '{title}'.", {"window_title": title}
+                time.sleep(0.3)
+
+        # Title path didn't confirm (or doesn't apply to timeframe) -- fall back to the slower,
+        # authoritative vision-based confirmation the background chart watcher produces on its own
+        # schedule, rather than immediately declaring failure over what might just be a slow UI
+        # response.
         state = await self._wait_for_vision_confirmation(str(hwnd), field, value)
         if state is not None:
-            logger.info("[tradingview] %s change verified via HotChartState: %r", field, state.identity)
-            return self._result(
-                request, ActionStatus.SUCCEEDED,
+            return (
+                True,
                 f"TradingView now shows {state.identity.symbol} on {state.identity.timeframe}.",
-                risk_level=RiskLevel.LOW_RISK,
-                data={"outcome": "SUCCESS", "requested": value, "symbol": state.identity.symbol,
-                     "timeframe": state.identity.timeframe},
-                started_at=started,
+                {"symbol": state.identity.symbol, "timeframe": state.identity.timeframe},
             )
-        return self._result(
-            request, ActionStatus.FAILED,
-            f"Asked TradingView to change {field} to {value}, but couldn't verify it took effect.",
-            risk_level=RiskLevel.LOW_RISK, error=f"{field} change not verified",
-            data={"outcome": "NOT_VERIFIED", "requested": value}, started_at=started,
-        )
+        return False, f"{field} change to '{value}' was not confirmed.", {}
 
     async def _wait_for_vision_confirmation(self, chart_window_id: str, field: str, value: str):
         import asyncio
