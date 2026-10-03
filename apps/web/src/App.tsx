@@ -23,6 +23,7 @@ import { sendNotification } from './services/notifications';
 import { toggleCompactWindow, isTauri } from './services/tauri';
 import { createMockTradingEvent, createMockAssistantReply } from './services/mock-generator';
 import { nativeBridge } from './services/native-bridge';
+import { frontendCommandBridge } from './services/frontend-command-bridge';
 import { VoiceAssistantRuntime } from './runtime/VoiceAssistantRuntime';
 import { realtimeVoiceClient } from './runtime/RealtimeVoiceClient';
 import { assistantClient } from './runtime/AssistantClient';
@@ -602,6 +603,20 @@ export const App: React.FC = () => {
       ws.disconnect();
     };
   }, [settings.serverEndpoint, handleIncomingTradingEvent, handleIncomingAssistantMessage]);
+
+  // Frontend Command Bridge: lets the backend dispatch an already-authorized
+  // action (e.g. windows_app.capture_active_window for a backend-initiated
+  // "analyze this chart") out to this native process and get a truthful
+  // report back -- see actions/frontend_bridge.py. Previously only
+  // connected from HUDOverlay, which nothing in the live app ever renders,
+  // so this bridge was never actually reachable; connect it unconditionally
+  // here instead, mirroring the WebSocket connection effect above.
+  useEffect(() => {
+    frontendCommandBridge.connect(settings.apiEndpoint);
+    return () => {
+      frontendCommandBridge.disconnect();
+    };
+  }, [settings.apiEndpoint]);
 
   // Mock Event Generator Timer (only when explicitly enabled)
   useEffect(() => {

@@ -100,6 +100,7 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
     },
     "desktop_control": {
         "inspect_current_window": RiskLevel.READ_ONLY,
+        "inspect_screen": RiskLevel.READ_ONLY,
         "list_controls": RiskLevel.READ_ONLY,
         "read_selected_text": RiskLevel.READ_ONLY,
         "read_clipboard": RiskLevel.READ_ONLY,

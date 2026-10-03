@@ -432,12 +432,14 @@ def test_registered_skill_capabilities_are_not_unconditionally_blocked(client):
     says -- windows_app.list_running and browser.search were silently
     permanently BLOCKED this way (the allowlist only listed launch/focus and
     open_url) until the allowlist was corrected to cover every capability each
-    skill actually declares."""
+    skill actually declares. desktop_control's new `inspect_screen` action hit
+    the exact same gap (caught live, not by this guard, because this loop
+    never included "desktop_control" at all) -- it is now covered too."""
     from actions.permissions import PermissionEngine
 
     engine = PermissionEngine()
     registry = client.app.state.action_registry
-    for skill_name in ("windows_app", "browser", "filesystem", "obsidian", "tradingview"):
+    for skill_name in ("windows_app", "browser", "filesystem", "obsidian", "tradingview", "desktop_control"):
         skill = registry.get(skill_name)
         if skill is None:
             continue  # obsidian is absent when no MemoryService was wired in
