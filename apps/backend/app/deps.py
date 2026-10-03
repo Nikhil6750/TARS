@@ -158,5 +158,17 @@ def get_orchestrator(request: Request) -> TarsOrchestrator:
     )
 
 
+def get_market_watch_service(request: Request):
+    return request.app.state.market_watch_service
+
+
+def get_monitors(request: Request):
+    return request.app.state.monitors
+
+
+def get_daily_brief_service(request: Request):
+    return request.app.state.daily_brief_service
+
+
 def get_turn_controller(request: Request) -> AssistantTurnController:
     return request.app.state.turn_controller

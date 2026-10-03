@@ -69,6 +69,12 @@ class DailyMarketBriefService:
     def _today(self) -> str:
         return self._clock().date().isoformat()
 
+    async def status(self) -> dict:
+        """Read-only: never generates anything."""
+        today = self._today()
+        last = await self._app_state.get(_LAST_BRIEF_DATE_KEY)
+        return {"date": today, "already_sent_today": last == today}
+
     async def maybe_generate_on_startup(self) -> DailyBriefResult | None:
         """Called once per backend startup/session (mission section 14).
         Returns None (does nothing) if today's brief was already sent --

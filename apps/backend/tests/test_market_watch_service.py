@@ -384,6 +384,53 @@ async def test_unwatch_removes_from_watchlist_and_stops_admitting_its_events(rig
     await service.stop()
 
 
+# ---- sleep/resume rebase (section 11/21 I) ----------------------------------
+
+async def test_rebase_clears_price_history_and_evidence_without_touching_watchlist(rig):
+    service, core, monitors, runtime, watchlist = rig
+    await service.start()
+    await service.watch("EURUSD")
+    monitors.mt5.set_quote("EURUSD", 1.1000, 1.1001)
+    await service.tick()
+    assert len(service._price_history["EURUSD"]) == 1
+
+    await _publish_calendar(core, "EURUSD", "US CPI release")
+    await core._queue.join()
+    assert len(service._evidence["EURUSD"]) == 1
+
+    service.rebase()
+
+    assert len(service._price_history["EURUSD"]) == 0
+    assert len(service._evidence["EURUSD"]) == 0
+    watched = await service.list_watched()
+    assert [e.canonical_symbol for e in watched] == ["EURUSD"]  # untouched
+    status = await service.status()
+    assert status["last_rebase_at"] is not None
+    await service.stop()
+
+
+async def test_rebase_clears_dedupe_memory_so_a_post_resume_alert_is_not_suppressed(rig):
+    service, core, monitors, runtime, watchlist = rig
+    await service.start()
+    await service.watch("EURUSD")
+
+    await _publish_calendar(core, "EURUSD", "US CPI release")
+    await _publish_price_move(core, "EURUSD", 0.6)
+    await core._queue.join()
+    assert service.alerts_published == 1
+
+    service.rebase()
+
+    # The identical story would normally be suppressed by cooldown -- but
+    # rebase cleared the dedupe memory, so a fresh correlated story (even
+    # with the same evidence shape) after a rebase is allowed through.
+    await _publish_calendar(core, "EURUSD", "US CPI release", dedupe_suffix="cal")
+    await _publish_price_move(core, "EURUSD", 0.6, dedupe_suffix="a")
+    await core._queue.join()
+    assert service.alerts_published == 2
+    await service.stop()
+
+
 # ---- provider degradation (section 19 / L) ----------------------------------
 
 async def test_mt5_disconnected_snapshot_does_not_crash_the_tick(rig):

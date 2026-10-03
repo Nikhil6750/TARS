@@ -138,6 +138,27 @@ async def test_mt5_snapshot_masks_account_and_emits_only_meaningful_events():
     assert set(fake.calls) <= {"terminal_info", "initialize", "symbol_select", "shutdown"}
 
 
+async def test_mt5_rebase_clears_history_so_a_stale_pre_sleep_price_is_not_compared():
+    """Mission: RESUME_REBASE -- a huge apparent "move" spanning a real
+    system sleep gap must not fire once baselines are cleared."""
+    c, fake, t = Collector(), FakeMT5(), [0.0]
+    provider = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: fake, clock=lambda: t[0])
+    await provider._apply(provider.poll_once())
+
+    # Simulate a long sleep: the price moved a lot "while asleep".
+    fake.bid = 1.1000 * 1.05
+    provider.rebase()
+    t[0] = 1
+    await provider._apply(provider.poll_once())
+    assert c.events == []  # rebase cleared the baseline this would have compared against
+
+    # A genuinely new move AFTER rebase is still detected normally.
+    fake.bid = fake.bid * 1.003
+    t[0] = 11
+    await provider._apply(provider.poll_once())
+    assert [e.kind for e in c.events] == ["price.move"]
+
+
 async def test_mt5_position_open_close_events():
     c, fake, t = Collector(), FakeMT5(), [0.0]
     provider = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: fake, clock=lambda: t[0])

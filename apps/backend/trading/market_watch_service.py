@@ -160,6 +160,7 @@ class MarketWatchService:
         self._price_history: dict[str, deque[tuple[datetime, float]]] = {}
         self._evidence: dict[str, deque[_EvidenceItem]] = {}
         self._last_published: dict[str, tuple[datetime, tuple[str, ...]]] = {}  # symbol -> (at, signature)
+        self._last_rebase_at: datetime | None = None
         self._unsubscribe = None
         self._task = None
 
@@ -255,7 +256,25 @@ class MarketWatchService:
             "cycles": self.cycles,
             "events_considered": self.events_considered,
             "alerts_published": self.alerts_published,
+            "last_rebase_at": self._last_rebase_at.isoformat() if self._last_rebase_at else None,
         }
+
+    def rebase(self, *, reason: str = "manual") -> None:
+        """Mission section 11 (RESUME_REBASE): discard price-history and
+        correlation-evidence baselines without touching the persisted
+        watchlist or pause state. Called after a detected system
+        sleep/resume gap so the next tick's significance check compares
+        against FRESH samples instead of comparing a stale pre-sleep price
+        to a post-resume one and firing a false "giant move" alert. Also
+        clears the dedupe/cooldown memory so a genuinely new post-resume
+        development isn't silently suppressed by a pre-sleep story."""
+        for hist in self._price_history.values():
+            hist.clear()
+        for buf in self._evidence.values():
+            buf.clear()
+        self._last_published.clear()
+        self._last_rebase_at = self._clock()
+        logger.info("[market_watch] rebased (%s): price/evidence baselines cleared", reason)
 
     # ---- provider/gate symbol admission ------------------------------------
 

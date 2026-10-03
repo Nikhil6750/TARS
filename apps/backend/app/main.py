@@ -38,6 +38,7 @@ from app.routers import (
     diagnostics,
     events,
     health,
+    lifecycle,
     memory,
     runtime,
     voice,
@@ -461,6 +462,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(runtime.router)
+    app.include_router(lifecycle.router)
     app.include_router(diagnostics.router)
     app.include_router(events.router)
     app.include_router(assistant.router)

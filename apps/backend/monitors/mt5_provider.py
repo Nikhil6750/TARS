@@ -243,3 +243,13 @@ class MT5Provider:
                 "symbols": self.symbols, "quotes": self.quotes, "positions": self.positions,
                 "orders": self.orders, "floating_pnl": self.floating_pnl,
                 "updated_at": self.updated_at, "read_only": True}
+
+    def rebase(self) -> None:
+        """Discard the rolling price/spread history used for move/spread-
+        spike detection (mission: RESUME_REBASE after a detected system
+        sleep/resume gap) -- never compare a pre-sleep price to a post-
+        resume one as if time passed normally. Does not touch connection
+        state, quotes, positions or the configured symbol list."""
+        for hist in self._history.values():
+            hist.clear()
+        self._spread_base.clear()
