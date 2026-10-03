@@ -89,6 +89,45 @@ def test_significance_severity_and_user_relevance(severity, symbol, expected):
     assert gate.decide(event(symbol=symbol).model_copy(update={"severity": severity})) == expected
 
 
+def test_allow_symbol_without_analyze_caps_raw_events_at_notify():
+    """Mission: TARS Watcher Intelligence -- a newly-watched symbol's own
+    raw provider events (MT5 price.move, a news headline) must surface as
+    deterministic NOTIFY alerts, never silently escalate to Claude on
+    their own severity; only the watcher's own correlated SYSTEM-sourced
+    synthesis should ever reach ANALYZE for such a symbol."""
+    gate = SignificanceGate(symbols=["EURUSD"], analyze=True, speak=True)
+    gate.allow_symbol("BTCUSD", analyze=False)
+
+    raw = NormalizedEvent(source=EventSource.MT5, kind="price.move", severity=4, symbol="BTCUSD",
+                          title="t", dedupe_key="d1")
+    assert gate.decide(raw) == EventDecision.NOTIFY
+
+    # A SYSTEM-sourced event (the watcher's own already-gated decision) is
+    # never subject to the per-symbol analyze cap.
+    synthesized = NormalizedEvent(source=EventSource.SYSTEM, kind="watcher.correlated_alert", severity=4,
+                                  symbol="BTCUSD", title="t", dedupe_key="d2")
+    assert gate.decide(synthesized) == EventDecision.SPEAK
+
+
+def test_allow_symbol_with_analyze_true_behaves_like_the_original_symbols():
+    gate = SignificanceGate(symbols=["EURUSD"], analyze=True, speak=True)
+    gate.allow_symbol("BTCUSD", analyze=True)
+
+    raw = NormalizedEvent(source=EventSource.MT5, kind="price.move", severity=3, symbol="BTCUSD",
+                          title="t", dedupe_key="d3")
+    assert gate.decide(raw) == EventDecision.ANALYZE
+
+
+def test_disallow_symbol_restores_ignore():
+    gate = SignificanceGate(symbols=["EURUSD"], analyze=True)
+    gate.allow_symbol("BTCUSD", analyze=False)
+    gate.disallow_symbol("BTCUSD")
+
+    raw = NormalizedEvent(source=EventSource.MT5, kind="price.move", severity=3, symbol="BTCUSD",
+                          title="t", dedupe_key="d4")
+    assert gate.decide(raw) == EventDecision.IGNORE
+
+
 async def test_only_meaningful_events_escalate_via_existing_bounded_runtime(core):
     instance, runtime = core
     instance.gate = SignificanceGate(analyze=True)

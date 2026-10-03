@@ -61,16 +61,55 @@ class EventDecision(str, Enum):
 
 
 class SignificanceGate:
-    def __init__(self, *, symbols=(), analyze=False, speak=False):
+    def __init__(self, *, symbols=(), analyze=False, speak=False, analyze_symbols=None):
         self.symbols = {s.upper() for s in symbols}
         self.analyze, self.speak = analyze, speak
+        # Which symbols a RAW, single-source event (MT5 price.move, a news
+        # headline, a calendar tick) may escalate to Claude/speech on its
+        # own severity alone. None (default) means "same as `symbols`" --
+        # today's exact behavior, unchanged. A caller that wants a symbol
+        # visible (NOTIFY-level alerts) without letting every raw tick
+        # independently trigger Claude (mission: TARS Watcher Intelligence
+        # -- a newly-watched symbol's individual price/news/calendar events
+        # should surface as deterministic alerts; only the watcher's own
+        # explicit, correlated synthesis should reach Claude) calls
+        # `allow_symbol(symbol, analyze=False)` instead of passing it here.
+        self._analyze_symbols = (
+            {s.upper() for s in analyze_symbols} if analyze_symbols is not None else set(self.symbols)
+        )
+
+    def allow_symbol(self, symbol: str, *, analyze: bool = False) -> None:
+        """Start admitting events for `symbol` past the IGNORE check.
+        `analyze=True` also makes its raw events eligible for ANALYZE/
+        SPEAK on their own severity; `analyze=False` (default) caps a raw
+        single-source event at NOTIFY regardless of severity -- a
+        SYSTEM-sourced event (the watcher's own already-gated correlated
+        synthesis, see `decide()`) is never subject to this cap."""
+        sym = symbol.upper()
+        self.symbols.add(sym)
+        if analyze:
+            self._analyze_symbols.add(sym)
+
+    def disallow_symbol(self, symbol: str) -> None:
+        """Undo `allow_symbol` -- used when a symbol stops being watched.
+        Never call this for a symbol that should stay admitted for another
+        reason (e.g. the app's own baseline `event_relevant_symbols`); the
+        caller is responsible for only removing symbols it added itself."""
+        sym = symbol.upper()
+        self.symbols.discard(sym)
+        self._analyze_symbols.discard(sym)
 
     def decide(self, event: NormalizedEvent) -> EventDecision:
         if event.severity < 2 or (self.symbols and event.symbol and event.symbol.upper() not in self.symbols):
             return EventDecision.IGNORE
-        if event.severity == 4 and self.speak:
+        analyze_ok = (
+            event.source is EventSource.SYSTEM
+            or not event.symbol
+            or event.symbol.upper() in self._analyze_symbols
+        )
+        if event.severity == 4 and self.speak and analyze_ok:
             return EventDecision.SPEAK
-        if event.severity >= 3 and self.analyze:
+        if event.severity >= 3 and self.analyze and analyze_ok:
             return EventDecision.ANALYZE
         return EventDecision.NOTIFY
 
