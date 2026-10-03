@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import hashlib
 import json
 import logging
@@ -28,12 +27,13 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, Field
 
 from actions.runtime import ActionRuntime
-from app.action_contracts import ActionRequest, ActionResult, ActionSource, ActionStatus
+from app.action_contracts import ActionResult, ActionSource, ActionStatus
 from app.config import Settings
 from app.latency_store import LatencyTraceStore, RequestTrace
 from app.schemas import AssistantMessage, InputMode, MessageProviders, MessageRole
 from app.voice_telemetry import VoiceTraceStore, VoiceTurnRecorder
-from assistant.chart_analysis import ChartAnalysisError, ChartAnalysisService
+from assistant.chart_analysis import ChartAnalysisService
+from assistant.chart_capture import capture_and_analyze_chart
 from assistant.conversation_store import ConversationStore
 from assistant.errors import AssistantProviderError
 from assistant.hot_chart_state_store import HotChartStateStore
@@ -151,14 +151,6 @@ _CHART = re.compile(
     r"\bwhat\s+do\s+you\s+see\b.*\bcharts?\b",
     re.IGNORECASE,
 )
-# What counts as "a supported chart" for the fresh, synchronous
-# analyze_this_chart capture verification -- matched against the freshly
-# captured window's executable and title. TradingView only today (same
-# scope as skills/tradingview_control.py and chart_watcher.rs's
-# find_chart_window()); a stale/wrong window (e.g. the user switched to
-# Chrome) must never be sent to the vision model just because it was once
-# the tracked chart.
-_CHART_WINDOW_RE = re.compile(r"tradingview", re.IGNORECASE)
 _TRADING_RESEARCH = re.compile(
     r"\b(?:backtest|walk[- ]forward|deflated\s+sharpe|\bdsr\b|strategy\s+research|"
     r"trading\s+research|validated\s+(?:trade|strategy)|quant_brain)\b",
@@ -979,96 +971,27 @@ class AssistantTurnController:
         then never actually delivered one). Captures the primary visible
         window FRESH through the real capture flow, verifies it is actually
         a supported chart, and returns a real vision analysis in this same
-        turn -- or the exact failure, never a "come back later" stall."""
+        turn -- or the exact failure, never a "come back later" stall.
+
+        The actual capture/verify/decode/analyze mechanics live in
+        assistant/chart_capture.py, shared with the Universal Market
+        Explainer's multi-timeframe collection (trading/market_explainer.py)
+        -- this method is now just that shared primitive plus turn/event
+        plumbing."""
         if self._chart_analysis_service is None:
             return ("Chart analysis isn't available right now.", "chart_analysis")
 
-        capture_request = ActionRequest(
-            skill="windows_app",
-            action="capture_active_window",
-            arguments={"include_image_data": True},
-            source=ActionSource.deterministic,
+        outcome = await capture_and_analyze_chart(
+            self._actions, self._chart_analysis_service,
+            goal_text="Analyze this chart.", conversation_id=f"turn:{turn_id}",
         )
-        try:
-            capture_result = await asyncio.wait_for(self._actions.submit(capture_request), 20)
-        except TimeoutError:
-            return ("I couldn't capture the screen in time to analyze it.", "chart_capture")
-        except Exception:
-            logger.exception("analyze_this_chart capture failed")
-            return ("I couldn't capture the screen to analyze it.", "chart_capture")
+        if not outcome.analyzed:
+            return (outcome.message, "chart_capture")
 
-        if capture_result.status is not ActionStatus.SUCCEEDED:
-            return (
-                capture_result.summary or "I couldn't capture the screen to analyze it.",
-                "chart_capture",
-            )
-
-        data = capture_result.data or {}
-        if data.get("is_secure_desktop"):
-            return (
-                "I can't capture the screen right now (a secure system dialog is active).",
-                "chart_capture",
-            )
-        if data.get("error"):
-            return (f"I couldn't capture the screen to analyze it: {data['error']}", "chart_capture")
-
-        executable = str(data.get("executable") or "")
-        window_title = str(data.get("window_title") or "")
-        if not _CHART_WINDOW_RE.search(executable) and not _CHART_WINDOW_RE.search(window_title):
-            shown = window_title or executable or "nothing identifiable"
-            return (
-                f"What's in front right now doesn't look like a supported chart (I see '{shown}'). "
-                "Bring the chart to the front and ask again.",
-                "chart_capture",
-            )
-
-        image_data = data.get("image_data_base64")
-        if not isinstance(image_data, str) or not image_data.strip():
-            return ("I couldn't capture an image of the chart to analyze.", "chart_capture")
-        # capture_active_window returns a data: URI (see lib.rs), not raw
-        # base64 -- same encoding the REST analyze-chart endpoint already
-        # strips in app/routers/assistant.py.
-        _, _, encoded_image = (
-            image_data.partition(",") if image_data.startswith("data:") else ("", "", image_data)
-        )
-        try:
-            image_bytes = base64.b64decode(encoded_image, validate=True)
-        except (binascii.Error, ValueError):
-            return ("The chart capture came back corrupted; please try again.", "chart_capture")
-        if not image_bytes:
-            return ("The chart capture came back empty; please try again.", "chart_capture")
-
-        image_format = str(data.get("image_format") or "image/png")
-        active_context_text = (
-            f"active application: {executable}; window title: {window_title}"
-            if executable or window_title
-            else ""
-        )
-
-        try:
-            # No extra wrapper timeout here: ChartAnalysisService's
-            # provider (ClaudeCodeProvider) already bounds itself to
-            # settings.chart_analysis_timeout_seconds and raises
-            # AssistantProviderError on expiry -- a shorter wrapper here
-            # would just cut off a real, in-flight vision call before the
-            # provider's own deliberately-sized budget for a large chart
-            # screenshot (live testing measured a genuine analysis taking
-            # over 40s against a real captured chart).
-            result = await self._chart_analysis_service.analyze(
-                image_bytes=image_bytes,
-                image_format=image_format,
-                conversation_id=f"turn:{turn_id}",
-                active_context_text=active_context_text,
-                goal_text="Analyze this chart.",
-            )
-        except ChartAnalysisError as exc:
-            return (f"I couldn't analyze that capture: {exc}", "chart_analysis")
-        except AssistantProviderError as exc:
-            return (f"The chart analysis failed: {exc}", "chart_analysis")
-
-        display = result.formatted_tars_text()
+        assert outcome.result is not None
+        display = outcome.result.formatted_tars_text()
         await self._publish(TurnEvent(turn_id=turn_id, type="delta", text=display))
-        return display, result.provider or "chart_analysis"
+        return display, outcome.result.provider or "chart_analysis"
 
     async def _persist_pair(
         self,

@@ -113,6 +113,17 @@ class DesktopTools:
         self.current_trading_app: str | None = None
         self.current_symbol: str | None = None
         self.current_timeframe: str | None = None
+        # Universal Market Explainer follow-up context (mission: "What
+        # about 5 minutes?" / "Any news coming?" / "What caused that
+        # move?" must inherit the asset without the user repeating it).
+        # current_symbol/current_timeframe above already double as
+        # provider_symbol/tradingview_symbol -- there is deliberately no
+        # second, separately-tracked "current asset" field that could
+        # drift out of sync with them.
+        self.last_analysis_at: str | None = None
+        self.last_chart_observations: list[dict] = []
+        self.last_relevant_events: list[dict] = []
+        self.last_relevant_news: list[dict] = []
         # Browser agent context (section 4): mirrors the trading-app fields
         # above for the web skill -- so "open the first result" after
         # "search YouTube for..." targets the tab TARS itself just opened,

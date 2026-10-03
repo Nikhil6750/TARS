@@ -381,6 +381,17 @@ async def lifespan(app: FastAPI):
     else:
         app.state.tradingview_adapter = None
 
+    from trading.asset_resolver import AssetResolver
+    from trading.market_explainer import MarketExplainerOrchestrator
+
+    if app.state.tradingview_adapter is not None:
+        app.state.market_explainer = MarketExplainerOrchestrator(
+            AssetResolver(monitors), app.state.tradingview_adapter, chart_analysis_service,
+            action_runtime, monitors, app.state.assistant_provider,
+        )
+    else:
+        app.state.market_explainer = None
+
     from events.correlation import CorrelationEngine
 
     correlation_engine = CorrelationEngine(realtime_events, monitors)

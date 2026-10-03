@@ -103,6 +103,13 @@ def describe_tool_call(name: str, args: dict) -> str:
         return "Watching this chart…"
     if name == "ask_claude":
         return "Thinking it through…"
+    if name == "analyze_market":
+        asset = str(args.get("asset") or "").strip()
+        return f"Analyzing {asset}…" if asset else "Analyzing the market…"
+    if name == "get_today_market_news":
+        return "Checking today's market news…"
+    if name == "explain_move":
+        return "Checking what moved the market…"
     if name in ("tradingview_set_symbol",):
         return f"Switching chart to {args.get('symbol', '')}…"
     if name == "tradingview_set_timeframe":
@@ -126,7 +133,7 @@ def describe_tool_result(name: str, args: dict, status: str) -> str:
     reason."""
     if status == "DONE":
         return "Done"
-    target = str(args.get("target") or args.get("url") or args.get("query") or "").strip()
+    target = str(args.get("target") or args.get("url") or args.get("query") or args.get("asset") or "").strip()
     if status == "NOT_FOUND":
         return f"Couldn't find {target}" if target else "Couldn't find that"
     if status == "AMBIGUOUS":

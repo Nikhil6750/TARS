@@ -18,7 +18,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -95,10 +95,21 @@ resolve the odd word to the most plausible symbol from this list and use the res
 symbols are equally plausible, ask which one.
 
 Facts and tools
-- For any market fact call a tool first: get_market_context, get_mt5_state, get_tradingview_state, get_recent_events,
-  get_economic_calendar. If a source is disconnected, say so plainly. Data labelled DEMO REPLAY is a rehearsal, not
-  live: always say it is a replay.
-- "Look at the chart / what changed / analyze this chart" -> analyze_chart. This always captures the chart FRESH and
+- Fast path stays fast -- never route a simple fact through analyze_market/ask_claude: "EURUSD bid/ask" ->
+  get_mt5_state/get_market_context; "what timeframe am I on" -> get_tradingview_state; "next USD event" ->
+  get_economic_calendar; "latest Nvidia news" -> get_news. If a source is disconnected, say so plainly. Data
+  labelled DEMO REPLAY is a rehearsal, not live: always say it is a replay.
+- "What's happening with X today" / "analyze gold" / "explain oil today" / "analyze it again" -> analyze_market.
+  This is the Universal Market Explainer: it resolves ANY instrument (not just the shortlist above), takes over
+  TradingView for you (switching symbol/timeframe is fine for an explicit analysis request), and returns one
+  integrated answer. Omit `asset` for a bare follow-up ("what about 5 minutes", "go to one hour") -- it reuses
+  the current instrument; pass `timeframe` when the user names one, omit it for a broad "today" question. After
+  a successful call, "any news coming" -> get_today_market_news and "what caused that move/candle/spike" ->
+  explain_move both automatically reuse that same instrument -- never ask the user to repeat it. If
+  analyze_market reports AMBIGUOUS or NOT_FOUND, say exactly that and ask which instrument -- never guess a
+  ticker yourself.
+- "Look at the chart / what changed / analyze this chart" (deictic, about whatever is literally visible right
+  now, not a named asset) -> analyze_chart. This always captures the chart FRESH and
   gives you a real answer in this same turn -- it never depends on or waits for the background watcher, so never tell
   the user to "keep it visible and ask again"; if it fails, say exactly what it reported (e.g. that what's in front
   isn't a supported chart). "Watch this for me" / "monitor EURUSD" / "keep an eye on this" -> watch_this_chart
@@ -180,6 +191,14 @@ def _tool_declarations():
              parameters=obj(question=("STRING", "The full question to analyse"),
                             context=("STRING", "Optional extra context from the conversation"),
                             symbol=("STRING", "Symbol to analyze, e.g. EURUSD or XAUUSD -- only for trading analysis questions"))),
+        decl(name="analyze_market", description="THE Universal Market Explainer -- use for 'what's happening with X today', 'analyze gold', 'explain oil today', or a bare follow-up like 'analyze it again' (omit `asset` to reuse the current one). Resolves the asset (any instrument, not just majors), takes over TradingView (switches symbol/timeframe, each verified -- acceptable for an explicit analysis request, unlike a simple quote question), collects one or more fresh chart reads, and returns ONE integrated answer covering current state, context, catalysts, scenarios and upcoming risk. Takes up to a couple of minutes for a broad multi-timeframe request -- say a brief lead-in first ('Let me pull that up'). Reports AMBIGUOUS/NOT_FOUND honestly instead of guessing a ticker.",
+             parameters=obj(asset=("STRING", "The instrument as the user said it -- a company name, 'gold', 'bitcoin', a ticker, a cross. Omit to mean 'the current asset' for a follow-up."),
+                            timeframe=("STRING", "Optional: an explicit timeframe like '5m'/'1h'/'4h'. Omit for a broad 'what's happening today' question -- a small default multi-timeframe sequence is used instead."),
+                            question=("STRING", "Optional: the specific question, e.g. 'what about 5 minutes' or 'what's the outlook into New York'"))),
+        decl(name="get_today_market_news", description="'What's on the news today' / 'any news for X' -- financial/market news and high-impact calendar only, never general news. Uses the current asset in context if none is named.",
+             parameters=obj(asset=("STRING", "Optional instrument to filter to; omit to use the current asset in context, or for general market news if there is none"))),
+        decl(name="explain_move", description="'Why did that move?' / 'what caused that drop/spike?' / 'what caused that candle?' -- bounded historical search (+/-15 then 30 then 60 minutes around now) across persisted calendar/news/price events for the current asset, with an honest uncertainty-aware answer (never a bare causal claim the evidence doesn't support).",
+             parameters=obj(question=("STRING", "Optional: the specific move/question being asked about"))),
         decl(name="desktop_context", description="What is on the desktop right now: active application/window and the recent desktop actions TARS took. Use for 'what am I looking at', 'which app is open'."),
         decl(name="desktop_resolve_app", description="Look up whether an application name resolves to a specific installed Windows application, without opening it. Use this if you are unsure an app is installed, or to check before telling the user something is or isn't available.",
              parameters=obj(target=("STRING", "The app's plain spoken name, e.g. clock, calculator, tradingview, mt5"))),
@@ -250,7 +269,8 @@ def _tool_declarations():
 
 
 BASE_TOOL_NAMES = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
-                   "get_economic_calendar", "get_news", "ask_claude"}
+                   "get_economic_calendar", "get_news", "ask_claude",
+                   "analyze_market", "get_today_market_news", "explain_move"}
 TOOL_NAMES = BASE_TOOL_NAMES | DESKTOP_TOOL_NAMES
 
 
@@ -274,7 +294,8 @@ class TarsTools:
                           "question", "symbol", "timeframe", "value", "submit", "timeout", "mode"}
                 return await self.desktop.call(name, {k: v for k, v in (args or {}).items() if k in allowed})
             return await getattr(self, name)(**{k: v for k, v in (args or {}).items()
-                                                if k in {"symbol", "limit", "hours_ahead", "question", "context"}})
+                                                if k in {"symbol", "limit", "hours_ahead", "question", "context",
+                                                        "asset", "timeframe"}})
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -407,6 +428,136 @@ class TarsTools:
                     if event.response.status.value == "failed":
                         return {"error": "Claude could not answer right now"}
         return {"answer": answer[:3000], "source": "claude"}
+
+    async def analyze_market(self, asset: str = "", timeframe: str = "", question: str = "") -> dict:
+        """Universal Market Explainer (mission): one call for "what's
+        happening with <asset> today?" -- resolves the asset, takes over
+        TradingView (explicit analysis request, so this mutation is
+        acceptable), verifies every switch, collects one or more fresh
+        chart reads, and makes exactly ONE deep-synthesis call. Never for
+        a simple quote/status question -- those stay on
+        get_market_context/get_mt5_state/get_tradingview_state/
+        get_economic_calendar/get_news (the fast path)."""
+        orchestrator = getattr(self.state, "market_explainer", None)
+        if orchestrator is None:
+            return {"error": "The market explainer isn't available (TradingView isn't connected)."}
+        query = asset.strip() or self.desktop.current_symbol or ""
+        if not query:
+            return {"error": "Which instrument? There's no current asset in context yet."}
+        result = await orchestrator.analyze(
+            query, question=question, timeframe=timeframe.strip() or None,
+            active_symbol=self.desktop.current_symbol,
+        )
+        if result.status == "AMBIGUOUS":
+            names = ", ".join(result.candidates) or "more than one instrument"
+            return {"status": "AMBIGUOUS", "error": f"'{query}' matches more than one instrument ({names}) -- ask which one."}
+        if result.status == "NOT_FOUND":
+            return {"status": "NOT_FOUND", "error": f"'{query}' isn't a tradable instrument TARS recognizes."}
+        if result.status in ("CHART_UNAVAILABLE", "SYMBOL_NOT_VERIFIED"):
+            return {"status": result.status, "error": result.detail or "Couldn't set up the chart for that instrument."}
+
+        # RESOLVED: persist follow-up context so "what about 5 minutes?" /
+        # "any news coming?" / "what caused that move?" inherit this asset.
+        self.desktop.current_symbol = result.symbol
+        self.desktop.current_trading_app = "TradingView"
+        if result.timeframes_analyzed:
+            self.desktop.current_timeframe = result.timeframes_analyzed[-1]
+        self.desktop.last_analysis_at = datetime.now(UTC).isoformat()
+        self.desktop.last_chart_observations = [
+            {"timeframe": o.timeframe, "summary": o.analysis.market_context} for o in result.observations
+        ]
+        if result.market_context is not None:
+            self.desktop.last_relevant_news = result.market_context.news
+        return {
+            "status": "DONE", "answer": result.answer[:3000], "symbol": result.symbol,
+            "timeframes_analyzed": result.timeframes_analyzed, "timeframes_failed": result.timeframes_failed,
+        }
+
+    async def get_today_market_news(self, asset: str = "") -> dict:
+        """"What's on the news today" / "any news for X" -- financial/
+        market context only (high-impact calendar + real financial
+        headlines, both already-existing sources), never a general news
+        dump. Asset-aware when named explicitly or already in follow-up
+        context."""
+        query = asset.strip() or self.desktop.current_symbol or ""
+        symbol = None
+        if query:
+            from trading.asset_resolver import AssetResolver
+
+            monitors = getattr(self.state, "monitors", None)
+            resolved = AssetResolver(monitors).resolve(query, active_symbol=self.desktop.current_symbol)
+            if resolved.outcome == "AMBIGUOUS":
+                names = ", ".join(resolved.candidates) or "more than one instrument"
+                return {"status": "AMBIGUOUS", "error": f"'{query}' matches more than one instrument ({names}) -- ask which one."}
+            if resolved.outcome == "RESOLVED":
+                symbol = resolved.symbol
+        calendar = await self.get_economic_calendar(hours_ahead=24)
+        news = await self.get_news(symbol=symbol or "")
+        self.desktop.last_relevant_events = calendar.get("events", [])
+        self.desktop.last_relevant_news = news.get("items", [])
+        return {"status": "DONE", "symbol": symbol, "calendar": calendar.get("events", []), "news": news.get("items", [])}
+
+    async def explain_move(self, question: str = "") -> dict:
+        """Move/candle explainer: "why did that move?" / "what caused that
+        drop?" -- bounded historical event search (persisted
+        calendar/news/price/system events via RealtimeEventCore) centered
+        on now, escalating +-15min -> +-30min -> +-60min only if the
+        tighter window found nothing, never an unbounded search. One
+        synthesis call with a causality standard the model must follow
+        (DIRECT/STRONG TEMPORAL/PLAUSIBLE/INSUFFICIENT) -- never a bare
+        causal claim the evidence doesn't support."""
+        turns = getattr(self.state, "turn_controller", None)
+        core = getattr(self.state, "realtime_events", None)
+        if turns is None or core is None:
+            return {"error": "Event history or the assistant backend isn't available."}
+        symbol = self.desktop.current_symbol
+        now = datetime.now(UTC)
+        events: list[dict] = []
+        window_minutes = 15
+        for window_minutes in (15, 30, 60):
+            events = await core.get_events_between(
+                now - timedelta(minutes=window_minutes), now + timedelta(minutes=2), symbol=symbol
+            )
+            if events:
+                break
+
+        evidence_lines = [
+            f"Searched {'for ' + symbol + ' ' if symbol else ''}+/-{window_minutes} minutes around now ({now.isoformat()})."
+        ]
+        if events:
+            for row in events:
+                ev = row["event"]
+                evidence_lines.append(
+                    f"- [{ev.get('source')}] {ev.get('title')}: {ev.get('summary')} (recorded {row.get('accepted_at')})"
+                )
+        else:
+            evidence_lines.append("No persisted calendar/news/price/system event found in any searched window.")
+
+        live_context = "[TARS evidence -- bounded historical event search, real persisted events only:\n" + "\n".join(
+            evidence_lines
+        ) + "]\n"
+        causality_standard = (
+            "Causality standard: label the evidence DIRECT (explicit source + tight temporal match), "
+            "STRONG TEMPORAL (highly relevant event overlaps the move), PLAUSIBLE (relevant event exists but "
+            "attribution is uncertain), or INSUFFICIENT (no defensible catalyst -- say so plainly). Never state "
+            "a bare causal claim ('X caused Y') unless the evidence genuinely supports it; prefer 'the timing is "
+            "consistent with' / 'may have contributed'.\n"
+        )
+        text = (
+            f"{live_context}{causality_standard}{question.strip() or 'What caused that recent move?'} "
+            "(Reply for a voice assistant to read aloud: 1-4 short sentences, no markdown, no lists.)"
+        )
+        answer = ""
+        async with asyncio.timeout(60):
+            async for event in turns.stream_text(
+                text, turn_id=uuid4().hex, conversation_id=f"{self.session_id}:explain-move",
+                input_mode=InputMode.voice, speak=False,
+            ):
+                if event.type == "complete" and event.response:
+                    answer = event.response.display_text
+                    if event.response.status.value == "failed":
+                        return {"error": "Could not work out a cause right now"}
+        return {"answer": answer[:2500], "symbol": symbol, "window_minutes": window_minutes, "events_found": len(events)}
 
 
 class GeminiLiveVoiceSession:

@@ -219,7 +219,8 @@ def test_tools_are_bounded_and_none_can_trade():
     from voice.desktop_tools import DESKTOP_TOOL_NAMES
 
     base = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
-            "get_economic_calendar", "get_news", "ask_claude"}
+            "get_economic_calendar", "get_news", "ask_claude",
+            "analyze_market", "get_today_market_news", "explain_move"}
     assert TOOL_NAMES == base | DESKTOP_TOOL_NAMES
     assert not any(re.search(r"trade|order|buy|sell", n) for n in TOOL_NAMES)
     for name in ("voice/gemini_live.py", "voice/desktop_tools.py"):
@@ -351,3 +352,171 @@ async def test_ask_claude_reports_not_found_asset_without_inventing_a_ticker():
     out = await tools.call("ask_claude", {"question": "what's happening", "symbol": "purple elephant currency"})
     assert "error" in out
     assert "recognize" in out["error"].lower()
+
+
+# ---- mission: analyze_market / get_today_market_news / explain_move -------
+
+async def test_analyze_market_delegates_to_the_orchestrator_and_persists_follow_up_context():
+    class FakeResult:
+        status = "RESOLVED"
+        symbol = "XAUUSD"
+        timeframes_analyzed = ["15m"]
+        timeframes_failed = []
+        observations = []
+        market_context = SimpleNamespace(news=[{"headline": "Gold steady"}])
+        answer = "Gold is quiet today."
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.calls = []
+
+        async def analyze(self, asset, **kw):
+            self.calls.append((asset, kw))
+            return FakeResult()
+
+    orchestrator = FakeOrchestrator()
+    tools = TarsTools(SimpleNamespace(market_explainer=orchestrator), "s1")
+    out = await tools.call("analyze_market", {"asset": "gold", "timeframe": "15m"})
+
+    assert out["status"] == "DONE"
+    assert out["answer"] == "Gold is quiet today."
+    assert tools.desktop.current_symbol == "XAUUSD"
+    assert tools.desktop.current_trading_app == "TradingView"
+    assert tools.desktop.current_timeframe == "15m"
+    assert tools.desktop.last_relevant_news == [{"headline": "Gold steady"}]
+    assert orchestrator.calls[0] == ("gold", {"question": "", "timeframe": "15m", "active_symbol": None})
+
+
+async def test_analyze_market_follow_up_omits_asset_and_reuses_current_symbol():
+    class FakeResult:
+        status = "RESOLVED"
+        symbol = "EURUSD"
+        timeframes_analyzed = ["5m"]
+        timeframes_failed = []
+        observations = []
+        market_context = None
+        answer = "EURUSD on 5m is consolidating."
+
+    class FakeOrchestrator:
+        def __init__(self):
+            self.calls = []
+
+        async def analyze(self, asset, **kw):
+            self.calls.append((asset, kw))
+            return FakeResult()
+
+    orchestrator = FakeOrchestrator()
+    tools = TarsTools(SimpleNamespace(market_explainer=orchestrator), "s1")
+    tools.desktop.current_symbol = "EURUSD"  # set by an earlier analyze_market("EURUSD") call
+
+    out = await tools.call("analyze_market", {"timeframe": "5m"})  # no asset named
+
+    assert out["status"] == "DONE"
+    assert orchestrator.calls[0][0] == "EURUSD"  # reused, not asked to repeat
+
+
+async def test_analyze_market_reports_ambiguous_without_guessing():
+    class FakeResult:
+        status = "AMBIGUOUS"
+        candidates = ("US100", "NAS100")
+
+    class FakeOrchestrator:
+        async def analyze(self, asset, **kw):
+            return FakeResult()
+
+    tools = TarsTools(SimpleNamespace(market_explainer=FakeOrchestrator()), "s1")
+    out = await tools.call("analyze_market", {"asset": "nasdaq"})
+    assert out["status"] == "AMBIGUOUS"
+    assert "nasdaq" in out["error"].lower()
+
+
+async def test_analyze_market_with_no_asset_and_no_context_asks_which_instrument():
+    tools = TarsTools(SimpleNamespace(market_explainer=object()), "s1")
+    out = await tools.call("analyze_market", {})
+    assert "error" in out and "which instrument" in out["error"].lower()
+
+
+async def test_get_today_market_news_uses_current_asset_when_none_named():
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    event = SimpleNamespace(currency="USD", event="CPI", timestamp=_dt.now(_UTC) + _td(hours=2),
+                            importance="High", previous=None, forecast=None, actual=None, replay=False)
+    calendar = SimpleNamespace(events=[event], provider=SimpleNamespace(name="fake"), state="CONNECTED")
+
+    class Monitors:
+        news = None
+        replay_calendar = None
+
+        def __init__(self):
+            self.calendar = calendar
+
+    tools = TarsTools(SimpleNamespace(monitors=Monitors()), "s1")
+    tools.desktop.current_symbol = "EURUSD"
+    out = await tools.call("get_today_market_news", {})
+    assert out["status"] == "DONE"
+    assert out["symbol"] == "EURUSD"
+    assert out["calendar"][0]["event"] == "CPI"
+
+
+async def test_get_today_market_news_ambiguous_asset_is_reported_honestly():
+    class Monitors:
+        news = None
+
+        async def status(self):
+            return {"mt5": {"state": "DISCONNECTED", "quotes": {}}, "tradingview": {"state": "NOT FOUND"},
+                    "calendar": {"next": None}}
+
+    tools = TarsTools(SimpleNamespace(monitors=Monitors()), "s1")
+    out = await tools.call("get_today_market_news", {"asset": "nasdaq"})
+    assert out["status"] == "AMBIGUOUS"
+
+
+async def test_explain_move_searches_bounded_windows_and_grades_causality():
+    class Core:
+        def __init__(self):
+            self.windows_queried = []
+
+        async def get_events_between(self, start, end, *, symbol=None, limit=50):
+            self.windows_queried.append((end - start).total_seconds() / 60)
+            return []  # nothing found at any window -> escalates through all three
+
+    captured = {}
+
+    class Turns:
+        async def stream_text(self, text, **kw):
+            captured["text"] = text
+            yield SimpleNamespace(type="complete", response=SimpleNamespace(
+                display_text="No clear catalyst found for that move.", status=SimpleNamespace(value="completed")))
+
+    core = Core()
+    tools = TarsTools(SimpleNamespace(realtime_events=core, turn_controller=Turns()), "s1")
+    tools.desktop.current_symbol = "EURUSD"
+    out = await tools.call("explain_move", {"question": "why did it drop"})
+
+    assert out["answer"] == "No clear catalyst found for that move."
+    assert out["window_minutes"] == 60  # escalated all the way since nothing was found
+    assert out["events_found"] == 0
+    assert "INSUFFICIENT" in captured["text"]
+    assert "No persisted calendar/news/price/system event found" in captured["text"]
+
+
+async def test_explain_move_stops_at_the_first_window_with_evidence():
+    class Core:
+        async def get_events_between(self, start, end, *, symbol=None, limit=50):
+            window = round((end - start).total_seconds() / 60)
+            if window == 17:  # +/-15min window (with the +2min forward buffer)
+                return [{"event": {"source": "calendar", "title": "US CPI", "summary": "Hotter than expected"},
+                        "accepted_at": "2026-01-01T13:30:05Z"}]
+            return []
+
+    class Turns:
+        async def stream_text(self, text, **kw):
+            yield SimpleNamespace(type="complete", response=SimpleNamespace(
+                display_text="Timing is consistent with the CPI release.", status=SimpleNamespace(value="completed")))
+
+    tools = TarsTools(SimpleNamespace(realtime_events=Core(), turn_controller=Turns()), "s1")
+    out = await tools.call("explain_move", {})
+    assert out["window_minutes"] == 15
+    assert out["events_found"] == 1
