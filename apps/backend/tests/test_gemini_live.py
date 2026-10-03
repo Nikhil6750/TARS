@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -675,3 +676,64 @@ async def test_get_daily_market_brief_always_regenerates_on_explicit_request():
     assert out["status"] == "GENERATED"
     assert out["brief"] == "Quiet overnight session."
     assert service.calls == 1
+
+
+# ---- mission: P0 regression -- confirmation "yes" resume timing race ----
+
+async def test_best_last_user_sees_a_still_in_progress_transcript_before_finalization():
+    """Reproduced root cause: Gemini can call confirm_pending_action as a
+    function call in the SAME turn that transcribed the user's "yes,"
+    before _finalize_user() has run (that only fires once the assistant's
+    own reply starts or the turn completes -- either of which can happen
+    AFTER the tool call). The fix: last_user() must see a "yes" already
+    captured in the live (not-yet-finalized) transcript."""
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+
+    session = GeminiLiveVoiceSession(SimpleNamespace(), emit, lambda pcm: True)
+    pending_created_at = time.monotonic()
+
+    # The user's "yes" has been transcribed (input_transcription delta),
+    # but the turn has not completed and the assistant has not started
+    # speaking yet -- _finalize_user() has NOT run.
+    await session._on_user_text("yes go ahead")
+
+    heard, heard_at = session._best_last_user()
+    assert heard == "yes go ahead"
+    assert heard_at >= pending_created_at  # fresh enough to satisfy DesktopTools.pending["at"] comparison
+
+
+async def test_best_last_user_prefers_the_finalized_transcript_once_available():
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+
+    session = GeminiLiveVoiceSession(SimpleNamespace(), emit, lambda pcm: True)
+    await session._on_user_text("yes")
+    await session._finalize_user()
+
+    heard, _heard_at = session._best_last_user()
+    assert heard == "yes"  # finalized value, not stale partial state
+
+
+async def test_best_last_user_does_not_resurrect_a_stale_partial_after_finalization():
+    """A NEW utterance's finalized text must win even if an OLDER partial
+    update happens to still be the most recently stored partial (it
+    shouldn't be, due to timestamp ordering, but this guards the invariant
+    explicitly)."""
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+
+    session = GeminiLiveVoiceSession(SimpleNamespace(), emit, lambda pcm: True)
+    await session._on_user_text("first utterance")
+    await session._finalize_user()
+    first_final = session._last_final_user
+
+    heard, heard_at = session._best_last_user()
+    assert heard == "first utterance"
+    assert (heard, heard_at) == first_final

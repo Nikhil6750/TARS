@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+from actions.errors import ConfirmationReplayError
 from app.action_contracts import ActionRequest, ActionSource, ActionStatus, RiskLevel
 from skills.app_resolver import ALIASES, _normalize
 
@@ -29,7 +30,7 @@ logger = logging.getLogger("tars.desktop_tools")
 DESKTOP_TOOL_NAMES = {
     "desktop_context", "desktop_resolve_app", "desktop_list_installed_apps", "desktop_open_app",
     "desktop_focus_window", "desktop_close_app", "desktop_list_controls", "desktop_click_control",
-    "desktop_type_text", "desktop_scroll", "browser_open_url", "browser_search", "files_list",
+    "desktop_type_text", "desktop_scroll", "calculator_calculate", "browser_open_url", "browser_search", "files_list",
     "files_read_open", "run_terminal", "analyze_chart", "watch_this_chart", "confirm_pending_action",
     "cancel_pending_action",
     "tradingview_status", "tradingview_set_symbol", "tradingview_set_timeframe",
@@ -95,6 +96,16 @@ class DesktopTools:
         self.last_user = last_user  # -> (latest final user transcript, monotonic time heard)
         self.source = source
         self.pending: dict | None = None
+        # Mission: P0 regression -- "never guess if more than one
+        # confirmation is active." `self.pending` alone (the single-slot
+        # "most recent") silently overwrote an earlier unresolved
+        # confirmation if a second one started before the first was
+        # answered. This additional list tracks every confirmation this
+        # session has asked for that hasn't been resolved yet, purely so
+        # confirm/cancel can detect "more than one" and refuse to guess --
+        # it never changes the single-pending fast path's existing
+        # behavior or shape.
+        self._pending_queue: list[dict] = []
         self.recent: deque[dict] = deque(maxlen=10)
         # Mission section 21's learning hook: an in-memory-only record of
         # each successful tool call, in the shape a future Skill Learning
@@ -154,6 +165,7 @@ class DesktopTools:
         if state == "NEEDS_CONFIRMATION":
             token = (result.data or {}).get("confirmation_token")
             self.pending = {"id": str(result.request_id), "token": token, "at": time.monotonic(), "describe": describe}
+            self._pending_queue.append(self.pending)
             outcome["message"] = (f"This needs the user's explicit confirmation: {describe}. Ask them to say yes or no, "
                                   "then call confirm_pending_action or cancel_pending_action.")
         elif result.data:
@@ -267,6 +279,20 @@ class DesktopTools:
 
     async def desktop_close_app(self, target: str = "") -> dict:
         return await self._submit("windows_app", "close", {"target": target}, describe=f"close {target}")
+
+    async def calculator_calculate(self, expression: str = "") -> dict:
+        """"Calculate 2345 times 17" -- opens Calculator (verified
+        foreground), performs ONE strictly-validated arithmetic expression
+        via Calculator's own real buttons, and verifies the displayed
+        result. Never asks for confirmation (mission section 11): the
+        calculator skill itself only ever touches the real, sandboxed
+        Calculator app with a pre-validated numeric expression -- this is
+        not a route to typing into any other app or control."""
+        open_out = await self.desktop_open_app("calculator")
+        if open_out["status"] not in ("DONE",):
+            return open_out
+        return await self._submit("calculator", "calculate", {"expression": expression},
+                                  describe=f"calculate {expression}")
 
     # ---- TradingView (item 5/6: read via the existing HotChartState/BackgroundChartWatcher
     # vision pipeline, write via real keystroke simulation -- see skills/tradingview_control.py) --
@@ -488,10 +514,35 @@ class DesktopTools:
         return {"status": "DONE", "summary": "Watching this chart in the background -- I'll keep tracking it as it updates."}
 
     # ---- human confirmation gate ------------------------------------------------
+    def _discard_from_queue(self, request_id: str) -> None:
+        self._pending_queue = [p for p in self._pending_queue if p["id"] != request_id]
+
+    def _ambiguous_pending_response(self) -> dict:
+        """Mission: P0 regression section 8 -- never guess which pending
+        confirmation a bare "yes" refers to when more than one is
+        outstanding. Each must be resolved through its own confirmation_id
+        (the UI card is tied to one specific request already)."""
+        names = ", ".join(p["describe"] for p in self._pending_queue)
+        return {
+            "status": "AMBIGUOUS",
+            "summary": f"There are {len(self._pending_queue)} actions waiting for confirmation ({names}). "
+                      "I can't tell which one 'yes' is for -- please confirm or deny each one from its own prompt.",
+        }
+
     async def confirm_pending_action(self) -> dict:
         pending = self.pending
         if not pending:
             return {"status": "NOT_FOUND", "summary": "There is no action waiting for confirmation."}
+        if len(self._pending_queue) > 1:
+            return self._ambiguous_pending_response()
+        # Mission: P0 regression -- Gemini can call this tool as part of
+        # the SAME turn that transcribed the user's "yes," before
+        # _finalize_user() has run (that only happens once the assistant's
+        # own reply starts, which can be AFTER the tool call). last_user()
+        # now resolves to whichever is more recent -- the finalized
+        # transcript, or the still-in-progress one -- so a "yes" already
+        # captured in the live transcript is not mistaken for "not
+        # answered yet" just because finalization hasn't caught up.
         heard, heard_at = self.last_user()
         if time.monotonic() - pending["at"] > 110 or heard_at < pending["at"]:
             return {"status": "NEEDS_CONFIRMATION", "summary": "The user has not answered yet. Ask them to say yes or no."}
@@ -500,8 +551,15 @@ class DesktopTools:
                     "summary": f"The user's last words were not an explicit yes ('{heard[:60]}'). Do not run it."}
         runtime = self.state.action_runtime
         self.pending = None
+        self._discard_from_queue(pending["id"])
         try:
             result = await asyncio.wait_for(runtime.confirm(UUID(pending["id"]), pending["token"], True), 45)
+        except ConfirmationReplayError:
+            # Mission: P0 regression -- the UI (or a duplicate voice call)
+            # already resolved this exact confirmation; that is not a
+            # failure, it is "already handled," and must be reported as
+            # such rather than a confusing FAILED.
+            return {"status": "ALREADY_HANDLED", "summary": "That was already confirmed or denied -- nothing more to do."}
         except Exception as exc:
             self._remember(pending["describe"], "FAILED")
             return {"status": "FAILED", "summary": f"Confirmation failed: {type(exc).__name__}"}
@@ -513,11 +571,17 @@ class DesktopTools:
         """Human clicked Yes/No in the app UI: same ActionRuntime confirm call, no transcript needed."""
         if not approve:
             return await self.cancel_pending_action()
-        pending, self.pending = self.pending, None
+        pending = self.pending
         if not pending:
             return {"status": "NOT_FOUND", "summary": "Nothing was waiting for confirmation."}
+        if len(self._pending_queue) > 1:
+            return self._ambiguous_pending_response()
+        self.pending = None
+        self._discard_from_queue(pending["id"])
         try:
             result = await asyncio.wait_for(self.state.action_runtime.confirm(UUID(pending["id"]), pending["token"], True), 45)
+        except ConfirmationReplayError:
+            return {"status": "ALREADY_HANDLED", "summary": "That was already confirmed or denied -- nothing more to do."}
         except Exception as exc:
             self._remember(pending["describe"], "FAILED")
             return {"status": "FAILED", "summary": f"Confirmation failed: {type(exc).__name__}"}
@@ -529,6 +593,7 @@ class DesktopTools:
         pending, self.pending = self.pending, None
         if not pending:
             return {"status": "NOT_FOUND", "summary": "Nothing was waiting for confirmation."}
+        self._discard_from_queue(pending["id"])
         try:
             await self.state.action_runtime.confirm(UUID(pending["id"]), pending["token"], False)
         except Exception:

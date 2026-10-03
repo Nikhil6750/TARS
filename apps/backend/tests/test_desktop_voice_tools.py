@@ -91,6 +91,56 @@ async def test_a_yes_spoken_before_the_request_does_not_count():
     assert (await t.confirm_pending_action())["status"] == "NEEDS_CONFIRMATION" and not rt.confirms
 
 
+async def test_multiple_pending_confirmations_refuse_to_guess_on_yes():
+    """Mission: P0 regression section 8 -- never guess which pending
+    confirmation a bare "yes" refers to when more than one is active."""
+    t, rt, box = tools({
+        ("desktop_control", "invoke_control"): CONFIRM,
+        ("desktop_control", "type_into_control"): CONFIRM,
+    })
+    await t.desktop_click_control("b1", "Save")
+    first_pending_id = t.pending["id"]
+    await t.desktop_type_text("c1", "2345*17", "Calculator")
+    assert len(t._pending_queue) == 2
+
+    box["heard"] = ("yes", time.monotonic())
+    out = await t.confirm_pending_action()
+    assert out["status"] == "AMBIGUOUS"
+    assert not rt.confirms  # never guessed, nothing executed
+    assert len(t._pending_queue) == 2  # neither was consumed
+
+
+async def test_ui_confirm_also_refuses_to_guess_when_multiple_are_pending():
+    t, rt, _box = tools({
+        ("desktop_control", "invoke_control"): CONFIRM,
+        ("desktop_control", "type_into_control"): CONFIRM,
+    })
+    await t.desktop_click_control("b1", "Save")
+    await t.desktop_type_text("c1", "2345*17", "Calculator")
+
+    out = await t.ui_confirm(True)
+    assert out["status"] == "AMBIGUOUS"
+    assert not rt.confirms
+
+
+async def test_confirmation_replay_is_reported_as_already_handled_not_failed():
+    """Mission: P0 regression section 10 -- UI and voice share one source
+    of truth. If the UI already resolved a confirmation (e.g. the user
+    clicked Yes) and a stale voice "yes" for the SAME request arrives
+    after, that is "already handled," not a confusing FAILED."""
+    t, rt, box = tools({("desktop_control", "invoke_control"): CONFIRM})
+    await t.desktop_click_control("b1", "Save")
+
+    async def replay_confirm(request_id, token, approved):
+        from actions.errors import ConfirmationReplayError
+        raise ConfirmationReplayError("Confirmation was already consumed")
+
+    rt.confirm = replay_confirm
+    box["heard"] = ("yes", time.monotonic())
+    out = await t.confirm_pending_action()
+    assert out["status"] == "ALREADY_HANDLED"
+
+
 async def test_cancel_denies_the_pending_action():
     t, rt, _ = tools({("desktop_control", "invoke_control"): CONFIRM})
     await t.desktop_click_control("b", "OK")

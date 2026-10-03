@@ -232,6 +232,8 @@ def _tool_declarations():
              parameters=obj(target=("STRING", "Application name, e.g. tradingview, chrome, metatrader"))),
         decl(name="desktop_close_app", description="Close a running application's window by its plain spoken name.",
              parameters=obj(target=("STRING", "Application name, e.g. calculator, notepad"))),
+        decl(name="calculator_calculate", description="'Calculate 2345 times 17' / 'what's (1250+750)/4' -- opens the real Windows Calculator (verified foreground) and performs ONE strictly-validated arithmetic expression using Calculator's own buttons, then verifies the displayed result. Never asks for confirmation -- it can only ever touch the sandboxed Calculator app with a pre-validated numeric expression, nothing else. Use this instead of desktop_open_app+desktop_click_control for any arithmetic request.",
+             parameters=obj(expression=("STRING", "Plain arithmetic only: digits, + - * / %, parentheses, e.g. '2345*17' or '(1250+750)/4'. Never anything else."))),
         decl(name="desktop_list_controls", description="List clickable/typeable UI controls of the active or a named window (Windows UI Automation). Use before clicking.",
              parameters=obj(target=("STRING", "Optional window to inspect"))),
         decl(name="desktop_click_control", description="Click a control found via desktop_list_controls. Needs the user's confirmation. Never usable for MT5 order controls.",
@@ -316,7 +318,7 @@ class TarsTools:
         try:
             if name in DESKTOP_TOOL_NAMES:
                 allowed = {"target", "control_id", "label", "text", "direction", "url", "query", "path", "command",
-                          "question", "symbol", "timeframe", "value", "submit", "timeout", "mode"}
+                          "question", "symbol", "timeframe", "value", "submit", "timeout", "mode", "expression"}
                 return await self.desktop.call(name, {k: v for k, v in (args or {}).items() if k in allowed})
             return await getattr(self, name)(**{k: v for k, v in (args or {}).items()
                                                 if k in {"symbol", "limit", "hours_ahead", "question", "context",
@@ -688,8 +690,21 @@ class GeminiLiveVoiceSession:
         self.model, self.idle_seconds = model, idle_seconds
         self.voice = voice or DEFAULT_VOICE
         self._last_final_user = ("", 0.0)
+        # Mission: P0 regression -- "confirmation yes does not resume
+        # action." Gemini can invoke confirm_pending_action as a function
+        # call in the SAME turn that transcribed the user's "yes," before
+        # _finalize_user() has run (that only fires once the assistant's
+        # own reply starts or the turn completes, either of which can
+        # happen AFTER the tool call). Relying on `_last_final_user` alone
+        # made confirm_pending_action wrongly conclude "not answered yet"
+        # even though the live transcript already said "yes." This tracks
+        # the best-available transcript -- finalized or still in progress,
+        # whichever is more recent -- on the SAME clock (time.monotonic())
+        # DesktopTools.pending["at"] already uses, so the two are directly
+        # comparable.
+        self._last_partial_user = ("", 0.0)
         if hasattr(tools, "bind_last_user"):
-            tools.bind_last_user(lambda: self._last_final_user)
+            tools.bind_last_user(self._best_last_user)
         self._connect = connect
         self.metrics = metrics or LatencyMetrics()
         self.speech_open_frames = speech_open_frames
@@ -976,7 +991,15 @@ class GeminiLiveVoiceSession:
         self._user_text += text
         self.last_transcript = self._user_text.strip()
         self._last_user_at = time.perf_counter()
+        self._last_partial_user = (resolve_trading_terms(self.last_transcript), time.monotonic())
         await self.send("partial_transcript", text=resolve_trading_terms(self._user_text.strip()))
+
+    def _best_last_user(self) -> tuple[str, float]:
+        """See __init__'s comment on `_last_partial_user`: whichever of the
+        finalized or still-in-progress transcript is more recent."""
+        if self._last_partial_user[1] > self._last_final_user[1] and self._last_partial_user[0]:
+            return self._last_partial_user
+        return self._last_final_user
 
     async def _finalize_user(self):
         if self._user_open:
