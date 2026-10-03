@@ -41,6 +41,7 @@ from app.action_contracts import (
     SkillValidationError,
 )
 from assistant.chart_analysis import ChartAnalysisError, ChartAnalysisService
+from assistant.chart_capture import CHART_WINDOW_RE
 from memory.service import KIND_TRADING_OBSERVATION, MemoryService
 from trading.context import TradingContextBuilder
 
@@ -202,6 +203,26 @@ class TradingSkill(BaseSkill):
                 risk_level=RiskLevel.READ_ONLY,
                 data=data,
                 error=data.get("error") or "secure desktop capture refused",
+                started_at=started,
+            )
+        # Mission: FINAL INFRASTRUCTURE MISSION section 19 -- this action
+        # predates and never shared assistant/chart_capture.py's chart-
+        # identity guard (used by the voice/chat "analyze this chart" path
+        # and the Universal Market Explainer), so a non-chart foreground
+        # window could get a fabricated structured analysis instead of an
+        # honest refusal. Reuses the SAME regex/outcome, not a second one.
+        executable = str(data.get("executable") or "")
+        window_title = str(data.get("window_title") or "")
+        if not CHART_WINDOW_RE.search(executable) and not CHART_WINDOW_RE.search(window_title):
+            shown = window_title or executable or "nothing identifiable"
+            return self._result(
+                request,
+                ActionStatus.FAILED,
+                f"What's in front right now doesn't look like a supported chart (I see '{shown}'). "
+                "Bring the chart to the front and ask again.",
+                risk_level=RiskLevel.READ_ONLY,
+                data=data,
+                error="not_a_chart",
                 started_at=started,
             )
         image_bytes, image_format = _decode_capture_image(data)

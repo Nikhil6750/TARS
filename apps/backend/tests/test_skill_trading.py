@@ -125,3 +125,78 @@ async def test_open_tradingview_uses_webbrowser(skill, monkeypatch):
 async def test_focus_tradingview_fails_closed_when_not_running(skill):
     result = await skill.execute(_request("focus_tradingview"))
     assert result.status == ActionStatus.FAILED
+
+
+# ---- mission: FINAL INFRASTRUCTURE MISSION section 19 --------------------
+# analyze_active_chart must refuse a non-chart foreground window honestly,
+# reusing assistant/chart_capture.py's CHART_WINDOW_RE guard, instead of
+# fabricating a structured analysis of whatever happens to be in front.
+
+class _FakeBridge:
+    def __init__(self, capture_data: dict):
+        self._data = capture_data
+        self.calls = 0
+
+    async def dispatch(self, request_id, skill_name, action, args, *, timeout):
+        self.calls += 1
+        return self._data
+
+
+class _FakeChartAnalysisService:
+    def __init__(self):
+        self.calls = 0
+
+    async def analyze(self, **kwargs):
+        self.calls += 1
+        from assistant.chart_analysis import ChartAnalysisResult
+
+        return ChartAnalysisResult(
+            instrument="EURUSD", timeframe="15m", market_context="Quiet.", key_levels=[],
+            possible_setup=None, invalidation=None, risk_notes="none", provider="fake",
+            raw_text="{}", structured=True,
+        )
+
+
+def _bmp_data_uri() -> str:
+    import base64
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(buf, format="BMP")
+    return "data:image/bmp;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+async def test_analyze_active_chart_refuses_a_non_chart_foreground_window(memory, context_builder):
+    bridge = _FakeBridge({
+        "executable": "chrome.exe", "window_title": "ChatGPT - Google Chrome",
+        "image_data_base64": _bmp_data_uri(), "image_format": "image/bmp",
+        "is_secure_desktop": False, "error": None, "active_context": None,
+    })
+    chart_analysis = _FakeChartAnalysisService()
+    skill = TradingSkill(memory_service=memory, context_builder=context_builder, bridge=bridge,
+                         chart_analysis_service=chart_analysis)
+
+    result = await skill.execute(_request("analyze_active_chart"))
+
+    assert result.status == ActionStatus.FAILED
+    assert result.error == "not_a_chart"
+    assert "ChatGPT" in result.summary or "Chrome" in result.summary
+    assert chart_analysis.calls == 0  # never fabricated an analysis of the wrong window
+
+
+async def test_analyze_active_chart_proceeds_for_a_real_chart_window(memory, context_builder):
+    bridge = _FakeBridge({
+        "executable": "TradingView.exe", "window_title": "EURUSD - TradingView",
+        "image_data_base64": _bmp_data_uri(), "image_format": "image/bmp",
+        "is_secure_desktop": False, "error": None, "active_context": None,
+    })
+    chart_analysis = _FakeChartAnalysisService()
+    skill = TradingSkill(memory_service=memory, context_builder=context_builder, bridge=bridge,
+                         chart_analysis_service=chart_analysis)
+
+    result = await skill.execute(_request("analyze_active_chart"))
+
+    assert result.status == ActionStatus.SUCCEEDED
+    assert chart_analysis.calls == 1
