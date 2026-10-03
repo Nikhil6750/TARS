@@ -372,3 +372,66 @@ async def test_prompt_is_sent_over_stdin_not_argv(monkeypatch, provider):
     assert events
     assert not any("pipe & amp" in str(a) for a in captured["args"])
     assert b"pipe & amp" in process.stdin.data
+
+
+# ---- Windows .cmd shim resolution: the actual image-handoff root cause ----
+# Live acceptance testing found "Analyze this chart" always failing with a
+# Claude-reported "Read permission wasn't granted" even though
+# --allowedTools Read / --add-dir were both passed correctly. Root cause:
+# shutil.which("claude") on Windows resolves to the npm-generated claude.cmd
+# shim (`"%dp0%\node_modules\...\claude.exe"   %*`); cmd.exe's `%*`
+# expansion re-tokenizes the command line and corrupts any argument
+# containing an embedded double-quote -- chart analysis's system prompt is
+# full of `"instrument"`-style quoted JSON keys -- which silently
+# garbled/dropped the --allowedTools/--add-dir flags that followed it on
+# the argv. Reproduced with the real captured screenshot and the real
+# system prompt; fixed by resolving through the shim to the real .exe it
+# wraps and invoking that directly, which Python's subprocess module quotes
+# correctly for a native Win32 executable.
+from assistant.providers.claude_code import _resolve_real_executable
+
+# The real npm-generated shim line, verbatim (raw string -- a single
+# backslash here is a single backslash in the file, not an escape).
+_REAL_SHIM_LINE = r'"%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe"   %*' + "\n"
+
+
+def _write_shim(tmp_path, *, with_real_exe: bool) -> tuple:
+    bin_dir = tmp_path / "node_modules" / "@anthropic-ai" / "claude-code" / "bin"
+    bin_dir.mkdir(parents=True)
+    real_exe = bin_dir / "claude.exe"
+    if with_real_exe:
+        real_exe.write_bytes(b"fake-exe")
+    shim = tmp_path / "claude.cmd"
+    shim.write_text(_REAL_SHIM_LINE, encoding="utf-8")
+    return shim, real_exe
+
+
+def test_resolves_cmd_shim_to_the_real_exe_it_wraps(tmp_path):
+    shim, real_exe = _write_shim(tmp_path, with_real_exe=True)
+    assert _resolve_real_executable(str(shim)) == str(real_exe)
+
+
+def test_leaves_a_non_cmd_command_untouched():
+    assert _resolve_real_executable(r"C:\some\path\claude.exe") == r"C:\some\path\claude.exe"
+    assert _resolve_real_executable("claude") == "claude"
+
+
+def test_falls_back_to_the_shim_if_the_wrapped_exe_is_missing(tmp_path):
+    # bin/claude.exe deliberately not created -- must not fabricate a path
+    # to a file that does not exist.
+    shim, _real_exe = _write_shim(tmp_path, with_real_exe=False)
+    assert _resolve_real_executable(str(shim)) == str(shim)
+
+
+def test_falls_back_to_the_shim_if_its_content_does_not_match_the_known_pattern(tmp_path):
+    shim = tmp_path / "claude.cmd"
+    shim.write_text("@ECHO off\nsome other npm shim layout entirely\n", encoding="utf-8")
+    assert _resolve_real_executable(str(shim)) == str(shim)
+
+
+def test_provider_construction_resolves_through_a_real_cmd_shim(tmp_path, monkeypatch):
+    """End-to-end through ClaudeCodeProvider.__init__, not just the helper."""
+    shim, real_exe = _write_shim(tmp_path, with_real_exe=True)
+    monkeypatch.setattr("shutil.which", lambda name: str(shim))
+    provider = ClaudeCodeProvider(command="claude")
+    assert provider._command == str(real_exe)

@@ -56,6 +56,39 @@ def sanitize_user_facing_text(text: str) -> str:
     return cleaned
 
 
+_CMD_SHIM_EXE_PATTERN = re.compile(r'"%dp0%\\(.+?\.exe)"', re.IGNORECASE)
+
+
+def _resolve_real_executable(command: str) -> str:
+    """`shutil.which("claude")` on Windows resolves to the npm-generated
+    `claude.cmd` shim (`"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\
+    claude.exe"   %*`). cmd.exe's `%*` expansion re-tokenizes the command
+    line and corrupts any argument containing an embedded double-quote --
+    chart analysis's system prompt is full of `"instrument"`-style quoted
+    JSON keys -- silently garbling/dropping the `--allowedTools`/`--add-dir`
+    flags that follow it on the command line, so the Read tool call ends up
+    denied even though those flags were passed. Invoking the real .exe the
+    shim wraps sidesteps cmd.exe's re-parsing entirely: Python's subprocess
+    module quotes argv correctly for a native Win32 executable. Reads the
+    shim to find the real target rather than hardcoding the package path,
+    so a future claude-code release with a different shim layout degrades
+    safely back to the shim instead of silently pointing at a stale path.
+    No-op for a non-.cmd command (e.g. already a direct .exe path, or
+    non-Windows)."""
+    if not command.lower().endswith(".cmd"):
+        return command
+    shim_path = Path(command)
+    try:
+        shim_text = shim_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return command
+    match = _CMD_SHIM_EXE_PATTERN.search(shim_text)
+    if not match:
+        return command
+    real_exe = shim_path.parent / match.group(1)
+    return str(real_exe) if real_exe.is_file() else command
+
+
 logger = logging.getLogger("tars.claude_code")
 
 
@@ -71,7 +104,7 @@ class ClaudeCodeProvider(AssistantProvider):
         persist_sessions: bool = True,
     ):
         self._raw_command = command
-        self._command = shutil.which(command) or command
+        self._command = _resolve_real_executable(shutil.which(command) or command)
         self._timeout = timeout_seconds
         self._working_directory = working_directory or str(
             Path(tempfile.gettempdir()) / "tars-assistant-runtime"

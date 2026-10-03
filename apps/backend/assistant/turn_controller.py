@@ -1035,6 +1035,8 @@ class AssistantTurnController:
             image_bytes = base64.b64decode(encoded_image, validate=True)
         except (binascii.Error, ValueError):
             return ("The chart capture came back corrupted; please try again.", "chart_capture")
+        if not image_bytes:
+            return ("The chart capture came back empty; please try again.", "chart_capture")
 
         image_format = str(data.get("image_format") or "image/png")
         active_context_text = (
