@@ -34,11 +34,17 @@ from trading.market_context import MarketContext, build_market_context
 
 Outcome = Literal["RESOLVED", "AMBIGUOUS", "NOT_FOUND", "CHART_UNAVAILABLE", "SYMBOL_NOT_VERIFIED"]
 
-# Broader context -> intraday structure -> current session detail (mission
-# section 3's own suggested sequence). Bounded to 3 so a "what's happening
-# today" request never issues more than 3 chart captures + 3 vision reads
-# before its one synthesis call.
-DEFAULT_TIMEFRAME_SEQUENCE: tuple[str, ...] = ("4h", "1h", "15m")
+# Intraday structure -> current session detail. Live testing against the
+# real TradingView desktop app found timeframe verification has no fast
+# title-based signal (unlike symbol, which TradingView puts directly in
+# the window title) -- it always falls through to the slower vision-
+# confirmation path, which a single bounded-retry attempt can legitimately
+# take 60-130s to settle. Bounded to 2 (not the mission's illustrative 3)
+# so a default "what's happening today" request stays within a usable
+# voice-interaction latency rather than compounding that cost three times;
+# an explicit timeframe request (`analyze_market(..., timeframe="5m")`)
+# always takes exactly the one timeframe asked for, regardless.
+DEFAULT_TIMEFRAME_SEQUENCE: tuple[str, ...] = ("1h", "15m")
 
 _SYNTHESIS_SYSTEM_PROMPT = """You are TARS, synthesizing a Universal Market Explainer answer from evidence
 TARS itself already gathered (MT5/TradingView/calendar/news/chart reads below) -- you are not looking at a

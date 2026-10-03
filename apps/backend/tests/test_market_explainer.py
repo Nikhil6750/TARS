@@ -178,14 +178,14 @@ async def test_tradingview_unavailable_stops_before_set_symbol():
     assert runtime.requests == []
 
 
-async def test_default_multi_timeframe_sequence_collects_three_observations_one_synthesis_call():
+async def test_default_multi_timeframe_sequence_collects_observations_with_one_synthesis_call():
     orchestrator, tv, _runtime, synthesis = _orchestrator()
     result = await orchestrator.analyze("gold")  # no explicit timeframe -> default sequence
 
-    assert tv.set_timeframe_calls == ["4h", "1h", "15m"]
-    assert result.timeframes_analyzed == ["4h", "1h", "15m"]
-    assert len(result.observations) == 3
-    assert len(synthesis.calls) == 1  # still exactly one synthesis call for all 3
+    assert tv.set_timeframe_calls == ["1h", "15m"]
+    assert result.timeframes_analyzed == ["1h", "15m"]
+    assert len(result.observations) == 2
+    assert len(synthesis.calls) == 1  # still exactly one synthesis call for all of them
 
 
 async def test_a_failed_timeframe_is_noted_honestly_not_fabricated():
@@ -193,7 +193,7 @@ async def test_a_failed_timeframe_is_noted_honestly_not_fabricated():
     orchestrator, tv, _runtime, synthesis = _orchestrator(tv=tv)
     result = await orchestrator.analyze("gold")
 
-    assert result.timeframes_analyzed == ["4h", "15m"]
+    assert result.timeframes_analyzed == ["15m"]
     assert result.timeframes_failed == ["1h"]
     assert "Could not get a verified chart read for: 1h" in result.evidence_text()
     assert "do not claim to have seen these" in result.evidence_text()
