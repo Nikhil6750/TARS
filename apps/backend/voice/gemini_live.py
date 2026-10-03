@@ -92,8 +92,14 @@ Facts and tools
 - For any market fact call a tool first: get_market_context, get_mt5_state, get_tradingview_state, get_recent_events,
   get_economic_calendar. If a source is disconnected, say so plainly. Data labelled DEMO REPLAY is a rehearsal, not
   live: always say it is a replay.
-- "Look at the chart / what changed / what am I looking at" -> analyze_chart. "What is on my screen / which app is
-  open" -> desktop_context. Never claim you looked at something you did not.
+- "Look at the chart / what changed / analyze this chart" -> analyze_chart. This always captures the chart FRESH and
+  gives you a real answer in this same turn -- it never depends on or waits for the background watcher, so never tell
+  the user to "keep it visible and ask again"; if it fails, say exactly what it reported (e.g. that what's in front
+  isn't a supported chart). "Watch this for me" / "monitor EURUSD" / "keep an eye on this" -> watch_this_chart
+  (acknowledges TARS's background chart watcher immediately; it does not run an analysis and must not be used for
+  "analyze"/"what do you see"). "What is on my screen / which app is open" -> desktop_context, and trust its
+  primary_visible_window over anything you remember from earlier in the conversation -- an app you opened a while
+  ago may no longer be what's in front now. Never claim you looked at something you did not.
 
 Desktop control (all through TARS's guarded action layer)
 - TARS resolves applications itself from what is actually installed on this machine -- you never know or
@@ -195,8 +201,9 @@ def _tool_declarations():
              parameters=obj(path=("STRING", "Path to open"))),
         decl(name="run_terminal", description="Run a bounded PowerShell/terminal command through TARS's guarded executor (read-only commands run; anything state-changing needs confirmation; destructive ones are blocked).",
              parameters=obj(command=("STRING", "The command"))),
-        decl(name="analyze_chart", description="Analyse the TradingView/visible chart with TARS's chart pipeline. Use for 'look at the chart', 'what changed'.",
+        decl(name="analyze_chart", description="Synchronously capture and analyse the chart that is actually in front right now, and return a real read in this same turn -- never depends on or waits for the background watcher. Use for 'look at the chart', 'what changed', 'analyze this chart'. If the front window isn't a supported chart, it reports that honestly instead of analyzing the wrong thing.",
              parameters=obj(question=("STRING", "What to look for, e.g. 'the 15 minute chart, what changed'"))),
+        decl(name="watch_this_chart", description="Acknowledge TARS's background chart watcher for the chart currently in front, and return immediately -- it does NOT run an analysis. Use only for an explicit 'watch this for me' / 'monitor EURUSD' / 'keep an eye on this' request, never as a substitute for analyze_chart."),
         decl(name="tradingview_status", description="The TradingView window's current symbol and timeframe, from TARS's own background chart monitor -- fast, no vision call. Use for 'what am I looking at' when TradingView is the current trading app, or to check before changing it."),
         decl(name="tradingview_set_symbol", description="Change the symbol on the running TradingView chart (e.g. switch to EURUSD, show gold). TradingView must already be open -- open it first if it is not the current trading app.",
              parameters=obj(symbol=("STRING", "Symbol/ticker as the user said it, e.g. EURUSD, gold, XAUUSD"))),

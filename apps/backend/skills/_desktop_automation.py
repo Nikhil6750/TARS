@@ -17,6 +17,7 @@ scroll action target the same element it was just shown.
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -37,10 +38,30 @@ from app.action_contracts import (
     FocusedControlInfo,
     MonitorInfo,
     SkillExecutionError,
+    VisibleScreenState,
     WindowBounds,
     WindowState,
 )
 from skills.windows_app import _find_window, _process_executable_name
+
+# TARS's own companion/orb/activity-pill window (apps/web/src-tauri,
+# tauri.conf.json productName "TARS") is a *different OS process* from this
+# backend, so it cannot be excluded by PID like `get_primary_visible_user_window`
+# excludes utility windows of unrelated processes -- title is the only signal
+# available. Matches "TARS", "TARS Ready" (set once the frontend finishes
+# loading, see lib.rs's mark_frontend_ready) and "TARS Companion"/"TARS ..."
+# variants; deliberately anchored so it does not also exclude an unrelated
+# window that merely mentions TARS in its title (e.g. a browser tab).
+_TARS_WINDOW_TITLE_RE = re.compile(r"^\s*tars(\s+(ready|companion)\b)?\s*$", re.IGNORECASE)
+_TARS_EXE_RE = re.compile(r"^tars(-companion)?\.exe$", re.IGNORECASE)
+# Windows that are real top-level windows but never meaningful "user
+# content" for a "what's on my screen" answer -- the desktop shell itself,
+# and IME/input-experience helper windows some Windows builds surface as
+# visible, titled top-level windows.
+_UTILITY_TITLE_RE = re.compile(
+    r"^(program manager|windows input experience|microsoft text input application)$",
+    re.IGNORECASE,
+)
 
 ACTIONABLE_CONTROL_TYPES = {
     "ButtonControl",
@@ -80,20 +101,156 @@ def _safe(getter: Any, default: Any = None) -> Any:
         return default
 
 
-def resolve_window(target: str | None) -> tuple[int, str, str]:
-    """Resolve a `target` (executable/title substring, or None/"current" for
-    the foreground window) to (hwnd, executable, window_title). Raises
-    SkillExecutionError if nothing matches -- callers turn that into a real
-    FAILED result, never a fabricated one."""
-    normalized = (target or "").strip().lower()
-    if normalized in ("", "current", "foreground", "active"):
-        hwnd = win32gui.GetForegroundWindow()
-        if not hwnd:
-            raise SkillExecutionError("no foreground window is available")
+def _raw_foreground_window() -> tuple[int, str, str] | None:
+    """The literal OS foreground window, no exclusions applied. Kept
+    separate from `get_primary_visible_user_window` because this value can
+    legitimately BE TARS's own window (e.g. the user just clicked into the
+    TARS panel) -- that is a true fact worth reporting as
+    `raw_foreground_window`, just never the answer to "what's on my
+    screen"."""
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        return None
+    title = win32gui.GetWindowText(hwnd)
+    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+    exe = _process_executable_name(pid) if pid else ""
+    return hwnd, exe, title
+
+
+def _is_tars_window(exe: str, title: str) -> bool:
+    return bool(_TARS_EXE_RE.match((exe or "").strip())) or bool(
+        _TARS_WINDOW_TITLE_RE.match((title or "").strip())
+    )
+
+
+def _window_is_tool_window(hwnd: int) -> bool:
+    ex_style = _safe(lambda: win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE), 0)
+    return bool(ex_style & win32con.WS_EX_TOOLWINDOW)
+
+
+def _window_has_valid_bounds(hwnd: int) -> bool:
+    bounds = capture_window_bounds(hwnd)
+    return bounds is not None and bounds.width > 0 and bounds.height > 0
+
+
+def _enum_top_level_windows_z_order() -> list[int]:
+    """EnumWindows enumerates top-level windows in Z-order, topmost window
+    first -- exactly the ordering PrimaryVisibleUserWindow needs to walk."""
+    hwnds: list[int] = []
+
+    def _callback(hwnd: int, _extra: None) -> bool:
+        hwnds.append(hwnd)
+        return True
+
+    try:
+        win32gui.EnumWindows(_callback, None)
+    except Exception:
+        pass
+    return hwnds
+
+
+def _window_snapshot(hwnd: int) -> tuple[int, str, str] | None:
+    try:
         title = win32gui.GetWindowText(hwnd)
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         exe = _process_executable_name(pid) if pid else ""
-        return hwnd, exe, title
+    except Exception:
+        return None
+    return hwnd, exe, title
+
+
+def get_primary_visible_user_window() -> tuple[int, str, str] | None:
+    """The first real, visible, user-content window in Z-order (topmost
+    first), excluding:
+      - TARS's own companion/orb/activity-pill window(s)
+      - invisible or minimized windows
+      - tool windows (WS_EX_TOOLWINDOW) and known desktop-shell/IME utility
+        windows that are not meaningful user content
+      - windows with no title or zero/invalid bounds
+
+    This is the truthful answer to "what is on my screen" / deictic
+    requests ("this", "here", "this chart") -- it always wins over
+    GetForegroundWindow() alone (which can be TARS itself) and over any
+    remembered/previous-turn app name."""
+    for hwnd in _enum_top_level_windows_z_order():
+        if not _safe(lambda h=hwnd: win32gui.IsWindowVisible(h), False):
+            continue
+        if _safe(lambda h=hwnd: win32gui.IsIconic(h), False):
+            continue
+        snapshot = _window_snapshot(hwnd)
+        if snapshot is None:
+            continue
+        _, exe, title = snapshot
+        if not title.strip():
+            continue
+        if _is_tars_window(exe, title):
+            continue
+        if _UTILITY_TITLE_RE.match(title.strip()):
+            continue
+        if _window_is_tool_window(hwnd):
+            continue
+        if not _window_has_valid_bounds(hwnd):
+            continue
+        return snapshot
+    return None
+
+
+def get_tars_overlay_windows() -> list[tuple[int, str, str]]:
+    """Every visible top-level window identified as TARS's own UI
+    (companion/orb/activity-pill/workspace) -- reported alongside
+    `primary_user_window` so a caller can note "TARS is also visible"
+    without ever letting it replace the real answer."""
+    overlays: list[tuple[int, str, str]] = []
+    for hwnd in _enum_top_level_windows_z_order():
+        if not _safe(lambda h=hwnd: win32gui.IsWindowVisible(h), False):
+            continue
+        snapshot = _window_snapshot(hwnd)
+        if snapshot is None:
+            continue
+        _, exe, title = snapshot
+        if _is_tars_window(exe, title):
+            overlays.append(snapshot)
+    return overlays
+
+
+def get_visible_screen_state() -> VisibleScreenState:
+    """Full Z-order-aware snapshot: the literal foreground window, the
+    primary visible *user* window (TARS and non-content windows excluded),
+    and any of TARS's own overlay windows currently visible. See
+    VisibleScreenState's docstring for why these are kept separate."""
+    raw = _raw_foreground_window()
+    primary = get_primary_visible_user_window()
+    overlays = get_tars_overlay_windows()
+    return VisibleScreenState(
+        raw_foreground_window=_context_for(*raw) if raw else None,
+        primary_user_window=_context_for(*primary) if primary else None,
+        tars_overlay_windows=[_context_for(*overlay) for overlay in overlays],
+        observed_at=datetime.now(UTC),
+    )
+
+
+def resolve_window(target: str | None) -> tuple[int, str, str]:
+    """Resolve a `target` (executable/title substring, or None/"current"/
+    "screen"/"this" for what the user is actually looking at) to
+    (hwnd, executable, window_title). Raises SkillExecutionError if nothing
+    matches -- callers turn that into a real FAILED result, never a
+    fabricated one.
+
+    For the no-explicit-target case this deliberately does NOT return the
+    literal GetForegroundWindow() result: TARS's own companion/orb window
+    can itself be foreground (or always-on-top above the real content the
+    user means), so it resolves via get_primary_visible_user_window()
+    first, falling back to the raw foreground window only when no eligible
+    user window was found at all (e.g. nothing but TARS is open)."""
+    normalized = (target or "").strip().lower()
+    if normalized in ("", "current", "foreground", "active", "screen", "this"):
+        primary = get_primary_visible_user_window()
+        if primary is not None:
+            return primary
+        raw = _raw_foreground_window()
+        if raw is None:
+            raise SkillExecutionError("no foreground window is available")
+        return raw
 
     match = _find_window(target or "")
     if match is None:
@@ -158,12 +315,11 @@ def capture_focused_control_info() -> FocusedControlInfo | None:
     return _safe(_get, None)
 
 
-def build_active_window_context(target: str | None = None) -> ActiveWindowContext:
-    """Full rich context snapshot for a window (default: foreground window).
-    Metadata only -- no screenshot, no control-tree, no text content. Used
-    by `inspect_current_window`; distinct from the lightweight per-request
-    `active_context` field a caller may already attach."""
-    hwnd, exe, title = resolve_window(target)
+def _context_for(hwnd: int, exe: str, title: str) -> ActiveWindowContext:
+    """Shared rich-context builder for a resolved (hwnd, exe, title) triple
+    -- used both by `build_active_window_context` (a single resolved
+    window) and `get_visible_screen_state` (several windows snapshotted in
+    one call, without re-resolving via `resolve_window`)."""
     return ActiveWindowContext(
         executable=exe or "unknown.exe",
         process_id=_safe(lambda: win32process.GetWindowThreadProcessId(hwnd)[1], None),
@@ -175,6 +331,16 @@ def build_active_window_context(target: str | None = None) -> ActiveWindowContex
         focused_control=capture_focused_control_info(),
         source=ContextSource.ui_automation,
     )
+
+
+def build_active_window_context(target: str | None = None) -> ActiveWindowContext:
+    """Full rich context snapshot for a window (default: the primary
+    visible user window -- see resolve_window). Metadata only -- no
+    screenshot, no control-tree, no text content. Used by
+    `inspect_current_window`; distinct from the lightweight per-request
+    `active_context` field a caller may already attach."""
+    hwnd, exe, title = resolve_window(target)
+    return _context_for(hwnd, exe, title)
 
 
 def serialize_control(control: auto.Control) -> dict[str, Any]:

@@ -41,6 +41,7 @@ from skills._desktop_automation import (
     do_scroll,
     do_select,
     do_type,
+    get_visible_screen_state,
     read_clipboard_text,
     read_selected_text,
     resolve_window,
@@ -58,6 +59,7 @@ except ImportError as exc:  # pragma: no cover - exercised only off-Windows
 
 _RISK_BY_ACTION: dict[str, RiskLevel] = {
     "inspect_current_window": RiskLevel.READ_ONLY,
+    "inspect_screen": RiskLevel.READ_ONLY,
     "list_controls": RiskLevel.READ_ONLY,
     "read_selected_text": RiskLevel.READ_ONLY,
     "read_clipboard": RiskLevel.READ_ONLY,
@@ -91,6 +93,8 @@ class DesktopControlSkill(BaseSkill):
             _validate_bool(arguments, "include_controls")
             _validate_bool(arguments, "include_clipboard")
             _validate_int(arguments, "max_controls", minimum=1, maximum=50)
+        elif action == "inspect_screen":
+            return
         elif action == "list_controls":
             _validate_optional_str(arguments, "target")
             _validate_int(arguments, "max_controls", minimum=1, maximum=300)
@@ -130,6 +134,8 @@ class DesktopControlSkill(BaseSkill):
 
         if action == "inspect_current_window":
             return self._execute_inspect_current_window(request, args, started)
+        if action == "inspect_screen":
+            return self._execute_inspect_screen(request, started)
         if action == "list_controls":
             return self._execute_list_controls(request, args, started)
         if action == "focus_control":
@@ -149,6 +155,31 @@ class DesktopControlSkill(BaseSkill):
         raise SkillExecutionError(f"unsupported desktop_control action '{action}'")
 
     # -- read actions ----------------------------------------------------
+
+    def _execute_inspect_screen(self, request: ActionRequest, started: datetime) -> ActionResult:
+        """Z-order-aware "what is actually on my screen" snapshot -- see
+        get_visible_screen_state()'s docstring. Distinct from
+        inspect_current_window: that action resolves one target window
+        (already PrimaryVisibleUserWindow-aware for the no-target case) for
+        UI Automation purposes, while this one additionally reports the raw
+        foreground window and TARS's own overlay windows so a caller can
+        tell the difference between "TARS happens to be foreground" and
+        "the user is actually looking at TARS."""
+        state = get_visible_screen_state()
+        primary = state.primary_user_window
+        summary = (
+            f"The primary visible window is '{primary.window_title or primary.executable}'."
+            if primary is not None
+            else "No eligible user window is currently visible (only TARS's own window, or nothing on screen)."
+        )
+        return self._result(
+            request,
+            ActionStatus.SUCCEEDED,
+            summary,
+            risk_level=RiskLevel.READ_ONLY,
+            data={"visible_screen_state": state.model_dump(mode="json")},
+            started_at=started,
+        )
 
     def _execute_inspect_current_window(
         self, request: ActionRequest, args: dict[str, Any], started: datetime

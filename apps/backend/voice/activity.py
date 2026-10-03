@@ -99,6 +99,8 @@ def describe_tool_call(name: str, args: dict) -> str:
         return "Running a command…"
     if name == "analyze_chart":
         return "Analyzing the chart…"
+    if name == "watch_this_chart":
+        return "Watching this chart…"
     if name == "ask_claude":
         return "Thinking it through…"
     if name in ("tradingview_set_symbol",):
@@ -133,4 +135,6 @@ def describe_tool_result(name: str, args: dict, status: str) -> str:
         return "That's not allowed"
     if status == "NEEDS_CONFIRMATION":
         return "Waiting for confirmation"
+    if status == "NOT_A_CHART":
+        return "No chart to watch"
     return f"Couldn't {('open ' + target) if target else 'do that'}"

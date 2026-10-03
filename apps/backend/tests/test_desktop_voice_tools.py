@@ -99,7 +99,7 @@ async def test_cancel_denies_the_pending_action():
 
 
 async def test_mt5_order_controls_are_blocked_before_reaching_the_runtime():
-    t, rt, _ = tools({("desktop_control", "inspect_current_window"): (
+    t, rt, _ = tools({("desktop_control", "inspect_screen"): (
         ActionStatus.SUCCEEDED, {"window": "MetaTrader 5 - Demo terminal64.exe"}, None)})
     for label in ("Buy", "Sell by Market", "New Order", "Close Position", "Modify"):
         out = await t.desktop_click_control("c", label)
@@ -117,12 +117,12 @@ async def test_order_placement_via_terminal_is_blocked():
 
 
 async def test_desktop_context_is_lazy_cached_and_lists_recent_actions():
-    t, rt, _ = tools({("desktop_control", "inspect_current_window"): (ActionStatus.SUCCEEDED, {"window": "TradingView"}, None)})
+    t, rt, _ = tools({("desktop_control", "inspect_screen"): (ActionStatus.SUCCEEDED, {"window": "TradingView"}, None)})
     await t.desktop_open_app("chrome")
     a = await t.desktop_context()
     b = await t.desktop_context()
-    assert sum(1 for r in rt.requests if r.action == "inspect_current_window") == 1
-    assert a["active_window"]["data"]["window"] == "TradingView" and b["recent_actions"][0]["action"] == "open chrome"
+    assert sum(1 for r in rt.requests if r.action == "inspect_screen") == 1
+    assert a["primary_visible_window"]["data"]["window"] == "TradingView" and b["recent_actions"][0]["action"] == "open chrome"
 
 
 async def test_tars_tools_route_desktop_names_and_drop_unknown_args():
@@ -198,7 +198,7 @@ async def test_tradingview_set_symbol_updates_context_and_survives_a_followup():
     t, rt, _ = tools({
         ("tradingview", "set_symbol"): (ActionStatus.SUCCEEDED, {"outcome": "SUCCESS", "symbol": "EURUSD"}, None),
         ("tradingview", "set_timeframe"): (ActionStatus.SUCCEEDED, {"outcome": "SUCCESS", "symbol": "EURUSD", "timeframe": "15m"}, None),
-        ("desktop_control", "inspect_current_window"): (ActionStatus.SUCCEEDED, {"window": "TradingView"}, None),
+        ("desktop_control", "inspect_screen"): (ActionStatus.SUCCEEDED, {"window": "TradingView"}, None),
     })
     await t.desktop_open_app("tradingview")
     out1 = await t.tradingview_set_symbol("EURUSD")
@@ -210,9 +210,9 @@ async def test_tradingview_set_symbol_updates_context_and_survives_a_followup():
     assert t.current_timeframe == "15m"
 
     ctx = await t.desktop_context()
-    assert ctx["current_trading_app"] == "TradingView"
-    assert ctx["current_symbol"] == "EURUSD"
-    assert ctx["current_timeframe"] == "15m"
+    assert ctx["previously_opened_by_tars"]["current_trading_app"] == "TradingView"
+    assert ctx["previously_opened_by_tars"]["current_symbol"] == "EURUSD"
+    assert ctx["previously_opened_by_tars"]["current_timeframe"] == "15m"
 
 
 async def test_tradingview_status_syncs_context_without_changing_anything():
@@ -221,6 +221,22 @@ async def test_tradingview_status_syncs_context_without_changing_anything():
     assert out["status"] == "DONE"
     assert t.current_symbol == "XAUUSD" and t.current_timeframe == "1h"
     assert rt.requests[0].action == "status"
+
+
+# ---- watch_this_chart: explicit background-watch acknowledgement, never analyze_chart's path ----
+
+async def test_watch_this_chart_acknowledges_immediately_without_analyzing():
+    t, rt, _ = tools({("tradingview", "status"): (ActionStatus.SUCCEEDED, {"symbol": "EURUSD", "timeframe": "15m"}, None)})
+    out = await t.watch_this_chart()
+    assert out["status"] == "DONE"
+    assert "watch" in out["summary"].lower()
+    assert rt.requests[0].skill == "tradingview" and rt.requests[0].action == "status"
+
+
+async def test_watch_this_chart_reports_not_a_chart_when_nothing_to_watch():
+    t, rt, _ = tools({("tradingview", "status"): (ActionStatus.FAILED, {}, "tradingview window not found")})
+    out = await t.watch_this_chart()
+    assert out["status"] == "NOT_A_CHART"
 
 
 async def test_switching_to_mt5_after_tradingview_changes_current_trading_app():

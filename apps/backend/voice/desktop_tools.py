@@ -30,7 +30,8 @@ DESKTOP_TOOL_NAMES = {
     "desktop_context", "desktop_resolve_app", "desktop_list_installed_apps", "desktop_open_app",
     "desktop_focus_window", "desktop_close_app", "desktop_list_controls", "desktop_click_control",
     "desktop_type_text", "desktop_scroll", "browser_open_url", "browser_search", "files_list",
-    "files_read_open", "run_terminal", "analyze_chart", "confirm_pending_action", "cancel_pending_action",
+    "files_read_open", "run_terminal", "analyze_chart", "watch_this_chart", "confirm_pending_action",
+    "cancel_pending_action",
     "tradingview_status", "tradingview_set_symbol", "tradingview_set_timeframe",
     "web_get_context", "web_list_tabs", "web_focus_tab", "web_new_tab", "web_close_tab",
     "web_navigate", "web_back", "web_forward", "web_refresh",
@@ -194,17 +195,32 @@ class DesktopTools:
     async def desktop_context(self) -> dict:
         now = time.monotonic()
         if self._ctx_cache and now - self._ctx_cache[0] < 3:
-            active = self._ctx_cache[1]
+            screen = self._ctx_cache[1]
         else:
-            out = await self._submit("desktop_control", "inspect_current_window", {"include_controls": False},
-                                     describe="inspect the active window")
-            active = out
-            self._ctx_cache = (now, out)
-        return {"active_window": active, "recent_actions": list(self.recent),
-                "last_target_app": self.last_target_app, "current_trading_app": self.current_trading_app,
-                "current_symbol": self.current_symbol, "current_timeframe": self.current_timeframe,
-                "active_browser_tab": self.active_browser_tab,
-                "note": "Desktop is inspected only when asked; no continuous screenshots are taken."}
+            screen = await self._submit("desktop_control", "inspect_screen", {},
+                                        describe="inspect what is visible on screen")
+            self._ctx_cache = (now, screen)
+        return {
+            "primary_visible_window": screen,
+            "note": (
+                "primary_visible_window is a FRESH, just-now observation of the real primary "
+                "window on screen (TARS's own companion/orb/activity-pill window is excluded, "
+                "never reported as the answer here) -- it is the ONLY truthful source for "
+                "'what is on my screen' / 'what app is open' / 'this' / 'here'. The fields under "
+                "previously_opened_by_tars are session memory of apps TARS itself opened or "
+                "focused earlier in this conversation and may be stale or no longer visible -- "
+                "never use them to answer a screen-visibility question; they only matter for a "
+                "same-app follow-up like 'switch it to EURUSD' after 'open TradingView'."
+            ),
+            "previously_opened_by_tars": {
+                "last_target_app": self.last_target_app,
+                "current_trading_app": self.current_trading_app,
+                "current_symbol": self.current_symbol,
+                "current_timeframe": self.current_timeframe,
+            },
+            "recent_actions": list(self.recent),
+            "active_browser_tab": self.active_browser_tab,
+        }
 
     def _note_target_app(self, target: str) -> None:
         self.last_target_app = target
@@ -215,7 +231,7 @@ class DesktopTools:
 
     async def _active_is_mt5(self) -> bool:
         ctx = await self.desktop_context()
-        return bool(_MT5_WINDOW.search(json.dumps(ctx.get("active_window", {}), default=str)))
+        return bool(_MT5_WINDOW.search(json.dumps(ctx.get("primary_visible_window", {}), default=str)))
 
     # ---- read-only: app resolution --------------------------------------------
     async def desktop_resolve_app(self, target: str = "") -> dict:
@@ -416,12 +432,18 @@ class DesktopTools:
         return await self._submit("terminal", "run_command", {"command": command}, describe=f"run '{command[:60]}'")
 
     async def analyze_chart(self, question: str = "") -> dict:
+        """Synchronous, bounded "analyze this chart" path -- goes through
+        AssistantTurnController._chart_analysis(), which captures the
+        primary visible window FRESH on every call and analyzes it in this
+        same turn. Never the background watcher: see watch_this_chart()
+        for the separate, explicit "watch/monitor" command, which this
+        method must never be used to implement."""
         turns = getattr(self.state, "turn_controller", None)
         if turns is None:
             return {"status": "FAILED", "summary": "The assistant backend is not running"}
         answer = ""
         try:
-            async with asyncio.timeout(60):
+            async with asyncio.timeout(75):
                 async for event in turns.stream_text(f"analyze the chart. {question}".strip(), conversation_id="voice-chart",
                                                      turn_id=None, speak=False):
                     if event.type == "complete" and event.response:
@@ -432,6 +454,23 @@ class DesktopTools:
             return {"status": "FAILED", "summary": "Chart analysis timed out"}
         self._remember("analyze the chart", "DONE")
         return {"status": "DONE", "analysis": answer[:2500]}
+
+    async def watch_this_chart(self) -> dict:
+        """Explicit "watch this for me" / "monitor EURUSD" command. TARS's
+        background chart watcher already runs continuously and tracks any
+        supported chart window on its own -- this gives the user a
+        truthful, IMMEDIATE acknowledgement that it is doing so (or an
+        honest NOT_A_CHART if there is nothing to watch) instead of silently
+        doing nothing, or instead of running a full vision analysis. This is
+        the only "watch" entry point; analyze_chart() must never be used for
+        a watch/monitor request, and this must never be used to answer an
+        "analyze"/"what do you see" request."""
+        out = await self._submit("tradingview", "status", {}, describe="check whether a supported chart is visible to watch")
+        self._sync_tradingview(out)
+        if out.get("status") != "DONE":
+            return {"status": "NOT_A_CHART", "summary": "I don't see a supported chart window open to watch right now."}
+        self._remember("watch this chart", "DONE")
+        return {"status": "DONE", "summary": "Watching this chart in the background -- I'll keep tracking it as it updates."}
 
     # ---- human confirmation gate ------------------------------------------------
     async def confirm_pending_action(self) -> dict:

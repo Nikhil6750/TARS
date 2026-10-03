@@ -134,6 +134,29 @@ class ActiveWindowContext(BaseModel):
     source: ContextSource | None = None
 
 
+class VisibleScreenState(BaseModel):
+    """Z-order-aware snapshot of what the user is actually looking at.
+
+    Deliberately distinct from a blind GetForegroundWindow() read: TARS's
+    own companion/orb/activity-pill window can itself be the literal
+    foreground window (or always-on-top above it), and a caller that stops
+    at raw_foreground_window in that case ends up answering a "what's on my
+    screen" question with TARS's own UI, or falling back to stale
+    conversation memory instead. `primary_user_window` is the first
+    eligible real-content window in Z-order (topmost first) after
+    excluding TARS's own windows, invisible/minimized windows, tool
+    windows, and windows with no title or invalid bounds -- see
+    skills/_desktop_automation.py's get_visible_screen_state(). For any
+    deictic question ("what's on my screen", "this", "here"),
+    primary_user_window is the truthful answer, never raw_foreground_window
+    or remembered session state."""
+
+    raw_foreground_window: ActiveWindowContext | None = None
+    primary_user_window: ActiveWindowContext | None = None
+    tars_overlay_windows: list[ActiveWindowContext] = Field(default_factory=list)
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class ActionRequest(BaseModel):
     schema_version: str = "1.0.0"
     id: UUID = Field(default_factory=uuid4)

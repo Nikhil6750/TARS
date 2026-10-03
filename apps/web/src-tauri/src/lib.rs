@@ -305,7 +305,6 @@ fn get_hotkey_status() -> Vec<serde_json::Value> {
         })
         .unwrap_or_default()
 }
-static LAST_EXTERNAL_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 #[cfg(target_os = "windows")]
 unsafe fn get_target_chart_window_hwnd() -> windows_sys::Win32::Foundation::HWND {
@@ -316,30 +315,24 @@ unsafe fn get_target_chart_window_hwnd() -> windows_sys::Win32::Foundation::HWND
     let current_pid = GetCurrentProcessId();
     let current_fg = GetForegroundWindow();
 
-    // 1. If current foreground is an external application (e.g. TradingView), preserve & return it
+    // 1. If current foreground is an external application (e.g. TradingView), return it directly.
     if !current_fg.is_null() {
         let mut fg_pid = 0u32;
         GetWindowThreadProcessId(current_fg, &mut fg_pid);
         if fg_pid != 0 && fg_pid != current_pid {
-            LAST_EXTERNAL_HWND.store(current_fg as isize, Ordering::SeqCst);
             return current_fg;
         }
     }
 
-    // 2. If TARS is foreground, check the preserved previous external window
-    let stored_raw = LAST_EXTERNAL_HWND.load(Ordering::SeqCst);
-    if stored_raw != 0 {
-        let stored_hwnd = stored_raw as HWND;
-        if IsWindow(stored_hwnd) != 0 && IsWindowVisible(stored_hwnd) != 0 {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(stored_hwnd, &mut pid);
-            if pid != 0 && pid != current_pid {
-                return stored_hwnd;
-            }
-        }
-    }
-
-    // 3. Fallback: Search top-level windows in Z-order for top visible non-TARS application
+    // 2. TARS itself is foreground (or there is no foreground window): do a
+    // FRESH Z-order scan for the top visible non-TARS application window --
+    // deliberately NOT a remembered "last external window." A remembered
+    // hwnd can no longer be what the user is looking at (they may have
+    // switched to a different app entirely while TARS had focus), and
+    // reporting/capturing it instead of a live re-scan is exactly the
+    // stale-screen-state bug this function used to have (see
+    // PrimaryVisibleUserWindow in the Python backend's
+    // skills/_desktop_automation.py for the equivalent fix on that side).
     let mut curr = GetTopWindow(std::ptr::null_mut());
     while !curr.is_null() {
         if IsWindowVisible(curr) != 0 {
@@ -353,7 +346,6 @@ unsafe fn get_target_chart_window_hwnd() -> windows_sys::Win32::Foundation::HWND
                 let w = rect.right - rect.left;
                 let h = rect.bottom - rect.top;
                 if len > 0 && w > 200 && h > 200 {
-                    LAST_EXTERNAL_HWND.store(curr as isize, Ordering::SeqCst);
                     return curr;
                 }
             }
@@ -636,20 +628,6 @@ fn set_wake_playback_state(app: tauri::AppHandle, speaking: bool) -> Result<(), 
 }
 
 fn summon_hud_impl(app: &tauri::AppHandle, mode: Option<&str>) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    unsafe {
-        use windows_sys::Win32::System::Threading::*;
-        use windows_sys::Win32::UI::WindowsAndMessaging::*;
-        let fg = GetForegroundWindow();
-        if !fg.is_null() {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(fg, &mut pid);
-            if pid != 0 && pid != GetCurrentProcessId() {
-                LAST_EXTERNAL_HWND.store(fg as isize, Ordering::SeqCst);
-            }
-        }
-    }
-
     if app.get_webview_window("main").is_some() {
         return match mode.unwrap_or("voice") {
             "voice" | "compact" | "hud" | "pill" => enter_orb(app),
