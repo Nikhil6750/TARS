@@ -443,7 +443,11 @@ class DesktopTools:
             return {"status": "FAILED", "summary": "The assistant backend is not running"}
         answer = ""
         try:
-            async with asyncio.timeout(75):
+            # Capture (~20s bound) + ChartAnalysisService's own provider
+            # budget (settings.chart_analysis_timeout_seconds, 120s by
+            # default) + margin -- must not cut off a real, in-flight
+            # vision call against a large chart screenshot.
+            async with asyncio.timeout(150):
                 async for event in turns.stream_text(f"analyze the chart. {question}".strip(), conversation_id="voice-chart",
                                                      turn_id=None, speak=False):
                     if event.type == "complete" and event.response:

@@ -1046,18 +1046,25 @@ class AssistantTurnController:
         )
 
         try:
-            async with asyncio.timeout(40):
-                result = await self._chart_analysis_service.analyze(
-                    image_bytes=image_bytes,
-                    image_format=image_format,
-                    conversation_id=f"turn:{turn_id}",
-                    active_context_text=active_context_text,
-                    goal_text="Analyze this chart.",
-                )
-        except TimeoutError:
-            return ("The chart analysis took too long and timed out.", "chart_analysis")
+            # No extra wrapper timeout here: ChartAnalysisService's
+            # provider (ClaudeCodeProvider) already bounds itself to
+            # settings.chart_analysis_timeout_seconds and raises
+            # AssistantProviderError on expiry -- a shorter wrapper here
+            # would just cut off a real, in-flight vision call before the
+            # provider's own deliberately-sized budget for a large chart
+            # screenshot (live testing measured a genuine analysis taking
+            # over 40s against a real captured chart).
+            result = await self._chart_analysis_service.analyze(
+                image_bytes=image_bytes,
+                image_format=image_format,
+                conversation_id=f"turn:{turn_id}",
+                active_context_text=active_context_text,
+                goal_text="Analyze this chart.",
+            )
         except ChartAnalysisError as exc:
             return (f"I couldn't analyze that capture: {exc}", "chart_analysis")
+        except AssistantProviderError as exc:
+            return (f"The chart analysis failed: {exc}", "chart_analysis")
 
         display = result.formatted_tars_text()
         await self._publish(TurnEvent(turn_id=turn_id, type="delta", text=display))
