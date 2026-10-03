@@ -12,6 +12,71 @@ mod wake_engine;
 mod capture_wgc;
 #[cfg(target_os = "windows")]
 mod chart_watcher;
+mod supervisor;
+
+use std::sync::Arc;
+use supervisor::BackendSupervisor;
+
+/// Resolves the Python backend's source directory so the supervisor can
+/// spawn `python run.py` in it. `TARS_BACKEND_DIR` (an explicit override)
+/// wins when set; otherwise falls back to the fixed dev-repo layout
+/// (`apps/web/src-tauri/target/{debug,release}/tars-companion.exe` ->
+/// `apps/backend`) -- the same single-checkout assumption
+/// `app/config.py`'s `REPO_ROOT` already makes on the Python side. Returns
+/// None (never panics) if neither resolves to a real directory; the
+/// supervisor then simply can't spawn and reports DEGRADED truthfully
+/// rather than crashing the desktop shell over it.
+/// Pure path arithmetic, separated from any filesystem access so it's
+/// directly unit-testable: exe = apps/web/src-tauri/target/{debug,release}/
+/// tars-companion.exe -> apps/backend is 5 parents up from the exe path
+/// (debug/release, target, src-tauri, web), then join "backend". A 4-
+/// parent version lands one level too shallow (apps/web/backend, which does
+/// not exist) -- reproduced live via the real debug build's own supervisor
+/// log ("failed to spawn backend: ... os error 123") before this was fixed.
+fn backend_dir_from_exe_path(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    Some(exe.parent()?.parent()?.parent()?.parent()?.parent()?.join("backend"))
+}
+
+/// Resolves the Python backend's source directory so the supervisor can
+/// spawn `python run.py` in it. `TARS_BACKEND_DIR` (an explicit override)
+/// wins when set; otherwise falls back to the fixed dev-repo layout above --
+/// the same single-checkout assumption `app/config.py`'s `REPO_ROOT`
+/// already makes on the Python side. Returns None (never panics) if
+/// neither resolves to a real directory; the supervisor then simply can't
+/// spawn and reports DEGRADED truthfully rather than crashing the desktop
+/// shell over it.
+fn resolve_backend_dir() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("TARS_BACKEND_DIR") {
+        let path = std::path::PathBuf::from(dir);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    let candidate = backend_dir_from_exe_path(&exe)?;
+    if candidate.is_dir() {
+        return Some(candidate);
+    }
+    None
+}
+
+#[cfg(test)]
+mod backend_dir_tests {
+    use super::backend_dir_from_exe_path;
+    use std::path::Path;
+
+    #[test]
+    fn resolves_apps_backend_from_a_debug_build_exe_path() {
+        let exe = Path::new("C:/TARS/apps/web/src-tauri/target/debug/tars-companion.exe");
+        assert_eq!(backend_dir_from_exe_path(exe).unwrap(), Path::new("C:/TARS/apps/backend"));
+    }
+
+    #[test]
+    fn resolves_apps_backend_from_a_release_build_exe_path() {
+        let exe = Path::new("C:/TARS/apps/web/src-tauri/target/release/tars-companion.exe");
+        assert_eq!(backend_dir_from_exe_path(exe).unwrap(), Path::new("C:/TARS/apps/backend"));
+    }
+}
 
 static CAPTURE_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
@@ -195,6 +260,22 @@ fn apply_mic_muted(app: &tauri::AppHandle, muted: bool) {
 #[tauri::command]
 fn get_mic_muted() -> bool {
     wake_engine::is_muted()
+}
+
+static PAUSE_MENU_ITEM: std::sync::Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>> = std::sync::Mutex::new(None);
+
+/// The single place that changes the tray's pause/resume label after a
+/// pause/resume call succeeds -- mirrors `apply_mic_muted`'s pattern. The
+/// actual pause STATE lives entirely in the backend's MarketWatchService
+/// (mission section 6: "do not create another pause flag"); this only
+/// keeps the tray label in sync with what the backend just reported.
+fn apply_monitoring_paused(app: &tauri::AppHandle, paused: bool) {
+    if let Ok(g) = PAUSE_MENU_ITEM.lock() {
+        if let Some(item) = g.as_ref() {
+            let _ = item.set_text(if paused { "Resume Monitoring" } else { "Pause Monitoring" });
+        }
+    }
+    let _ = app.emit("tars://monitoring-paused", paused);
 }
 
 #[tauri::command]
@@ -602,9 +683,63 @@ fn toggle_hud(app: tauri::AppHandle, mode: Option<String>) -> Result<bool, Strin
 }
 
 #[tauri::command]
-fn exit_app(app: tauri::AppHandle) -> Result<(), String> {
+fn exit_app(app: tauri::AppHandle, supervisor: tauri::State<Arc<BackendSupervisor>>) -> Result<(), String> {
+    // Quit is a true shutdown (mission section 8): stop the backend
+    // cooperatively FIRST (runs its own watcher/monitor/db cleanup) so no
+    // orphan Python process survives the native shell exiting.
+    supervisor.stop(&app);
     app.exit(0);
     Ok(())
+}
+
+#[tauri::command]
+fn get_backend_health(supervisor: tauri::State<Arc<BackendSupervisor>>) -> supervisor::BackendHealth {
+    supervisor.health()
+}
+
+#[tauri::command]
+fn restart_backend(app: tauri::AppHandle, supervisor: tauri::State<Arc<BackendSupervisor>>) -> Result<(), String> {
+    let sup = Arc::clone(&supervisor);
+    std::thread::spawn(move || sup.restart(&app));
+    Ok(())
+}
+
+/// Tray Pause/Resume Monitoring (mission section 6): a thin HTTP call onto
+/// the SAME MarketWatchService pause state the voice tools already use --
+/// never a second pause flag.
+fn post_watcher_toggle(path: &str) -> Result<bool, String> {
+    let url = format!("http://127.0.0.1:8000{path}");
+    let resp = ureq::post(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send_bytes(b"{}")
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value =
+        serde_json::from_reader(resp.into_reader()).map_err(|e| e.to_string())?;
+    Ok(body.get("paused").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+fn get_watcher_paused_status() -> bool {
+    ureq::get("http://127.0.0.1:8000/api/v1/watcher/status")
+        .timeout(std::time::Duration::from_secs(3))
+        .call()
+        .ok()
+        .and_then(|r| serde_json::from_reader::<_, serde_json::Value>(r.into_reader()).ok())
+        .and_then(|v| v.get("paused").and_then(|p| p.as_bool()))
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn pause_monitoring(app: tauri::AppHandle) -> Result<bool, String> {
+    let paused = post_watcher_toggle("/api/v1/watcher/pause")?;
+    apply_monitoring_paused(&app, paused);
+    Ok(paused)
+}
+
+#[tauri::command]
+fn resume_monitoring(app: tauri::AppHandle) -> Result<bool, String> {
+    let paused = post_watcher_toggle("/api/v1/watcher/resume")?;
+    apply_monitoring_paused(&app, paused);
+    Ok(paused)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1528,6 +1663,10 @@ pub fn run() {
             set_autostart,
             wake_engine_status,
             set_wake_playback_state,
+            get_backend_health,
+            restart_backend,
+            pause_monitoring,
+            resume_monitoring,
         ])
         .on_page_load(|webview, payload| {
             if webview.label() == "main"
@@ -1556,9 +1695,13 @@ pub fn run() {
             let mic_i = MenuItem::with_id(app, "mic_test", "Microphone Test", true, None::<&str>)?;
             let mute_i = MenuItem::with_id(app, "toggle_mute", if wake_engine::is_muted() { "Unmute Microphone" } else { "Mute Microphone" }, true, None::<&str>)?;
             if let Ok(mut g) = MUTE_MENU_ITEM.lock() { *g = Some(mute_i.clone()); }
+            let pause_i = MenuItem::with_id(app, "toggle_pause_monitoring", "Pause Monitoring", true, None::<&str>)?;
+            if let Ok(mut g) = PAUSE_MENU_ITEM.lock() { *g = Some(pause_i.clone()); }
             let sep1 = PredefinedMenuItem::separator(app)?;
+            let restart_i = MenuItem::with_id(app, "restart_tars", "Restart TARS", true, None::<&str>)?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit TARS", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &workspace_i, &mute_i, &mic_i, &sep1, &quit_i])?;
+            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &workspace_i, &mute_i, &mic_i, &sep1, &pause_i, &restart_i, &sep2, &quit_i])?;
 
             // A stable, explicit id is required: TrayIconBuilder::new() (no id) defaults to
             // "{process_id}-{counter}", a different identity every single launch. Windows treats
@@ -1595,7 +1738,30 @@ pub fn run() {
                             "toggle_mute" => {
                                 apply_mic_muted(app, !wake_engine::is_muted());
                             }
+                            "toggle_pause_monitoring" => {
+                                let app = app.clone();
+                                std::thread::spawn(move || {
+                                    let path = if get_watcher_paused_status() {
+                                        "/api/v1/watcher/resume"
+                                    } else {
+                                        "/api/v1/watcher/pause"
+                                    };
+                                    if let Ok(paused) = post_watcher_toggle(path) {
+                                        apply_monitoring_paused(&app, paused);
+                                    }
+                                });
+                            }
+                            "restart_tars" => {
+                                let sup = app.state::<Arc<BackendSupervisor>>().inner().clone();
+                                let app2 = app.clone();
+                                std::thread::spawn(move || sup.restart(&app2));
+                            }
                             "quit" => {
+                                // Quit is a true shutdown (mission section 8): stop the
+                                // backend cooperatively first so no orphan Python
+                                // process survives the native shell exiting.
+                                let sup = app.state::<Arc<BackendSupervisor>>().inner().clone();
+                                sup.stop(app);
                                 app.exit(0);
                             }
                             _ => {}
@@ -1663,6 +1829,19 @@ pub fn run() {
             // window, unlike the user-triggered capture_chart_window path.
             #[cfg(target_os = "windows")]
             chart_watcher::start(app.handle().clone());
+
+            // Tauri companion supervises the Python backend as a child
+            // process (mission: FINAL INFRASTRUCTURE MISSION section 2) --
+            // adopts an already-healthy backend (e.g. started by
+            // scripts/start_tars.ps1) rather than spawning a duplicate,
+            // or spawns + supervises one itself with bounded crash backoff.
+            let backend_dir = resolve_backend_dir().unwrap_or_else(|| {
+                eprintln!("[TARS][supervisor] could not resolve the backend directory (set TARS_BACKEND_DIR to override); will still adopt an already-running backend, but cannot spawn one");
+                std::path::PathBuf::new()
+            });
+            let supervisor = Arc::new(BackendSupervisor::new(backend_dir));
+            app.manage(Arc::clone(&supervisor));
+            supervisor.start(app.handle().clone());
 
             Ok(())
         })
