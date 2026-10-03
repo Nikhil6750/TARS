@@ -62,10 +62,16 @@ class _FakeActionRuntime:
         return self.result
 
 
-def _bmp_base64(width: int = 4, height: int = 4) -> str:
+def _bmp_data_uri(width: int = 4, height: int = 4) -> str:
+    """Matches the real shape lib.rs's capture_active_window returns --
+    `data:image/bmp;base64,<...>`, NOT raw base64. A regression once slipped
+    past this suite because an earlier version of this helper returned raw
+    base64, which turn_controller._chart_analysis then failed to decode
+    only against the real native build, not these tests -- see the
+    partition(",") handling it now shares with app/routers/assistant.py."""
     buf = io.BytesIO()
     Image.new("RGB", (width, height), color=(10, 20, 30)).save(buf, format="BMP")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    return "data:image/bmp;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _capture_result(*, executable: str, window_title: str, image_b64: str | None, error: str | None = None,
@@ -112,7 +118,7 @@ def _make_controller(conn, *, action_runtime, chart_analysis_service) -> Assista
 
 async def test_analyze_this_chart_captures_fresh_and_returns_real_analysis_same_turn(conn):
     runtime = _FakeActionRuntime(_capture_result(
-        executable="tradingview.exe", window_title="EURUSD - TradingView", image_b64=_bmp_base64(),
+        executable="tradingview.exe", window_title="EURUSD - TradingView", image_b64=_bmp_data_uri(),
     ))
     controller = _make_controller(
         conn, action_runtime=runtime, chart_analysis_service=ChartAnalysisService(_FakeChartProvider())
@@ -131,7 +137,7 @@ async def test_analyze_this_chart_refuses_a_non_chart_window_instead_of_analyzin
     switched to Chrome -- capturing Chrome must report NOT_A_CHART-shaped
     truth, never send Chrome's screenshot to the chart vision model."""
     runtime = _FakeActionRuntime(_capture_result(
-        executable="chrome.exe", window_title="New Tab - Google Chrome", image_b64=_bmp_base64(),
+        executable="chrome.exe", window_title="New Tab - Google Chrome", image_b64=_bmp_data_uri(),
     ))
     provider = _FakeChartProvider()
     controller = _make_controller(

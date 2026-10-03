@@ -1025,8 +1025,14 @@ class AssistantTurnController:
         image_data = data.get("image_data_base64")
         if not isinstance(image_data, str) or not image_data.strip():
             return ("I couldn't capture an image of the chart to analyze.", "chart_capture")
+        # capture_active_window returns a data: URI (see lib.rs), not raw
+        # base64 -- same encoding the REST analyze-chart endpoint already
+        # strips in app/routers/assistant.py.
+        _, _, encoded_image = (
+            image_data.partition(",") if image_data.startswith("data:") else ("", "", image_data)
+        )
         try:
-            image_bytes = base64.b64decode(image_data, validate=True)
+            image_bytes = base64.b64decode(encoded_image, validate=True)
         except (binascii.Error, ValueError):
             return ("The chart capture came back corrupted; please try again.", "chart_capture")
 
