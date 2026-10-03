@@ -255,6 +255,15 @@ class BaseSkill(ABC):
         """Perform the action and return a real ActionResult. Never return
         status=SUCCEEDED without having actually performed the action."""
 
+    def execution_timeout_for(self, action: str) -> float | None:
+        """Optional per-action override of the runtime's generic dispatch
+        timeout. None (the default) means "use the runtime's own default" --
+        every existing skill is unaffected. Override only when an action's
+        own bounded verification/retry contract can legitimately take longer
+        than that generic default (see TradingViewControlSkill for the
+        reproduced-live case this exists for)."""
+        return None
+
     async def health(self) -> dict[str, Any]:
         """Best-effort, side-effect-free availability report -- e.g. "is my
         required dependency actually wired in", never a live probe that

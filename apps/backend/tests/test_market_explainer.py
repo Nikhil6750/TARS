@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import io
 
+import pytest
 from PIL import Image
 
 from app.action_contracts import ActionResult, ActionStatus, RiskLevel
@@ -17,6 +18,18 @@ from assistant.chart_analysis import ChartAnalysisService
 from assistant.provider import AssistantProvider, AssistantReply, AssistantRequest
 from trading.asset_resolver import AssetResolver
 from trading.market_explainer import MarketExplainerOrchestrator
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    """The orchestrator waits a few real seconds after a verified symbol
+    switch for the chart to settle (reproduced live -- see
+    _SYMBOL_SETTLE_SECONDS) -- never let that slow these unit tests down."""
+    async def _instant_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("trading.market_explainer.asyncio.sleep", _instant_sleep)
+
 
 _STRUCTURED_JSON = """{
   "instrument": "%s", "timeframe": "%s", "current_price_context": "near range mid",
@@ -215,3 +228,41 @@ async def test_follow_up_pronoun_resolves_via_active_symbol():
     assert result.resolved
     assert result.symbol == "EURUSD"
     assert tv.set_symbol_calls == ["EURUSD"]
+
+
+async def test_waits_for_the_chart_to_settle_after_a_verified_symbol_switch():
+    """Reproduced live: a symbol switch's title verification can pass
+    while the chart's own price feed is still mid-transition. The
+    orchestrator must sleep (bounded, not skipped) between a verified
+    symbol switch and its first capture."""
+    import trading.market_explainer as mod
+
+    calls = []
+
+    async def _tracking_sleep(seconds):
+        calls.append(seconds)
+
+    orchestrator, _tv, _runtime, _synthesis = _orchestrator()
+    import unittest.mock as mock
+    with mock.patch.object(mod.asyncio, "sleep", _tracking_sleep):
+        await orchestrator.analyze("gold", timeframe="15m")
+
+    assert calls == [mod._SYMBOL_SETTLE_SECONDS]
+
+
+async def test_no_settle_wait_when_the_symbol_switch_itself_is_not_verified():
+    import trading.market_explainer as mod
+
+    calls = []
+
+    async def _tracking_sleep(seconds):
+        calls.append(seconds)
+
+    tv = _FakeTVAdapter(set_symbol_ok=False)
+    orchestrator, _tv, _runtime, _synthesis = _orchestrator(tv=tv)
+    import unittest.mock as mock
+    with mock.patch.object(mod.asyncio, "sleep", _tracking_sleep):
+        result = await orchestrator.analyze("gold", timeframe="15m")
+
+    assert result.status == "SYMBOL_NOT_VERIFIED"
+    assert calls == []

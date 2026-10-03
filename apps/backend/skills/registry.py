@@ -97,7 +97,11 @@ def build_registry(
     if hot_chart_store is not None:
         from skills.tradingview_control import TradingViewControlSkill
 
-        skills["tradingview"] = TradingViewControlSkill(hot_chart_store)
+        skills["tradingview"] = TradingViewControlSkill(
+            hot_chart_store,
+            chart_analysis_service=chart_analysis_service,
+            capture_skill=skills.get("windows_app"),
+        )
 
     return skills
 

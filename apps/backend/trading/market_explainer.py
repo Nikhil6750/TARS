@@ -23,6 +23,7 @@ timeframes were captured -- never one Claude call per timeframe.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -45,6 +46,21 @@ Outcome = Literal["RESOLVED", "AMBIGUOUS", "NOT_FOUND", "CHART_UNAVAILABLE", "SY
 # an explicit timeframe request (`analyze_market(..., timeframe="5m")`)
 # always takes exactly the one timeframe asked for, regardless.
 DEFAULT_TIMEFRAME_SEQUENCE: tuple[str, ...] = ("1h", "15m")
+
+# Reproduced live (mission: harden chart capture reliability -- investigate
+# before fixing, do not guess): a symbol switch's window-title verification
+# can report SUCCESS (the title text updates to the new symbol almost
+# immediately) while the chart's own price feed/visual content is still
+# mid-transition -- captured and confirmed live: right after a verified
+# "EURUSD" title, the window still displayed the PREVIOUS symbol's price
+# (gold's ~4,140 instead of EURUSD's ~1.125); a capture taken in that
+# window risks a stale/transitional read even though verification already
+# passed. A few seconds later the same window correctly showed the new
+# symbol's real price. This is specifically a SYMBOL-switch risk: a
+# timeframe switch's verification is vision-based (10-45s, see above),
+# which already gives the chart ample time to settle before the
+# orchestrator's own subsequent capture runs.
+_SYMBOL_SETTLE_SECONDS = 2.0
 
 _SYNTHESIS_SYSTEM_PROMPT = """You are TARS, synthesizing a Universal Market Explainer answer from evidence
 TARS itself already gathered (MT5/TradingView/calendar/news/chart reads below) -- you are not looking at a
@@ -158,6 +174,9 @@ class MarketExplainerOrchestrator:
         result = await self._bring_chart_into_view(symbol, asset)
         if result is not None:
             return result
+        # Let the chart's price feed/visuals catch up before the first
+        # capture -- see _SYMBOL_SETTLE_SECONDS for the reproduced evidence.
+        await asyncio.sleep(_SYMBOL_SETTLE_SECONDS)
 
         timeframes = [timeframe] if timeframe else list(self._default_timeframes)
         observations: list[ChartObservation] = []

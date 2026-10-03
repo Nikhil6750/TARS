@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -66,6 +67,36 @@ _VISION_VERIFY_TIMEOUT = 45.0  # generous: real vision analysis measured ~15-31s
 # unrelated symbol. A bounded retry (re-focus, re-click, re-type) resolves
 # that without ever reporting SUCCESS on an unverified guess.
 _MAX_ATTEMPTS = 3
+# Reproduced live (mission: harden TradingView control/capture reliability):
+# the generic ActionRuntime dispatch timeout (30s) cut off set_timeframe mid-
+# verification -- every timeframe change falls through to vision confirmation
+# (_VISION_VERIFY_TIMEOUT=45s per attempt), and a symbol change that misses
+# the fast title match falls through to the same vision wait after its own
+# 6s title-poll window, so one single _change() attempt alone can legitimately
+# take longer than the generic default, well before _MAX_ATTEMPTS is
+# exhausted. Sized to comfortably cover the worst case of all _MAX_ATTEMPTS
+# attempts each needing the full vision wait, not merely the common case.
+_MUTATION_EXECUTION_TIMEOUT = _MAX_ATTEMPTS * (_TITLE_VERIFY_TIMEOUT + _VISION_VERIFY_TIMEOUT) + 15.0
+# Brief settle time before an active verification capture, so the just-sent
+# Enter keypress's dialog has visibly closed/redrawn (same justification as
+# market_explainer.py's _SYMBOL_SETTLE_SECONDS).
+_VERIFY_SETTLE_SECONDS = 1.5
+
+
+class _DirectSkillRuntime:
+    """Minimal action_runtime-shaped adapter (just `.submit()`) so
+    capture_and_analyze_chart (assistant/chart_capture.py) can be reused
+    here without going through the real ActionRuntime -- see
+    TradingViewControlSkill._active_vision_confirm for why that would
+    deadlock. Calls the windows_app skill's execute() directly instead,
+    the same bypass skills/trading.py's _dispatch_capture already uses
+    (via a frontend bridge) for the same reason."""
+
+    def __init__(self, capture_skill: Any) -> None:
+        self._skill = capture_skill
+
+    async def submit(self, request: ActionRequest) -> ActionResult:
+        return await self._skill.execute(request)
 
 
 def _force_foreground(hwnd: int) -> None:
@@ -111,9 +142,24 @@ def _find_render_child(hwnd: int) -> int:
 
 
 def _click_to_focus(hwnd: int) -> None:
+    """Reproduced live (mission: harden TradingView control/capture
+    reliability -- investigate before fixing): the render child is ONE
+    Chromium surface spanning the entire app content (toolbar, chart,
+    watchlist), not just the chart canvas -- confirmed by GetWindowRect
+    matching the full window. Its geometric CENTER lands almost exactly on
+    the chart's own right-side price axis (measured live: center at ~50%
+    width, same column as the price labels), where a single click opens
+    TradingView's "quick trade at this price" popup (Add alert/Buy/Sell/
+    Add order/Draw line) -- confirmed by a screenshot showing that exact
+    menu stuck open after an unattended automated run, blocking every
+    subsequent click/keystroke until dismissed. Clicking at 25% width /
+    45% height instead lands inside the plain candlestick plot area,
+    comfortably clear of that price-axis column, the left drawing-tools
+    sidebar, and the top toolbar."""
     target = _find_render_child(hwnd)
     left, top, right, bottom = win32gui.GetWindowRect(target)
-    cx, cy = (left + right) // 2, (top + bottom) // 2
+    cx = left + int((right - left) * 0.25)
+    cy = top + int((bottom - top) * 0.45)
     win32api.SetCursorPos((cx, cy))
     time.sleep(0.1)
     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
@@ -127,13 +173,64 @@ def _send_keys(text: str) -> None:
     auto.SendKeys(text, waitTime=0.05)
 
 
+_TIMEFRAME_ENTRY_PATTERN = re.compile(r"^\s*(\d+)\s*([mMhH])\s*$")
+
+
+def _tradingview_interval_keystroke(timeframe: str) -> str:
+    """Converts a canonical timeframe string ("5m", "1h", "4h") into the
+    literal text TradingView's own "Change Interval" quick-entry dialog
+    actually accepts.
+
+    Confirmed live against the real desktop app (mission: harden
+    TradingView control, investigate before fixing): typing a bare digit
+    while the chart has keyboard focus opens a "Change Interval" overlay
+    that interprets the number as MINUTES, with a live preview label
+    ("5 minutes") confirming it before Enter applies it -- typing "5"
+    applies a 5-minute chart, typing "60" applies 1-hour, both verified by
+    screenshot. The dialog does NOT recognize an "m"/"h" unit suffix
+    appended to the number: sending the previous literal "5m" typed the
+    digit "5" (opening the overlay) followed by the character "m" (not
+    valid numeric input), an unreliable sequence -- this is the exact
+    mechanism live acceptance testing traced minute-timeframe-switch
+    failures to, not a verification bug (verification was already
+    correct; see hardened retry/match logic elsewhere in this file).
+    Day/week/month values ARE accepted by the same dialog with their
+    letter suffix as literal text (confirmed live: "1D" applies Daily),
+    so anything that is not a bare N+m/h pattern passes through
+    unchanged."""
+    match = _TIMEFRAME_ENTRY_PATTERN.match(timeframe)
+    if not match:
+        return timeframe
+    value, unit = int(match.group(1)), match.group(2).lower()
+    if unit == "m":
+        return str(value)
+    if unit == "h":
+        return str(value * 60)
+    return timeframe
+
+
 class TradingViewControlSkill(BaseSkill):
     name = "tradingview"
     description = "Read TradingView's current symbol/timeframe and change them on the running chart window."
     capabilities: tuple[str, ...] = ("status", "set_symbol", "set_timeframe", "focus")
 
-    def __init__(self, hot_chart_store) -> None:
+    def __init__(self, hot_chart_store, *, chart_analysis_service=None, capture_skill=None) -> None:
         self._store = hot_chart_store
+        # Optional: wire these (see skills/registry.py) to verify a
+        # symbol/timeframe change with a fresh, deterministic, action-tied
+        # capture+vision-analyze instead of passively waiting on the
+        # ambient background watcher (assistant/chart_watch.py +
+        # chart_watcher.rs). Reproduced live (mission: harden TradingView
+        # control/capture reliability): the ambient watcher's own hash-diff
+        # change detection, idle-pause, and cooldown -- tuned for passive
+        # monitoring, not "I just changed something, confirm it now" --
+        # produced only 3 fresh vision reads across a 7-minute, 8-call live
+        # timeframe-switch test, starving _wait_for_vision_confirmation of
+        # a fresh read within any single bounded attempt. None/None (the
+        # default) keeps the old passive-only path, e.g. for tests that
+        # don't wire these.
+        self._chart_analysis = chart_analysis_service
+        self._capture_skill = capture_skill
         # Structured/control-verified identity (mission section 2: vision
         # must never be the authoritative source for symbol/timeframe when
         # TARS itself just deterministically set and verified one). Set
@@ -163,6 +260,11 @@ class TradingViewControlSkill(BaseSkill):
         elif field == "timeframe":
             self._verified_timeframe = value.strip()
         self._verified_at = datetime.now(UTC).isoformat()
+
+    def execution_timeout_for(self, action: str) -> float | None:
+        if action in ("set_symbol", "set_timeframe"):
+            return _MUTATION_EXECUTION_TIMEOUT
+        return None
 
     async def health(self) -> dict[str, Any]:
         return {"available": True}
@@ -248,14 +350,13 @@ class TradingViewControlSkill(BaseSkill):
 
     async def _execute_set_timeframe(self, request: ActionRequest, started: datetime) -> ActionResult:
         timeframe = request.arguments["timeframe"].strip()
-        # Best-effort: TradingView's timeframe control is a toolbar dropdown, not a documented
-        # universal keyboard shortcut across versions -- this could not be live-verified in this
-        # environment (see skills/tradingview_control.py module docstring / the mission report for
-        # why). It uses the same focus+type+verify path as set_symbol on the reasonable assumption
-        # that a real chart also accepts a typed interval via the same quick-entry mechanism; if
-        # verification fails, this honestly reports FAILED rather than a guessed success.
+        entry_text = _tradingview_interval_keystroke(timeframe)
+        # `value` passed to _change is the ORIGINAL canonical string
+        # ("1h"/"5m") -- verification compares against this (title/vision
+        # both report the canonical form); only the literal keystroke text
+        # is the converted one the dialog actually accepts.
         return await self._change("timeframe", timeframe, request, started,
-                                  keys=lambda: _send_keys(f"{timeframe}{{Enter}}"))
+                                  keys=lambda: _send_keys(f"{entry_text}{{Enter}}"))
 
     async def _change(self, field: str, value: str, request: ActionRequest, started: datetime, *, keys) -> ActionResult:
         """Deterministic action + verify-the-actual-result + bounded retry
@@ -282,6 +383,14 @@ class TradingViewControlSkill(BaseSkill):
             try:
                 _force_foreground(hwnd)
                 time.sleep(0.3)
+                # Defensive dismiss: reproduced live, a stray click (see
+                # _click_to_focus) can leave TradingView's price-axis
+                # "quick trade at this price" popup open, which then
+                # intercepts the next attempt's click/keystrokes. Escape is
+                # a no-op when nothing is open, so this never costs a
+                # working case anything beyond the one short key send.
+                _send_keys("{Esc}")
+                time.sleep(0.2)
                 _click_to_focus(hwnd)
                 time.sleep(0.3)
                 keys()
@@ -314,8 +423,7 @@ class TradingViewControlSkill(BaseSkill):
         only counts a match that actually STARTS WITH the requested symbol,
         never merely "the title is different from before" (that accepted
         a garbled/wrong type as success). Timeframe never appears in the
-        title at all, so it always falls through to the slower vision
-        confirmation, which already compares against the requested value."""
+        title at all, so it always falls through to vision."""
         if field == "symbol":
             deadline = time.monotonic() + _TITLE_VERIFY_TIMEOUT
             target = value.strip().upper()
@@ -325,10 +433,15 @@ class TradingViewControlSkill(BaseSkill):
                     return True, f"TradingView now shows '{title}'.", {"window_title": title}
                 time.sleep(0.3)
 
-        # Title path didn't confirm (or doesn't apply to timeframe) -- fall back to the slower,
-        # authoritative vision-based confirmation the background chart watcher produces on its own
-        # schedule, rather than immediately declaring failure over what might just be a slow UI
-        # response.
+        # Title path didn't confirm (or doesn't apply to timeframe). Prefer an
+        # active, deterministic capture+analyze tied to THIS attempt over
+        # passively waiting on the ambient background watcher -- see
+        # __init__'s reproduced-live comment on why the ambient path alone
+        # is unreliable here. Falls back to the ambient path when the active
+        # dependencies aren't wired (e.g. tests).
+        if self._chart_analysis is not None and self._capture_skill is not None:
+            return await self._active_vision_confirm(hwnd, field, value)
+
         state = await self._wait_for_vision_confirmation(str(hwnd), field, value)
         if state is not None:
             return (
@@ -337,6 +450,37 @@ class TradingViewControlSkill(BaseSkill):
                 {"symbol": state.identity.symbol, "timeframe": state.identity.timeframe},
             )
         return False, f"{field} change to '{value}' was not confirmed.", {}
+
+    async def _active_vision_confirm(self, hwnd: int, field: str, value: str) -> tuple[bool, str, dict[str, Any]]:
+        """Fresh, synchronous capture -> vision-analyze -> compare, tied
+        directly to this attempt -- never reads a cache, never waits on the
+        ambient watcher's own schedule. Reuses the same capture/verify/
+        decode primitive the Universal Market Explainer and the single-shot
+        "analyze this chart" path already use (assistant/chart_capture.py),
+        via a direct skill.execute() call rather than ActionRuntime.submit()
+        -- going through the real runtime here would deadlock, since this
+        code already runs inside an in-flight action holding the runtime's
+        own lock (actions/runtime.py's `async with self._lock`)."""
+        import asyncio
+
+        from assistant.chart_capture import capture_and_analyze_chart
+
+        await asyncio.sleep(_VERIFY_SETTLE_SECONDS)
+        outcome = await capture_and_analyze_chart(
+            _DirectSkillRuntime(self._capture_skill), self._chart_analysis,
+            goal_text="What symbol and timeframe is this chart currently showing?",
+            conversation_id=f"tradingview-control-verify:{hwnd}",
+        )
+        if not outcome.analyzed or outcome.result is None:
+            return False, f"{field} change to '{value}' was not confirmed ({outcome.status}).", {}
+        current = (outcome.result.instrument if field == "symbol" else outcome.result.timeframe) or ""
+        if current.strip().lower() != value.strip().lower():
+            return False, f"{field} change to '{value}' was not confirmed (saw {current!r}).", {}
+        return (
+            True,
+            f"TradingView now shows {outcome.result.instrument} on {outcome.result.timeframe}.",
+            {"symbol": outcome.result.instrument, "timeframe": outcome.result.timeframe},
+        )
 
     async def _wait_for_vision_confirmation(self, chart_window_id: str, field: str, value: str):
         import asyncio

@@ -180,7 +180,8 @@ class ActionRuntime:
                 return await self._require_confirmation(request, risk, now)
 
             return await self._execute(
-                request, skill, risk, now, execution_timeout=execution_timeout
+                request, skill, risk, now,
+                execution_timeout=self._resolve_execution_timeout(skill, request, execution_timeout),
             )
 
     async def confirm(
@@ -313,7 +314,7 @@ class ActionRuntime:
                 risk,
                 now,
                 consume=True,
-                execution_timeout=execution_timeout,
+                execution_timeout=self._resolve_execution_timeout(skill, request, execution_timeout),
             )
 
     async def get_result(self, request_id: UUID) -> ActionResult:
@@ -383,6 +384,25 @@ class ActionRuntime:
         )
         await self._broadcast(outward)
         return outward
+
+    def _resolve_execution_timeout(
+        self, skill: Any, request: ActionRequest, caller_override: float | None
+    ) -> float | None:
+        """A caller-supplied override always wins. Otherwise, ask the skill
+        whether this specific action needs more than the runtime's generic
+        default -- added after live acceptance testing reproduced
+        tradingview.set_timeframe/set_symbol being cut off by the generic
+        30s default mid-verification (their own bounded retry/vision-confirm
+        contract can legitimately take longer), returning FAILED with no
+        data well before that contract could honestly finish. Every other
+        skill's BaseSkill.execution_timeout_for returns None, so this is a
+        no-op for them."""
+        if caller_override is not None:
+            return caller_override
+        hint = getattr(skill, "execution_timeout_for", None)
+        if callable(hint):
+            return hint(request.action)
+        return None
 
     async def _execute(
         self,
