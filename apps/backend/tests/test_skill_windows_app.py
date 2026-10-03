@@ -167,7 +167,8 @@ async def test_execute_launch_absolute_path_uses_popen_without_shell_and_verifie
     fake_process = MagicMock()
     fake_process.pid = 4242
     with patch("skills.windows_app.subprocess.Popen", return_value=fake_process) as mock_popen, \
-         patch("skills.windows_app._verify_launch", return_value={"window_title": "cmd", "process_id": 4242}):
+         patch("skills.windows_app._verify_launch", return_value={"window_title": "cmd", "process_id": 4242, "hwnd": 1}), \
+         patch("skills.windows_app._activate_and_verify_foreground", return_value=True):
         result = await skill.execute(_request("launch", {"target": resolved}))
 
     assert result.status == ActionStatus.SUCCEEDED
@@ -188,13 +189,35 @@ async def test_execute_launch_resolves_by_spoken_name_and_verifies_window():
     with patch("skills.windows_app.get_resolver") as mock_get_resolver, \
          patch("skills.windows_app._find_app_window", return_value=None), \
          patch("skills.windows_app.subprocess.Popen", return_value=fake_process), \
-         patch("skills.windows_app._verify_launch", return_value={"window_title": "Test App", "process_id": 777}):
+         patch("skills.windows_app._verify_launch", return_value={"window_title": "Test App", "process_id": 777, "hwnd": 1}), \
+         patch("skills.windows_app._activate_and_verify_foreground", return_value=True):
         mock_get_resolver.return_value.resolve.return_value = ResolveResult(outcome="MATCH", app=app)
         result = await skill.execute(_request("launch", {"target": "test app"}))
 
     assert result.status == ActionStatus.SUCCEEDED
     assert result.data["outcome"] == "SUCCESS"
     assert result.data["display_name"] == "Test App"
+
+
+async def test_execute_launch_fails_truthfully_when_foreground_cannot_be_verified():
+    """Mission: P0 regression -- a window existing is not success; it must
+    also genuinely become the foreground window (GetForegroundWindow()),
+    never assumed from an unverified activation call."""
+    skill = WindowsAppSkill()
+    app = _app()
+    fake_process = MagicMock()
+    fake_process.pid = 777
+    with patch("skills.windows_app.get_resolver") as mock_get_resolver, \
+         patch("skills.windows_app._find_app_window", return_value=None), \
+         patch("skills.windows_app.subprocess.Popen", return_value=fake_process), \
+         patch("skills.windows_app._verify_launch", return_value={"window_title": "Test App", "process_id": 777, "hwnd": 1}), \
+         patch("skills.windows_app._activate_and_verify_foreground", return_value=False) as mock_fg:
+        mock_get_resolver.return_value.resolve.return_value = ResolveResult(outcome="MATCH", app=app)
+        result = await skill.execute(_request("launch", {"target": "test app"}))
+
+    assert result.status == ActionStatus.FAILED
+    assert result.data["outcome"] == "FOREGROUND_VERIFICATION_FAILED"
+    mock_fg.assert_called_once_with(1)
 
 
 async def test_execute_launch_reports_not_installed_never_falls_back_to_browser():
@@ -226,15 +249,71 @@ async def test_execute_launch_focuses_already_running_app_instead_of_relaunching
     match = {"hwnd": 999, "executable": "testapp.exe", "window_title": "Test App", "process_id": 555}
     with patch("skills.windows_app.get_resolver") as mock_get_resolver, \
          patch("skills.windows_app._find_app_window", return_value=match), \
-         patch("skills.windows_app._focus_hwnd") as mock_focus, \
+         patch("skills.windows_app._activate_and_verify_foreground", return_value=True) as mock_fg, \
          patch("skills.windows_app.subprocess.Popen") as mock_popen:
         mock_get_resolver.return_value.resolve.return_value = ResolveResult(outcome="MATCH", app=app)
         result = await skill.execute(_request("launch", {"target": "test app"}))
 
     assert result.status == ActionStatus.SUCCEEDED
     assert result.data["outcome"] == "ALREADY_RUNNING"
-    mock_focus.assert_called_once_with(999)
+    mock_fg.assert_called_once_with(999)
     mock_popen.assert_not_called()  # never relaunch a duplicate instance
+
+
+async def test_execute_launch_already_running_fails_truthfully_when_not_foregrounded():
+    """Mission: P0 regression -- reproduced live, this exact ALREADY_RUNNING
+    path reported SUCCESS 10/10 times while Calculator never actually left
+    the background (plain SetForegroundWindow silently denied by Windows'
+    foreground-lock heuristic). Must now fail truthfully instead."""
+    skill = WindowsAppSkill()
+    app = _app()
+    match = {"hwnd": 999, "executable": "testapp.exe", "window_title": "Test App", "process_id": 555}
+    with patch("skills.windows_app.get_resolver") as mock_get_resolver, \
+         patch("skills.windows_app._find_app_window", return_value=match), \
+         patch("skills.windows_app._activate_and_verify_foreground", return_value=False), \
+         patch("skills.windows_app.subprocess.Popen") as mock_popen:
+        mock_get_resolver.return_value.resolve.return_value = ResolveResult(outcome="MATCH", app=app)
+        result = await skill.execute(_request("launch", {"target": "test app"}))
+
+    assert result.status == ActionStatus.FAILED
+    assert result.data["outcome"] == "FOREGROUND_VERIFICATION_FAILED"
+    mock_popen.assert_not_called()
+
+
+def test_activate_and_verify_foreground_survives_a_raised_exception_mid_retry():
+    """Mission: P0 regression -- reproduced live, a just-enumerated hwnd can
+    go stale between being found and being activated (observed with a
+    modern/UWP-hosted app window), making the underlying win32 call raise
+    `pywintypes.error` instead of merely being denied. One bad attempt must
+    count as a failed attempt and the bounded retry must continue, never
+    crash the whole action with an unhandled exception."""
+    from skills.windows_app import _activate_and_verify_foreground
+
+    calls = {"n": 0}
+
+    def flaky_force_foreground(hwnd):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Exception("(1400, 'SetForegroundWindow', 'Invalid window handle.')")
+        # second attempt succeeds
+
+    with patch("skills.windows_app._force_foreground", side_effect=flaky_force_foreground), \
+         patch("skills.windows_app.win32gui.GetForegroundWindow", return_value=42), \
+         patch("skills.windows_app.time.sleep"):
+        result = _activate_and_verify_foreground(42, max_attempts=3, settle_seconds=0.0)
+
+    assert result is True
+    assert calls["n"] == 2  # first attempt raised, second succeeded
+
+
+def test_activate_and_verify_foreground_gives_up_truthfully_after_repeated_exceptions():
+    from skills.windows_app import _activate_and_verify_foreground
+
+    with patch("skills.windows_app._force_foreground", side_effect=Exception("boom")), \
+         patch("skills.windows_app.time.sleep"):
+        result = _activate_and_verify_foreground(42, max_attempts=3, settle_seconds=0.0)
+
+    assert result is False  # bounded -- never raises out to the caller
 
 
 async def test_execute_launch_never_claims_success_when_no_window_appears():
@@ -307,15 +386,18 @@ async def test_execute_list_running_returns_real_windows(real_window):
 
 
 async def test_execute_focus_finds_and_focuses_real_window(real_window):
+    """Mission: P0 regression -- genuinely asserts the window became
+    foreground (GetForegroundWindow() == hwnd), not the previous
+    tautological `fg == hwnd or fg == 0 or win32gui.IsWindow(hwnd)` (the
+    last two clauses are true for nearly anything, so this test could
+    previously pass without the window ever actually foregrounding)."""
     hwnd, title = real_window
     skill = WindowsAppSkill()
     request = _request("focus", {"target": title})
     result = await skill.execute(request)
 
     assert result.status == ActionStatus.SUCCEEDED
-    assert win32gui.IsWindow(hwnd)
-    fg = win32gui.GetForegroundWindow()
-    assert fg == hwnd or fg == 0 or win32gui.IsWindow(hwnd)
+    assert win32gui.GetForegroundWindow() == hwnd
 
 
 async def test_execute_focus_reports_failure_when_no_window_matches():

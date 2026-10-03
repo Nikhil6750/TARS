@@ -31,7 +31,6 @@ surfaces.
 """
 from __future__ import annotations
 
-import ctypes
 import logging
 import re
 import time
@@ -41,7 +40,6 @@ from typing import Any
 import win32api
 import win32con
 import win32gui
-import win32process
 
 from app.action_contracts import (
     ActionRequest,
@@ -53,11 +51,10 @@ from app.action_contracts import (
     SkillValidationError,
 )
 from skills._desktop_automation import resolve_window
-from skills.windows_app import _focus_hwnd
+from skills.windows_app import _activate_and_verify_foreground, _force_foreground
 
 logger = logging.getLogger("tars.tradingview")
 
-_user32 = ctypes.windll.user32
 _TITLE_VERIFY_TIMEOUT = 6.0
 _VISION_VERIFY_TIMEOUT = 45.0  # generous: real vision analysis measured ~15-31s (hot_chart_state.py)
 # Mission section 3 (hardened symbol/timeframe switching): one initial
@@ -97,31 +94,6 @@ class _DirectSkillRuntime:
 
     async def submit(self, request: ActionRequest) -> ActionResult:
         return await self._skill.execute(request)
-
-
-def _force_foreground(hwnd: int) -> None:
-    """`SetForegroundWindow` on its own is denied by Windows' foreground-lock heuristic for a
-    caller that is not itself the last-input process -- exactly this backend's situation when a
-    voice command triggers a window switch. AttachThreadInput temporarily shares input state with
-    both the current foreground window's thread and the target's, which the same Windows heuristic
-    exempts from the restriction."""
-    fg = win32gui.GetForegroundWindow()
-    fg_thread = win32process.GetWindowThreadProcessId(fg)[0] if fg else 0
-    target_thread = win32process.GetWindowThreadProcessId(hwnd)[0]
-    cur_thread = win32api.GetCurrentThreadId()
-    attached_fg = attached_target = False
-    if fg_thread and fg_thread != cur_thread:
-        attached_fg = bool(_user32.AttachThreadInput(cur_thread, fg_thread, True))
-    if target_thread != cur_thread:
-        attached_target = bool(_user32.AttachThreadInput(cur_thread, target_thread, True))
-    try:
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        win32gui.SetForegroundWindow(hwnd)
-    finally:
-        if attached_fg:
-            _user32.AttachThreadInput(cur_thread, fg_thread, False)
-        if attached_target:
-            _user32.AttachThreadInput(cur_thread, target_thread, False)
 
 
 def _find_render_child(hwnd: int) -> int:
@@ -336,8 +308,18 @@ class TradingViewControlSkill(BaseSkill):
                 risk_level=RiskLevel.LOW_RISK, error="tradingview window not found", started_at=started,
             )
         hwnd, _exe, title = found
-        _focus_hwnd(hwnd)
-        _force_foreground(hwnd)
+        # Mission: P0 regression -- same unverified-foreground bug class as
+        # windows_app.py's launch/focus (an API call returning without an
+        # exception is not proof the window actually became foreground
+        # under Windows' foreground-lock heuristic). Isolated to this
+        # simple focus action only; _change()'s own retry/vision-verify
+        # loop (symbol/timeframe switching) is untouched.
+        if not _activate_and_verify_foreground(hwnd):
+            return self._result(
+                request, ActionStatus.FAILED, f"'{title}' could not be brought to the foreground.",
+                risk_level=RiskLevel.LOW_RISK, error="foreground activation of TradingView was not verified",
+                data={"outcome": "FOREGROUND_VERIFICATION_FAILED", "window_title": title}, started_at=started,
+            )
         return self._result(
             request, ActionStatus.SUCCEEDED, f"Focused '{title}'.",
             risk_level=RiskLevel.LOW_RISK, data={"window_title": title}, started_at=started,

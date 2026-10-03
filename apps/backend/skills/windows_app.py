@@ -26,6 +26,7 @@ must surface as FAILED here, never as a fabricated SUCCEEDED.
 """
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import subprocess
@@ -60,6 +61,7 @@ except ImportError as exc:  # pragma: no cover - exercised only off-Windows
     ) from exc
 
 _SW_RESTORE = win32con.SW_RESTORE
+_user32 = ctypes.windll.user32
 # PROCESS_QUERY_LIMITED_INFORMATION -- least-privilege access right that
 # still allows reading the process's image path; works even for processes
 # owned by other users, unlike PROCESS_QUERY_INFORMATION on some builds.
@@ -163,6 +165,67 @@ def _focus_hwnd(hwnd: int) -> None:
     except Exception:
         win32gui.BringWindowToTop(hwnd)
         win32gui.ShowWindow(hwnd, _SW_RESTORE)
+
+
+def _force_foreground(hwnd: int) -> None:
+    """`SetForegroundWindow` on its own is denied by Windows' foreground-lock heuristic for a
+    caller that is not itself the last-input process -- exactly this backend's situation when a
+    voice/API command asks for an app that isn't the one the user was just clicking in.
+    AttachThreadInput temporarily shares input state with both the current foreground window's
+    thread and the target's, which the same Windows heuristic exempts from the restriction.
+
+    Reproduced live (mission: P0 regression -- open app sometimes opens in background):
+    `_focus_hwnd`'s plain `SetForegroundWindow` call returns successfully (no exception) while
+    `GetForegroundWindow()` afterward still reports the PREVIOUS window, reproducibly, whenever
+    that previous window genuinely held the OS's last-input state (e.g. the user had just clicked
+    into it) -- confirmed 10/10 in a live repro switching TradingView -> Calculator. The original
+    single-source `_force_foreground` (this exact implementation) already existed in
+    skills/tradingview_control.py for the identical reason; promoted here so every window-
+    activation path in this codebase uses the same proven mechanism instead of each call site
+    reinventing (or omitting) it."""
+    fg = win32gui.GetForegroundWindow()
+    fg_thread = win32process.GetWindowThreadProcessId(fg)[0] if fg else 0
+    target_thread = win32process.GetWindowThreadProcessId(hwnd)[0]
+    cur_thread = win32api.GetCurrentThreadId()
+    attached_fg = attached_target = False
+    if fg_thread and fg_thread != cur_thread:
+        attached_fg = bool(_user32.AttachThreadInput(cur_thread, fg_thread, True))
+    if target_thread != cur_thread:
+        attached_target = bool(_user32.AttachThreadInput(cur_thread, target_thread, True))
+    try:
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd)
+    finally:
+        if attached_fg:
+            _user32.AttachThreadInput(cur_thread, fg_thread, False)
+        if attached_target:
+            _user32.AttachThreadInput(cur_thread, target_thread, False)
+
+
+def _activate_and_verify_foreground(hwnd: int, *, max_attempts: int = 5, settle_seconds: float = 0.2) -> bool:
+    """Never trust a successful foreground-activation API call alone (mission: P0 regression --
+    "process launch alone is NOT SUCCESS" / a successful-looking SetForegroundWindow call can
+    still be silently denied by Windows). Bounded retry (re-attempt the same AttachThreadInput-
+    based activation a few times, not a blind sleep-and-hope), returns True only once
+    `GetForegroundWindow()` genuinely reflects the target -- the one honest signal this is
+    allowed to trust.
+
+    Reproduced live: a just-enumerated hwnd can go stale between being found and being activated
+    (observed with a modern/UWP-hosted app window) -- `_force_foreground`'s own
+    `win32gui.SetForegroundWindow` call can then raise `pywintypes.error` ("Invalid window
+    handle") instead of merely being silently denied. One bad attempt must not crash the whole
+    action; it counts as a failed attempt and the bounded retry continues."""
+    for _ in range(max_attempts):
+        try:
+            _force_foreground(hwnd)
+        except Exception:
+            logger.warning("[foreground] activation attempt raised for hwnd=%s", hwnd, exc_info=True)
+            time.sleep(settle_seconds)
+            continue
+        time.sleep(settle_seconds)
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
+    return False
 
 
 def _verify_launch(app: AppRecord, before: set[tuple[int, str]], timeout: float = 6.0) -> dict[str, Any] | None:
@@ -379,7 +442,6 @@ class WindowsAppSkill(BaseSkill):
 
         already = _find_app_window(app)
         if already is not None:
-            _focus_hwnd(already["hwnd"])
             logger.info("[app_resolver] RESULT=ALREADY_RUNNING WINDOW=%r", already["window_title"])
             return self._launch_result(request, started, app, "ALREADY_RUNNING",
                                        window=already, target=target)
@@ -406,7 +468,11 @@ class WindowsAppSkill(BaseSkill):
                        *, target: str, pid: int | None = None, before: set[tuple[int, str]] | None = None,
                        window: dict[str, Any] | None = None) -> ActionResult:
         """Shared SUCCESS/ALREADY_RUNNING/FAILED shaping for a launch, always window-verified
-        (item 8) rather than trusting a launch command's return value."""
+        (item 8) rather than trusting a launch command's return value -- and, for an explicit
+        user-facing "open X", always FOREGROUND-verified too (mission: P0 regression -- process
+        launch or a window merely existing is NOT success; the target must actually become the
+        foreground window, checked via GetForegroundWindow(), never assumed from an API call
+        returning without an exception)."""
         if window is None and before is not None:
             window = _verify_launch(app, before)
         if window is None and resolution == "SUCCESS":
@@ -415,6 +481,21 @@ class WindowsAppSkill(BaseSkill):
                 request, ActionStatus.FAILED, f"Launched {app.display_name} but no window appeared.",
                 risk_level=RiskLevel.LOW_RISK, error=f"launch of '{app.display_name}' was not verified",
                 data={"outcome": "FAILED", "target": target, "app_id": app.id}, started_at=started,
+            )
+        assert window is not None
+        foregrounded = _activate_and_verify_foreground(window["hwnd"])
+        if not foregrounded:
+            logger.info("[app_resolver] RESULT=FOREGROUND_VERIFICATION_FAILED WINDOW=%r", window.get("window_title"))
+            return self._result(
+                request, ActionStatus.FAILED,
+                f"{app.display_name} opened but could not be brought to the foreground.",
+                risk_level=RiskLevel.LOW_RISK,
+                error=f"foreground activation of '{app.display_name}' was not verified",
+                data={
+                    "outcome": "FOREGROUND_VERIFICATION_FAILED", "target": target, "app_id": app.id,
+                    "display_name": app.display_name, "window_title": window.get("window_title"),
+                },
+                started_at=started,
             )
         logger.info("[app_resolver] RESULT=%s WINDOW=%r", resolution, (window or {}).get("window_title"))
         verb = "switched to" if resolution == "ALREADY_RUNNING" else "opened"
@@ -458,10 +539,20 @@ class WindowsAppSkill(BaseSkill):
                 started_at=started,
             )
 
-        try:
-            _focus_hwnd(match["hwnd"])
-        except Exception as exc:
-            raise SkillExecutionError(f"failed to focus window for '{target}': {exc}") from exc
+        foregrounded = _activate_and_verify_foreground(match["hwnd"])
+        if not foregrounded:
+            return self._result(
+                request,
+                ActionStatus.FAILED,
+                f"'{match['window_title']}' could not be brought to the foreground.",
+                risk_level=RiskLevel.LOW_RISK,
+                error=f"foreground activation of '{target}' was not verified",
+                data={
+                    "outcome": "FOREGROUND_VERIFICATION_FAILED", "target": target,
+                    "matched_window_title": match["window_title"],
+                },
+                started_at=started,
+            )
 
         return self._result(
             request,
