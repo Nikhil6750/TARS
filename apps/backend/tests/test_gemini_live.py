@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from voice.gemini_live import TOOL_NAMES, GeminiLiveVoiceSession, TarsTools
+from voice.gemini_live import SYSTEM_PROMPT, TOOL_NAMES, GeminiLiveVoiceSession, TarsTools, _tool_declarations
 from voice.session import VoiceState
 
 
@@ -737,3 +737,129 @@ async def test_best_last_user_does_not_resurrect_a_stale_partial_after_finalizat
     heard, heard_at = session._best_last_user()
     assert heard == "first utterance"
     assert (heard, heard_at) == first_final
+
+
+# ---- mission: P0 compound-intent/orchestration regression ------------------
+# "Open TradingView and open the asset XAUUSD in 15 minute timeframe and
+# observe and report me what do you observe" was decomposed by Gemini into
+# desktop_open_app + manual tradingview_set_symbol/tradingview_set_timeframe/
+# analyze_chart chaining (or stopped after desktop_open_app) instead of the
+# existing deterministic analyze_market orchestrator. Live reproduction
+# against the real Gemini Live API (not reproducible deterministically in
+# this suite) confirmed: (1) the generic tool-call continuation mechanism
+# itself was NOT broken -- Gemini already continues issuing further tool
+# calls in the same turn after a result comes back (see the plumbing test
+# below); the regression was purely a SYSTEM_PROMPT/tool-declaration routing
+# gap. These tests pin the routing text so it cannot silently regress, plus
+# a plumbing-level test of the generic continuation mechanism itself.
+
+def _norm(text: str) -> str:
+    """Collapse all whitespace (including the prose's hand-wrapped line
+    breaks) so assertions check meaning, not incidental source-line width."""
+    return " ".join(text.split())
+
+
+def test_system_prompt_routes_open_and_analyze_compound_commands_to_analyze_market():
+    prompt = _norm(SYSTEM_PROMPT)
+    assert "Compound command rule" in prompt
+    # The mission's exact utterance and the other named examples must be
+    # present verbatim-ish so a future prompt rewrite can't silently drop
+    # the pattern this was built to catch.
+    assert "open the asset XAUUSD in 15 minute timeframe and observe and report" in prompt
+    assert "analyze gold on 15 minutes" in prompt
+    assert "tell me what's happening" in prompt
+    # Must explicitly tell Gemini NOT to manually chain the lower-level
+    # tools for one of these sentences -- that duplication was the root
+    # cause (manual chaining stopping partway without the orchestrator's
+    # verification).
+    assert "do not call desktop_open_app first and do not manually chain" in prompt
+
+
+def test_system_prompt_keeps_a_bare_open_command_simple():
+    """Mission section 4: 'Open TradingView'/'Open Calculator' alone must
+    stay a single desktop_open_app call -- the compound rule must not
+    over-route a plain open request."""
+    prompt = _norm(SYSTEM_PROMPT)
+    assert 'bare "Open TradingView"/"Open Calculator" with no asset, timeframe or analysis language stays a ' \
+           'single desktop_open_app call' in prompt
+
+
+def test_system_prompt_distinguishes_navigation_only_from_analysis():
+    """Mission section 9 Test E: an asset+timeframe compound with no
+    analyze/observe/report language is navigation only (open + verified
+    symbol/timeframe switch), not a deep analyze_market synthesis call."""
+    prompt = _norm(SYSTEM_PROMPT)
+    assert "is navigation only" in prompt
+    assert "do not call analyze_market or analyze_chart for these" in prompt
+
+
+def test_analyze_market_tool_declaration_documents_the_compound_routing_rule():
+    """The FunctionDeclaration text Gemini actually reads (not just the
+    prose system prompt) must also carry the rule, since live
+    reproduction showed Gemini weighs both."""
+    decls = _tool_declarations()[0].function_declarations
+    analyze_market = next(d for d in decls if d.name == "analyze_market")
+    description = _norm(analyze_market.description)
+    assert "Open TradingView and open the asset XAUUSD in 15 minute timeframe" in description
+    assert "never call desktop_open_app first" in description
+    assert "never manually chain tradingview_set_symbol/tradingview_set_timeframe/analyze_chart" in description
+
+
+async def test_multiple_tool_calls_in_one_turn_are_all_dispatched_before_turn_complete():
+    """Plumbing-level proof that the generic tool-continuation mechanism
+    is NOT what caused the compound-intent regression: Gemini issuing
+    several tool_call messages in the same turn (no turn_complete between
+    them, exactly like a real open+set_symbol+set_timeframe+analyze
+    sequence) must result in every one of them being dispatched and
+    answered -- the session must never cut a multi-tool turn short."""
+    events, connect, tools = [], FakeConnect(), Tools()
+    s = make(connect, events, tools=tools)
+    await s.start()
+    await speak(s)
+    await wait_for(lambda: connect.count == 1)
+
+    calls = [
+        SimpleNamespace(id="t1", name="desktop_open_app", args={"target": "tradingview"}),
+        SimpleNamespace(id="t2", name="ask_claude", args={"question": "step two"}),
+        SimpleNamespace(id="t3", name="ask_claude", args={"question": "step three"}),
+    ]
+    for call in calls:
+        await connect.live.script.put(msg(tool_call=SimpleNamespace(function_calls=[call])))
+    assert await wait_for(lambda: len(connect.live.tool_responses) == 3)
+    assert {r.id for r in connect.live.tool_responses} == {"t1", "t2", "t3"}
+    assert tools.calls == [
+        ("desktop_open_app", {"target": "tradingview"}),
+        ("ask_claude", {"question": "step two"}),
+        ("ask_claude", {"question": "step three"}),
+    ]
+    # Turn is not complete yet -- no premature response_complete before
+    # Gemini itself signals turn_complete.
+    assert not any(e.get("type") == "response_complete" for e in events)
+    await connect.live.script.put(msg(server_content=content(turn_complete=True)))
+    assert await wait_for(lambda: any(e.get("type") == "state" and e.get("state") == "LISTENING" for e in events))
+    await s.close()
+
+
+# ---- mission: P0 Trusted Desktop Control -- prompt guidance pinned the
+# same way the compound-routing rule above is, so a future prompt rewrite
+# can't silently drop it.
+
+def test_system_prompt_routes_start_menu_to_the_dedicated_tool():
+    prompt = _norm(SYSTEM_PROMPT)
+    assert "desktop_open_start" in prompt
+    assert "never desktop_open_app" in prompt
+
+
+def test_system_prompt_defers_permission_decisions_to_the_backend_policy():
+    prompt = _norm(SYSTEM_PROMPT)
+    assert "A deterministic backend policy -- never you -- decides whether an action needs confirmation" in prompt
+    assert "never refuse a harmless request yourself or say \"I don't have permission\" on your own guess" in prompt
+
+
+def test_open_start_tool_declaration_exists_with_query_and_activation_params():
+    decls = _tool_declarations()[0].function_declarations
+    names = {d.name for d in decls}
+    assert {"desktop_open_start", "desktop_enable_trusted_control",
+            "desktop_disable_trusted_control", "desktop_get_permissions"} <= names
+    open_start = next(d for d in decls if d.name == "desktop_open_start")
+    assert {"query", "activate_top_result"} <= set(open_start.parameters.properties.keys())

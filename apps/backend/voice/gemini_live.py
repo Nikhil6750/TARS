@@ -108,6 +108,27 @@ Facts and tools
   explain_move both automatically reuse that same instrument -- never ask the user to repeat it. If
   analyze_market reports AMBIGUOUS or NOT_FOUND, say exactly that and ask which instrument -- never guess a
   ticker yourself.
+- Compound command rule: a single sentence that both opens/names TradingView (or an asset) AND asks you to
+  analyze/observe/report on it is ONE market-analysis intent, even though it starts with "open" -- e.g. "Open
+  TradingView and open the asset XAUUSD in 15 minute timeframe and observe and report what do you observe",
+  "Open TradingView and analyze gold on 15 minutes", "Show me EURUSD on 5m and tell me what's happening", "Pull
+  up Bitcoin and tell me what you see", "Go to TradingView, open EURUSD 15 minute and observe the chart". Call
+  analyze_market ONCE with the named asset/timeframe and a `question` built from the observe/report language --
+  do not call desktop_open_app first and do not manually chain tradingview_set_symbol/tradingview_set_timeframe/
+  analyze_chart yourself. analyze_market already focuses/opens TradingView, verifies the symbol and timeframe
+  switch, captures a fresh chart and returns the synthesis answer as one atomic call; duplicating that sequence
+  yourself only risks stopping partway and reporting state that was never verified. The giveaway is
+  analyze/observe/report/"what do you see"/"what's happening"/"tell me what's happening" language anywhere in
+  the sentence, even after an "open" clause. Do not say the command is done after merely opening the app or
+  switching the chart -- it is only complete once analyze_market's answer comes back (or it reports a concrete
+  failure: AMBIGUOUS, NOT_FOUND, CHART_UNAVAILABLE, SYMBOL_NOT_VERIFIED -- say exactly that, never go silent).
+- A compound command that names an asset/timeframe but has NO analyze/observe/report language ("Open
+  TradingView and show XAUUSD on 15m", "open TradingView and open EURUSD on 5 minutes") is navigation only:
+  desktop_open_app (or rely on tradingview_set_symbol/tradingview_set_timeframe to focus it if already running),
+  then tradingview_set_symbol and tradingview_set_timeframe as usual -- do not call analyze_market or
+  analyze_chart for these, and do not launch a deep synthesis the user did not ask for. A bare "Open
+  TradingView"/"Open Calculator" with no asset, timeframe or analysis language stays a single desktop_open_app
+  call -- nothing else.
 - "Look at the chart / what changed / analyze this chart" (deictic, about whatever is literally visible right
   now, not a named asset) -> analyze_chart. This always captures the chart FRESH and
   gives you a real answer in this same turn -- it never depends on or waits for the background watcher, so never tell
@@ -132,6 +153,19 @@ Desktop control (all through TARS's guarded action layer)
 - You can open/switch apps, inspect and list controls, scroll, open URLs, search the web, list/open files and run
   bounded terminal commands. Tell the user in a few words what you did and report the tool's real result: DONE,
   NOT_FOUND, NEEDS_CONFIRMATION, BLOCKED or FAILED. Never pretend it worked.
+- "Open Start" / "Open the Start menu" / "Open Start and search for Bluetooth" / "Open Start and open Calculator"
+  -> desktop_open_start, never desktop_open_app (Start is not an installed application). Pass `query` only when
+  the user names something to search for, and `activate_top_result` only when they want that result opened/
+  activated, not just shown.
+- A deterministic backend policy -- never you -- decides whether an action needs confirmation; you only report
+  the real result it gives back. Ordinary local navigation (opening/focusing an app, the Start menu, scrolling,
+  an ordinary click like "click that"/"switch to Chrome") normally just runs, unless the user has never granted
+  "trusted desktop control," in which case an ordinary click may still ask for confirmation once -- that is the
+  real policy answering, never refuse a harmless request yourself or say "I don't have permission" on your own
+  guess. Anything consequential -- sending a message, buying, deleting, installing, signing in, or a terminal
+  command -- always asks regardless. "Enable/disable trusted desktop control" -> desktop_enable_trusted_control/
+  desktop_disable_trusted_control (only on an explicit request). "What permissions do you have?" ->
+  desktop_get_permissions -- never guess the answer yourself.
 - TradingView: once it is open, "switch to EURUSD" / "show gold" -> tradingview_set_symbol; "make it fifteen
   minutes" / "go to the one-hour chart" -> tradingview_set_timeframe; "what am I looking at" (when TradingView is
   the app in view) -> tradingview_status first (fast, no vision call) before falling back to analyze_chart. These
@@ -204,7 +238,7 @@ def _tool_declarations():
              parameters=obj(question=("STRING", "The full question to analyse"),
                             context=("STRING", "Optional extra context from the conversation"),
                             symbol=("STRING", "Symbol to analyze, e.g. EURUSD or XAUUSD -- only for trading analysis questions"))),
-        decl(name="analyze_market", description="THE Universal Market Explainer -- use for 'what's happening with X today', 'analyze gold', 'explain oil today', or a bare follow-up like 'analyze it again' (omit `asset` to reuse the current one). Resolves the asset (any instrument, not just majors), takes over TradingView (switches symbol/timeframe, each verified -- acceptable for an explicit analysis request, unlike a simple quote question), collects one or more fresh chart reads, and returns ONE integrated answer covering current state, context, catalysts, scenarios and upcoming risk. Takes up to a couple of minutes for a broad multi-timeframe request -- say a brief lead-in first ('Let me pull that up'). Reports AMBIGUOUS/NOT_FOUND honestly instead of guessing a ticker.",
+        decl(name="analyze_market", description="THE Universal Market Explainer -- use for 'what's happening with X today', 'analyze gold', 'explain oil today', a bare follow-up like 'analyze it again' (omit `asset` to reuse the current one), AND any compound sentence that both opens/names TradingView (or an asset) and asks to observe/analyze/report on it, even if it starts with 'open' -- e.g. 'Open TradingView and open the asset XAUUSD in 15 minute timeframe and observe and report what do you observe', 'Open TradingView and analyze gold on 15 minutes', 'show me EURUSD on 5m and tell me what's happening'. This already opens/focuses TradingView itself -- never call desktop_open_app first and never manually chain tradingview_set_symbol/tradingview_set_timeframe/analyze_chart for one of these sentences; call this ONE tool instead. Resolves the asset (any instrument, not just majors), takes over TradingView (switches symbol/timeframe, each verified -- acceptable for an explicit analysis request, unlike a simple quote question), collects one or more fresh chart reads, and returns ONE integrated answer covering current state, context, catalysts, scenarios and upcoming risk. Takes up to a couple of minutes for a broad multi-timeframe request -- say a brief lead-in first ('Let me pull that up'). Reports AMBIGUOUS/NOT_FOUND/CHART_UNAVAILABLE/SYMBOL_NOT_VERIFIED honestly instead of guessing a ticker or claiming it worked.",
              parameters=obj(asset=("STRING", "The instrument as the user said it -- a company name, 'gold', 'bitcoin', a ticker, a cross. Omit to mean 'the current asset' for a follow-up."),
                             timeframe=("STRING", "Optional: an explicit timeframe like '5m'/'1h'/'4h'. Omit for a broad 'what's happening today' question -- a small default multi-timeframe sequence is used instead."),
                             question=("STRING", "Optional: the specific question, e.g. 'what about 5 minutes' or 'what's the outlook into New York'"))),
@@ -232,6 +266,12 @@ def _tool_declarations():
              parameters=obj(target=("STRING", "Application name, e.g. tradingview, chrome, metatrader"))),
         decl(name="desktop_close_app", description="Close a running application's window by its plain spoken name.",
              parameters=obj(target=("STRING", "Application name, e.g. calculator, notepad"))),
+        decl(name="desktop_open_start", description="'Open Start.' / 'Open the Start menu.' / 'Open Start and search for Bluetooth.' / 'Open Start and open Calculator.' Opens the real Windows Start menu (never a guess -- the real taskbar Start button), optionally types a query into its own built-in search, and optionally activates the matching search result. Ordinary Tier-1/2 local navigation -- never needs confirmation.",
+             parameters=obj(query=("STRING", "Optional text to search for in Start, e.g. 'Bluetooth' or 'Calculator'. Leave empty to just open Start."),
+                            activate_top_result=("BOOLEAN", "True to open/activate the matching search result after typing the query (e.g. 'open Start and open Calculator'); false to just leave the search showing."))),
+        decl(name="desktop_enable_trusted_control", description="'Enable trusted desktop control.' Grants TARS broad, explicit authority to perform ordinary, reversible local desktop navigation (opening/focusing apps, Start menu, scrolling, ordinary clicks) without asking for confirmation each time. Anything consequential (sending something, buying, deleting, installing, signing in, trading, terminal commands) still asks regardless. Only call this when the user explicitly asks to enable/grant this."),
+        decl(name="desktop_disable_trusted_control", description="'Disable trusted desktop control.' Reverts to the conservative default where every state-changing desktop click/selection asks for confirmation."),
+        decl(name="desktop_get_permissions", description="'What permissions do you have?' Reports whether trusted desktop control is currently on or off and what that means. Use this instead of guessing when the user asks about TARS's own permissions."),
         decl(name="calculator_calculate", description="'Calculate 2345 times 17' / 'what's (1250+750)/4' -- opens the real Windows Calculator (verified foreground) and performs ONE strictly-validated arithmetic expression using Calculator's own buttons, then verifies the displayed result. Never asks for confirmation -- it can only ever touch the sandboxed Calculator app with a pre-validated numeric expression, nothing else. Use this instead of desktop_open_app+desktop_click_control for any arithmetic request.",
              parameters=obj(expression=("STRING", "Plain arithmetic only: digits, + - * / %, parentheses, e.g. '2345*17' or '(1250+750)/4'. Never anything else."))),
         decl(name="desktop_list_controls", description="List clickable/typeable UI controls of the active or a named window (Windows UI Automation). Use before clicking.",
@@ -240,8 +280,8 @@ def _tool_declarations():
              parameters=obj(control_id=("STRING", "control_id from desktop_list_controls"), label=("STRING", "Human-readable name of what is clicked"))),
         decl(name="desktop_type_text", description="Type text into a control found via desktop_list_controls. Needs the user's confirmation.",
              parameters=obj(control_id=("STRING", "control_id"), text=("STRING", "Text to type"), label=("STRING", "Name of the control"))),
-        decl(name="desktop_scroll", description="Scroll a control up or down.",
-             parameters=obj(control_id=("STRING", "control_id"), direction=("STRING", "up or down"))),
+        decl(name="desktop_scroll", description="Scroll up/down/left/right. For 'scroll down'/'scroll up' with no specific target named, omit control_id entirely -- it scrolls whatever window is currently in front. Pass a control_id from desktop_list_controls only when scrolling one specific control inside a window.",
+             parameters=obj(control_id=("STRING", "Optional control_id from desktop_list_controls; omit to scroll the current window"), direction=("STRING", "up, down, left or right"))),
         decl(name="browser_open_url", description="Open an http(s) URL in the browser.", parameters=obj(url=("STRING", "Full URL"))),
         decl(name="browser_search", description="Search the web in the browser.", parameters=obj(query=("STRING", "Search query"))),
         decl(name="files_list", description="List or search files inside the user's permitted folders.",
@@ -318,7 +358,8 @@ class TarsTools:
         try:
             if name in DESKTOP_TOOL_NAMES:
                 allowed = {"target", "control_id", "label", "text", "direction", "url", "query", "path", "command",
-                          "question", "symbol", "timeframe", "value", "submit", "timeout", "mode", "expression"}
+                          "question", "symbol", "timeframe", "value", "submit", "timeout", "mode", "expression",
+                          "activate_top_result"}
                 return await self.desktop.call(name, {k: v for k, v in (args or {}).items() if k in allowed})
             return await getattr(self, name)(**{k: v for k, v in (args or {}).items()
                                                 if k in {"symbol", "limit", "hours_ahead", "question", "context",
