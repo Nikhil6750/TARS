@@ -401,3 +401,44 @@ async def test_execute_list_controls_reports_failure_for_unmatched_target():
         await skill.execute(
             _request("list_controls", {"target": f"no-such-window-{uuid.uuid4().hex}"})
         )
+
+
+def test_find_scrollable_descendant_finds_a_nested_scroll_pattern():
+    """Reproduced live: a real window's own top-level control frequently
+    does not expose ScrollPattern directly (confirmed against both Chrome
+    and the Start/Search surface) -- the search must walk into children,
+    not just check the root."""
+    from unittest.mock import MagicMock
+
+    from skills._desktop_automation import find_scrollable_descendant
+
+    grandchild = MagicMock()
+    grandchild.GetPattern.return_value = object()  # supports ScrollPattern
+    grandchild.GetChildren.return_value = []
+
+    child_without = MagicMock()
+    child_without.GetPattern.return_value = None
+    child_without.GetChildren.return_value = [grandchild]
+
+    root = MagicMock()
+    root.GetPattern.return_value = None
+    root.GetChildren.return_value = [child_without]
+
+    found = find_scrollable_descendant(root)
+    assert found is grandchild
+
+
+def test_find_scrollable_descendant_gives_up_bounded_when_nothing_matches():
+    from unittest.mock import MagicMock
+
+    from skills._desktop_automation import find_scrollable_descendant
+
+    leaf = MagicMock()
+    leaf.GetPattern.return_value = None
+    leaf.GetChildren.return_value = []
+
+    root = MagicMock()
+    root.GetPattern.return_value = None
+    root.GetChildren.return_value = [leaf]
+
+    assert find_scrollable_descendant(root) is None

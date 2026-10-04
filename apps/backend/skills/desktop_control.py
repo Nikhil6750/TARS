@@ -41,6 +41,7 @@ from skills._desktop_automation import (
     do_scroll,
     do_select,
     do_type,
+    find_scrollable_descendant,
     get_visible_screen_state,
     read_clipboard_text,
     read_selected_text,
@@ -390,12 +391,31 @@ class DesktopControlSkill(BaseSkill):
                     request, ActionStatus.FAILED, "Nothing to scroll: no window is currently in view.",
                     risk_level=RiskLevel.LOW_RISK, error=str(exc), started_at=started,
                 )
+            # Reproduced live: a real window's own top-level control
+            # frequently does not expose ScrollPattern directly even
+            # though it plainly has scrollable content (confirmed against
+            # both a real Chrome window and the Start/Search surface) --
+            # search its descendants (bounded) for the element that
+            # actually does, same as how a human would just scroll
+            # whatever is under the mouse rather than the outer frame.
+            scrollable = find_scrollable_descendant(control)
+            if scrollable is not None:
+                control = scrollable
         try:
             do_scroll(control, direction=direction, amount=amount)
         except SkillExecutionError as exc:
             return self._result(
                 request, ActionStatus.FAILED, f"Could not scroll {direction}: {exc}",
                 risk_level=RiskLevel.LOW_RISK, error=str(exc), started_at=started,
+            )
+        except Exception as exc:
+            # A resolved element can go stale between being found and being
+            # scrolled (same class of issue as a stale foreground hwnd
+            # elsewhere in this codebase) -- a raw COM error must not crash
+            # the whole action, only report it as a truthful failure.
+            return self._result(
+                request, ActionStatus.FAILED, f"Could not scroll {direction}: the target became unavailable.",
+                risk_level=RiskLevel.LOW_RISK, error=f"{type(exc).__name__}: {exc}", started_at=started,
             )
         return self._result(
             request,

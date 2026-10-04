@@ -511,6 +511,32 @@ _SCROLL_AXES = {
 }
 
 
+def find_scrollable_descendant(control: auto.Control, *, max_depth: int = 15) -> auto.Control | None:
+    """Bounded breadth-first search for the first descendant exposing
+    ScrollPattern. Reproduced live (mission: P0 Trusted Desktop Control --
+    "do not answer 'I don't have permission' for normal scrolling"): a
+    real window's OWN top-level control frequently does not support
+    ScrollPattern directly even when it plainly has scrollable content
+    (confirmed against both a real Chrome window and the Start/Search
+    surface) -- the actual ScrollPattern-supporting element is nested.
+    Bounded (not unbounded) so a deep/wide tree can't hang this."""
+    queue: list[tuple[auto.Control, int]] = [(control, 0)]
+    seen = 0
+    while queue and seen < 2000:
+        node, depth = queue.pop(0)
+        seen += 1
+        if node.GetPattern(auto.PatternId.ScrollPattern) is not None:
+            return node
+        if depth >= max_depth:
+            continue
+        try:
+            children = node.GetChildren()
+        except Exception:
+            continue
+        queue.extend((child, depth + 1) for child in children)
+    return None
+
+
 def do_scroll(control: auto.Control, *, direction: str, amount: str) -> None:
     scroll = control.GetPattern(auto.PatternId.ScrollPattern)
     if scroll is None:
