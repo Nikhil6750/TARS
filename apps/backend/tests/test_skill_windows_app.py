@@ -508,3 +508,114 @@ async def test_execute_capture_surfaces_bridge_timeout_as_failed():
 
     assert result.status == ActionStatus.FAILED
     assert result.error is not None
+
+
+# ---- mission: P0 Trusted Desktop Control -- "Open Start" / "Open Start and
+# search for X" / "Open Start and open X" (section 7). Mocked at the
+# _invoke_start_button/_start_menu_is_foreground/_start_search_root/
+# _type_into_start_search/_activate_start_result level -- each of those was
+# individually proven live (see the mission's own report) and this exercises
+# _execute_open_start's own branching/truthful-failure logic deterministically.
+
+def test_classify_risk_open_start_is_low_risk():
+    skill = WindowsAppSkill()
+    assert skill.classify_risk("open_start", {}) == RiskLevel.LOW_RISK
+
+
+async def test_validate_open_start_rejects_bad_types():
+    skill = WindowsAppSkill()
+    with pytest.raises(SkillValidationError):
+        await skill.validate("open_start", {"query": 123})
+    with pytest.raises(SkillValidationError):
+        await skill.validate("open_start", {"activate_top_result": "yes"})
+    with pytest.raises(SkillValidationError):
+        await skill.validate("open_start", {"query": "x" * 200})
+    await skill.validate("open_start", {"query": "bluetooth", "activate_top_result": True})
+    await skill.validate("open_start", {})
+
+
+async def test_execute_open_start_plain_open_succeeds():
+    skill = WindowsAppSkill()
+    with patch("skills.windows_app._invoke_start_button") as invoke, \
+         patch("skills.windows_app._start_menu_is_foreground", return_value=True), \
+         patch("skills.windows_app.time.sleep"):
+        result = await skill.execute(_request("open_start", {}))
+
+    invoke.assert_called_once()
+    assert result.status == ActionStatus.SUCCEEDED
+    assert result.data["outcome"] == "SUCCESS"
+    assert result.data["query"] is None
+
+
+async def test_execute_open_start_fails_truthfully_when_start_does_not_open():
+    """Mission: a button invoke that didn't actually open Start must never
+    report SUCCESS -- same 'verify, don't assume' standard as app-launch
+    foreground verification elsewhere in this module."""
+    skill = WindowsAppSkill()
+    with patch("skills.windows_app._invoke_start_button"), \
+         patch("skills.windows_app._start_menu_is_foreground", return_value=False), \
+         patch("skills.windows_app.time.sleep"):
+        result = await skill.execute(_request("open_start", {}))
+
+    assert result.status == ActionStatus.FAILED
+    assert result.data["outcome"] == "START_VERIFICATION_FAILED"
+
+
+async def test_execute_open_start_fails_truthfully_when_the_start_button_is_not_found():
+    skill = WindowsAppSkill()
+    with patch("skills.windows_app._invoke_start_button", side_effect=SkillExecutionError("the taskbar's Start button was not found")):
+        result = await skill.execute(_request("open_start", {}))
+
+    assert result.status == ActionStatus.FAILED
+    assert result.data["outcome"] == "START_VERIFICATION_FAILED"
+
+
+async def test_execute_open_start_types_query_into_starts_own_search_box():
+    skill = WindowsAppSkill()
+    fake_root = MagicMock()
+    with patch("skills.windows_app._invoke_start_button"), \
+         patch("skills.windows_app._start_menu_is_foreground", return_value=True), \
+         patch("skills.windows_app._start_search_root", return_value=fake_root) as search_root, \
+         patch("skills.windows_app._type_into_start_search") as type_into, \
+         patch("skills.windows_app.time.sleep"):
+        result = await skill.execute(_request("open_start", {"query": "bluetooth"}))
+
+    search_root.assert_called_once()
+    type_into.assert_called_once_with(fake_root, "bluetooth")
+    assert result.status == ActionStatus.SUCCEEDED
+    assert result.data["query"] == "bluetooth"
+    assert result.data["activated_top_result"] is False
+
+
+async def test_execute_open_start_activates_the_matching_result_when_asked():
+    """'Open Start and open Calculator.'"""
+    skill = WindowsAppSkill()
+    fake_root = MagicMock()
+    with patch("skills.windows_app._invoke_start_button"), \
+         patch("skills.windows_app._start_menu_is_foreground", return_value=True), \
+         patch("skills.windows_app._start_search_root", return_value=fake_root), \
+         patch("skills.windows_app._type_into_start_search"), \
+         patch("skills.windows_app._activate_start_result", return_value=True) as activate, \
+         patch("skills.windows_app.time.sleep"):
+        result = await skill.execute(_request("open_start", {"query": "Calculator", "activate_top_result": True}))
+
+    activate.assert_called_once_with(fake_root, "Calculator")
+    assert result.status == ActionStatus.SUCCEEDED
+    assert result.data["activated_top_result"] is True
+
+
+async def test_execute_open_start_reports_result_not_found_truthfully():
+    """Mission: never silently ignore a requested activation that didn't
+    find anything to activate."""
+    skill = WindowsAppSkill()
+    fake_root = MagicMock()
+    with patch("skills.windows_app._invoke_start_button"), \
+         patch("skills.windows_app._start_menu_is_foreground", return_value=True), \
+         patch("skills.windows_app._start_search_root", return_value=fake_root), \
+         patch("skills.windows_app._type_into_start_search"), \
+         patch("skills.windows_app._activate_start_result", return_value=False), \
+         patch("skills.windows_app.time.sleep"):
+        result = await skill.execute(_request("open_start", {"query": "NoSuchApp", "activate_top_result": True}))
+
+    assert result.status == ActionStatus.FAILED
+    assert result.data["outcome"] == "RESULT_NOT_FOUND"

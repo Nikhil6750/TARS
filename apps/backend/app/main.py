@@ -222,10 +222,24 @@ async def lifespan(app: FastAPI):
         hot_chart_store=HotChartStateStore(db.conn),
     )
     app.state.action_registry = action_registry
+
+    # Trusted Desktop Control (mission: P0 "TARS denies basic desktop
+    # control"): a persisted, explicit user grant -- read once at startup
+    # from the same AppStateStore-backed key-value table other small
+    # runtime facts use (see storage/app_state.py), not a separate policy
+    # store. Defaults OFF (the existing conservative policy) until the
+    # user explicitly turns it on.
+    from storage.app_state import AppStateStore
+
+    early_app_state_store = AppStateStore(db.conn)
+    trusted_desktop_control = (await early_app_state_store.get("trusted_desktop_control")) == "true"
+    permission_engine = PermissionEngine(trusted_desktop_control=trusted_desktop_control)
+    app.state.permission_engine = permission_engine
+
     action_runtime = ActionRuntime(
         ActionStore(db.conn),
         action_registry,
-        permission_engine=PermissionEngine(),
+        permission_engine=permission_engine,
         broadcaster=action_ws_manager,
     )
     await action_runtime.initialize()

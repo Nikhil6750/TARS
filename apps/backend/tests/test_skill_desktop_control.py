@@ -170,6 +170,67 @@ async def test_validate_scroll_control_requires_known_direction():
     await skill.validate("scroll_control", {"control_id": "x", "direction": "up"})
 
 
+# ---- mission: P0 Trusted Desktop Control -- "scroll down" must not require
+# a pre-resolved control_id (section 8: "do NOT answer 'I don't have
+# permission' for normal scrolling"). Mocked at the resolve_window/
+# control_from_hwnd/do_scroll level (same pattern as test_skill_calculator.py)
+# rather than another live window, since the fallback path itself --
+# resolving "the current window" and calling do_scroll on it -- is already
+# covered live by every other no-control_id action in this module.
+
+async def test_validate_scroll_control_no_longer_requires_a_control_id():
+    """'Scroll down' with nothing specific to scroll: omitting control_id
+    entirely must pass validation (it used to require it)."""
+    skill = DesktopControlSkill()
+    await skill.validate("scroll_control", {"direction": "down"})
+
+
+async def test_execute_scroll_control_falls_back_to_the_current_window_when_no_control_id_given():
+    from unittest.mock import MagicMock, patch
+
+    fake_window_control = MagicMock()
+    skill = DesktopControlSkill()
+    with patch("skills.desktop_control.resolve_window", return_value=(555, "notepad.exe", "Untitled - Notepad")) as resolve, \
+         patch("skills.desktop_control.control_from_hwnd", return_value=fake_window_control) as from_hwnd, \
+         patch("skills.desktop_control.do_scroll") as scroll:
+        result = await skill.execute(_request("scroll_control", {"direction": "down"}))
+
+    resolve.assert_called_once_with(None)  # "current window", same as every other no-target action
+    from_hwnd.assert_called_once_with(555)
+    scroll.assert_called_once_with(fake_window_control, direction="down", amount="small")
+    assert result.status == ActionStatus.SUCCEEDED
+    assert result.risk_level == RiskLevel.LOW_RISK
+
+
+async def test_execute_scroll_control_fails_truthfully_when_nothing_is_in_view():
+    from unittest.mock import patch
+
+    skill = DesktopControlSkill()
+    with patch("skills.desktop_control.resolve_window", side_effect=SkillExecutionError("no foreground window is available")):
+        result = await skill.execute(_request("scroll_control", {"direction": "up"}))
+
+    assert result.status == ActionStatus.FAILED
+    assert "no foreground window" in (result.error or "")
+
+
+async def test_execute_scroll_control_still_uses_an_explicit_control_id_when_given():
+    """A caller-supplied control_id (from desktop_list_controls) must take
+    priority over the current-window fallback -- the fallback is only for
+    when nothing more specific was resolved."""
+    from unittest.mock import MagicMock, patch
+
+    skill = DesktopControlSkill()
+    fake_control = MagicMock()
+    control_id = skill._cache.put(fake_control)
+    with patch("skills.desktop_control.resolve_window") as resolve, \
+         patch("skills.desktop_control.do_scroll") as scroll:
+        result = await skill.execute(_request("scroll_control", {"control_id": control_id, "direction": "down"}))
+
+    resolve.assert_not_called()
+    scroll.assert_called_once_with(fake_control, direction="down", amount="small")
+    assert result.status == ActionStatus.SUCCEEDED
+
+
 async def test_validate_list_controls_bounds_max_controls():
     skill = DesktopControlSkill()
     with pytest.raises(SkillValidationError):

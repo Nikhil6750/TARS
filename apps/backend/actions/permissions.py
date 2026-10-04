@@ -18,6 +18,7 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
         "launch": RiskLevel.LOW_RISK,
         "focus": RiskLevel.LOW_RISK,
         "close": RiskLevel.LOW_RISK,
+        "open_start": RiskLevel.LOW_RISK,
         "list_running": RiskLevel.READ_ONLY,
         "resolve": RiskLevel.READ_ONLY,
         "list_installed": RiskLevel.READ_ONLY,
@@ -116,6 +117,14 @@ _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
     },
 }
 
+_CONSEQUENTIAL_LABEL = re.compile(
+    r"\b(?:buy|purchase|pay|payment|checkout|order|subscribe|donate|transfer|send|submit|post|"
+    r"comment|message|email|chat|delete|remove|erase|overwrite|confirm|cancel\s+subscription|"
+    r"install|uninstall|credential|password|sign[\s-]?in|log[\s-]?in|login|account|upload|share|"
+    r"trade|buy\s+now|place\s+order)\b",
+    re.IGNORECASE,
+)
+
 _BLOCKED_ACTION = re.compile(
     r"(?:^|_)(?:delete|remove|erase|destroy|format|wipe|elevate|shutdown|reboot|"
     r"kill|terminate|write_registry|change_permissions)(?:$|_)",
@@ -144,8 +153,32 @@ _READ_ONLY_TERMINAL = re.compile(
 )
 
 
+#: desktop_control actions eligible for the Trusted Desktop Control
+#: downgrade. type_into_control is deliberately EXCLUDED -- mission:
+#: "Do NOT weaken arbitrary typing protection" -- typing stays
+#: CONFIRM_REQUIRED unconditionally regardless of this setting.
+_TRUSTABLE_DESKTOP_ACTIONS = frozenset({"invoke_control", "select_control"})
+
+
 class PermissionEngine:
-    """Derive an authoritative risk without accepting caller-supplied permission flags."""
+    """Derive an authoritative risk without accepting caller-supplied permission flags.
+
+    `trusted_desktop_control` (mission: P0 "TARS denies basic desktop
+    control") is the ONE explicit, user-granted permission profile this
+    engine supports beyond the static per-action policy table: when on, an
+    ordinary local UI click/selection (`desktop_control.invoke_control`/
+    `select_control`) that would otherwise require confirmation is instead
+    auto-allowed, UNLESS its own human-readable `label` argument (already
+    required by desktop_click_control/desktop_select_control -- never
+    invented here) names a consequential action (buy, send, delete,
+    install, sign in, ...), in which case it stays CONFIRM_REQUIRED even
+    with the setting on. This is a narrow, explicit extension of the
+    existing deterministic policy table, not a second policy engine and
+    not a blanket bypass -- BLOCKED actions, the terminal classifier,
+    type_into_control and every other skill's policy are untouched."""
+
+    def __init__(self, *, trusted_desktop_control: bool = False) -> None:
+        self.trusted_desktop_control = trusted_desktop_control
 
     def classify(self, skill: Skill, action: str, arguments: dict[str, Any]) -> RiskLevel:
         try:
@@ -156,7 +189,28 @@ class PermissionEngine:
             return RiskLevel.BLOCKED
 
         policy = self._runtime_policy(skill.name, action, arguments)
-        return max((declared, policy), key=_RISK_ORDER.__getitem__)
+        # max(): the skill's own declared risk and the deterministic policy
+        # table are both FLOORS -- this never lets a skill under-report its
+        # own risk to dodge confirmation (RiskLevel's docstring / M2A spec
+        # requirement 9). The Trusted Desktop Control downgrade below is the
+        # one deliberate, narrow EXCEPTION to that floor, applied only
+        # after it, and only for the specific desktop-click actions it
+        # names -- never a general bypass of the floor itself.
+        result = max((declared, policy), key=_RISK_ORDER.__getitem__)
+        if self._trusted_control_downgrade(skill.name, action, arguments, result):
+            return RiskLevel.LOW_RISK
+        return result
+
+    def _trusted_control_downgrade(
+        self, skill_name: str, action: str, arguments: dict[str, Any], result: RiskLevel
+    ) -> bool:
+        return (
+            self.trusted_desktop_control
+            and skill_name == "desktop_control"
+            and action in _TRUSTABLE_DESKTOP_ACTIONS
+            and result == RiskLevel.CONFIRM_REQUIRED
+            and not _CONSEQUENTIAL_LABEL.search(str(arguments.get("label") or ""))
+        )
 
     def _runtime_policy(
         self, skill_name: str, action: str, arguments: dict[str, Any]

@@ -35,6 +35,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import uiautomation as auto
+
 from actions.frontend_bridge import FrontendBridgeError, FrontendCommandBridge
 from app.action_contracts import (
     ActionRequest,
@@ -228,6 +230,96 @@ def _activate_and_verify_foreground(hwnd: int, *, max_attempts: int = 5, settle_
     return False
 
 
+_START_SETTLE_SECONDS = 0.35
+_SEARCH_RESULTS_SETTLE_SECONDS = 1.5
+# Confirmed live (mission: Trusted Desktop Control section 7): on this
+# Windows build invoking the taskbar's Start button opens a window hosted by
+# SearchHost.exe (class Windows.UI.Core.CoreWindow, title "Search") -- the
+# other names are kept as a fallback for older Windows 10/11 builds that
+# host the same surface differently. A raw VK_LWIN SendInput key press was
+# tried first and reproducibly did NOT open Start in this backend process's
+# context (confirmed live: SendInput-typed text into a real Notepad window
+# never arrived either, foreground-switching via AttachThreadInput/
+# SetForegroundWindow meanwhile worked fine) -- so, consistent with
+# calculator.py's own real-button-invoke approach, this uses UI Automation
+# InvokePattern on the taskbar's own Start button instead of synthetic key
+# input.
+_START_HOST_PROCESSES = {"searchhost.exe", "startmenuexperiencehost.exe", "shellexperiencehost.exe"}
+
+
+def _invoke_start_button() -> None:
+    # Deferred import: skills._desktop_automation imports _find_window/
+    # _process_executable_name FROM this module, so a module-level import
+    # the other way would be circular.
+    from skills._desktop_automation import do_invoke
+
+    taskbar = auto.Control(searchDepth=1, ClassName="Shell_TrayWnd")
+    if not taskbar.Exists(1.0, 0.2):
+        raise SkillExecutionError("the taskbar (Shell_TrayWnd) was not found")
+    button = auto.Control(searchFromControl=taskbar, AutomationId="StartButton", searchDepth=5)
+    if not button.Exists(1.0, 0.2):
+        raise SkillExecutionError("the taskbar's Start button was not found")
+    do_invoke(button)
+
+
+def _start_menu_is_foreground() -> bool:
+    """Truthful postcondition for `open_start` (mission: "process launch
+    alone is NOT SUCCESS" applies just as much to invoking the Start
+    button): never report success from the button invoke alone."""
+    fg = win32gui.GetForegroundWindow()
+    if not fg:
+        return False
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(fg)
+    except Exception:
+        return False
+    return _process_executable_name(pid).lower() in _START_HOST_PROCESSES
+
+
+def _start_search_root() -> auto.Control:
+    """Resolves from the real foreground hwnd (same `ControlFromHandle`
+    pattern as the rest of this module), not a blind desktop-wide
+    ClassName search -- reproduced live: more than one top-level window can
+    share the generic `Windows.UI.Core.CoreWindow` class (many UWP shell
+    surfaces use it), so a depth-1 search from the desktop root can resolve
+    to the wrong instance or time out entirely even while Start/Search
+    genuinely is foreground."""
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        raise SkillExecutionError("no foreground window to resolve Start's search box from")
+    control = auto.ControlFromHandle(hwnd)
+    if control is None:
+        raise SkillExecutionError("failed to attach UI Automation to the Start/Search window")
+    return control
+
+
+def _type_into_start_search(root: auto.Control, query: str) -> None:
+    """Start's own built-in search box, identified by its real
+    AutomationId (confirmed live) -- never an arbitrary resolved control.
+    Uses UIA's ValuePattern.SetValue rather than synthetic keystrokes (see
+    _START_HOST_PROCESSES's comment on why)."""
+    edit = auto.EditControl(searchFromControl=root, searchDepth=15)
+    if not edit.Exists(1.0, 0.2):
+        raise SkillExecutionError("Start's search box was not found")
+    edit.GetValuePattern().SetValue(query)
+
+
+def _activate_start_result(root: auto.Control, query: str) -> bool:
+    """Invokes the search result list item whose name contains `query`
+    (confirmed live: Windows' own Start search result tiles expose
+    InvokePattern on the ListItemControl, not on the text label nested
+    inside it). Returns False (never raises) if nothing matched -- the
+    caller decides whether that is a real failure."""
+    item = auto.ListItemControl(searchFromControl=root, SubName=query, searchDepth=25)
+    if not item.Exists(1.5, 0.2):
+        return False
+    pattern = item.GetInvokePattern()
+    if pattern is None:
+        return False
+    pattern.Invoke()
+    return True
+
+
 def _verify_launch(app: AppRecord, before: set[tuple[int, str]], timeout: float = 6.0) -> dict[str, Any] | None:
     """Polls for a new visible window that plausibly belongs to the just-launched app. Never
     reports SUCCESS on a launch command's return value alone (item 8: verify, don't assume)."""
@@ -263,6 +355,7 @@ class WindowsAppSkill(BaseSkill):
         "capture_active_window",
         "get_monitors",
         "get_ui_elements",
+        "open_start",
     )
 
     def __init__(self, bridge: FrontendCommandBridge | None = None) -> None:
@@ -283,6 +376,14 @@ class WindowsAppSkill(BaseSkill):
             return RiskLevel.LOW_RISK
         if action in ("focus", "close"):
             return RiskLevel.LOW_RISK
+        if action == "open_start":
+            # Tier 1 (open the Start menu) + Tier 2 (type into Start's OWN
+            # built-in search, and optionally press Enter on whatever it
+            # surfaced) -- never an arbitrary target, see
+            # _execute_open_start. Mission: "Trusted Desktop Control"
+            # section 7 -- this must be a normal auto-allow action, not
+            # CONFIRM_REQUIRED, regardless of the trusted-control setting.
+            return RiskLevel.LOW_RISK
         if action in ("list_running", "resolve", "list_installed", "capture_active_window",
                       "get_monitors", "get_ui_elements"):
             return RiskLevel.READ_ONLY
@@ -301,6 +402,15 @@ class WindowsAppSkill(BaseSkill):
                 raise SkillValidationError("resolve requires non-empty 'target'")
         elif action in ("list_running", "list_installed"):
             return
+        elif action == "open_start":
+            query = arguments.get("query")
+            if query is not None and not isinstance(query, str):
+                raise SkillValidationError("'query' must be a string")
+            if query and len(query) > 100:
+                raise SkillValidationError("'query' is too long")
+            activate = arguments.get("activate_top_result")
+            if activate is not None and not isinstance(activate, bool):
+                raise SkillValidationError("'activate_top_result' must be a boolean")
         elif action == "capture_active_window":
             include_image = arguments.get("include_image_data")
             if include_image is not None and not isinstance(include_image, bool):
@@ -353,6 +463,8 @@ class WindowsAppSkill(BaseSkill):
             return self._execute_resolve(request, started)
         if request.action == "list_installed":
             return self._execute_list_installed(request, started)
+        if request.action == "open_start":
+            return self._execute_open_start(request, started)
         if request.action in _CAPTURE_ACTIONS:
             return await self._execute_capture(request, started)
         raise SkillExecutionError(f"unsupported windows_app action '{request.action}'")
@@ -566,6 +678,67 @@ class WindowsAppSkill(BaseSkill):
                 "process_id": match["process_id"],
                 "app_id": resolved_app.id if resolved_app else None,
             },
+            started_at=started,
+        )
+
+    def _execute_open_start(self, request: ActionRequest, started: datetime) -> ActionResult:
+        """"Open Start" / "Open the Start menu" -- mission: Trusted Desktop
+        Control section 7. Deterministic UI Automation invoke of the
+        taskbar's own Start button (see _invoke_start_button's comment for
+        why not a synthetic VK_LWIN key press), with a truthful
+        postcondition check (`_start_menu_is_foreground`) exactly like
+        app-launch foreground verification elsewhere in this module -- a
+        button invoke that didn't actually open Start must never report
+        SUCCESS. An optional `query` is typed into Start's own built-in
+        search box (never an arbitrary resolved control), and
+        `activate_top_result` additionally invokes the matching search
+        result tile (e.g. "Open Start and open Calculator") -- reported
+        truthfully as NOT_FOUND if the search surfaced nothing matching,
+        never silently ignored."""
+        query = (request.arguments.get("query") or "").strip()
+        activate_top_result = bool(request.arguments.get("activate_top_result"))
+
+        try:
+            _invoke_start_button()
+        except SkillExecutionError as exc:
+            return self._result(
+                request, ActionStatus.FAILED, "Could not find the Start button to open Start.",
+                risk_level=RiskLevel.LOW_RISK, error=str(exc),
+                data={"outcome": "START_VERIFICATION_FAILED"}, started_at=started,
+            )
+        time.sleep(_START_SETTLE_SECONDS)
+        if not _start_menu_is_foreground():
+            return self._result(
+                request, ActionStatus.FAILED, "The Start menu did not open.",
+                risk_level=RiskLevel.LOW_RISK, error="Start menu was not verified foreground after the button invoke",
+                data={"outcome": "START_VERIFICATION_FAILED"}, started_at=started,
+            )
+
+        activated = False
+        if query:
+            root = _start_search_root()
+            _type_into_start_search(root, query)
+            # Empirically determined (not a blind guess): Windows Search's
+            # result list measurably lagged a shorter settle in live
+            # testing, intermittently reporting RESULT_NOT_FOUND for a
+            # result that appeared a beat later.
+            time.sleep(_SEARCH_RESULTS_SETTLE_SECONDS)
+            if activate_top_result:
+                activated = _activate_start_result(root, query)
+                if not activated:
+                    return self._result(
+                        request, ActionStatus.FAILED,
+                        f"Start opened and searched for {query!r}, but no matching result was found to open.",
+                        risk_level=RiskLevel.LOW_RISK, error="no Start search result matched the query",
+                        data={"outcome": "RESULT_NOT_FOUND", "query": query}, started_at=started,
+                    )
+
+        return self._result(
+            request, ActionStatus.SUCCEEDED,
+            f"Opened Start{f' and searched for {query!r}' if query else ''}"
+            f"{' and opened the matching result' if activated else ''}.",
+            risk_level=RiskLevel.LOW_RISK,
+            data={"outcome": "SUCCESS", "query": query or None, "activated_top_result": activated},
             started_at=started,
         )
 

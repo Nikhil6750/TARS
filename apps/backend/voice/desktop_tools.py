@@ -29,10 +29,11 @@ logger = logging.getLogger("tars.desktop_tools")
 
 DESKTOP_TOOL_NAMES = {
     "desktop_context", "desktop_resolve_app", "desktop_list_installed_apps", "desktop_open_app",
-    "desktop_focus_window", "desktop_close_app", "desktop_list_controls", "desktop_click_control",
+    "desktop_focus_window", "desktop_close_app", "desktop_open_start", "desktop_list_controls", "desktop_click_control",
     "desktop_type_text", "desktop_scroll", "calculator_calculate", "browser_open_url", "browser_search", "files_list",
     "files_read_open", "run_terminal", "analyze_chart", "watch_this_chart", "confirm_pending_action",
-    "cancel_pending_action",
+    "cancel_pending_action", "desktop_enable_trusted_control", "desktop_disable_trusted_control",
+    "desktop_get_permissions",
     "tradingview_status", "tradingview_set_symbol", "tradingview_set_timeframe",
     "web_get_context", "web_list_tabs", "web_focus_tab", "web_new_tab", "web_close_tab",
     "web_navigate", "web_back", "web_forward", "web_refresh",
@@ -245,6 +246,58 @@ class DesktopTools:
             "active_browser_tab": self.active_browser_tab,
         }
 
+    # ---- Trusted Desktop Control (mission: P0 "TARS denies basic desktop
+    # control") -- an explicit, user-granted permission profile read/set on
+    # the real PermissionEngine (actions/permissions.py), never decided
+    # here or by Gemini: this just relays the user's own enable/disable
+    # request to that single deterministic authority and persists it so it
+    # survives a backend restart.
+    async def desktop_enable_trusted_control(self) -> dict:
+        """"Enable trusted desktop control." Ordinary, reversible local UI
+        actions (open/focus apps, Start menu, scrolling, ordinary clicks)
+        no longer ask for confirmation one-by-one; anything consequential
+        (sending something, buying, deleting, installing, signing in,
+        trading, terminal commands) still does -- see PermissionEngine's
+        docstring for the exact boundary."""
+        return await self._set_trusted_desktop_control(True)
+
+    async def desktop_disable_trusted_control(self) -> dict:
+        """"Disable trusted desktop control." Falls back to the existing
+        conservative policy -- every state-changing desktop click/
+        selection asks for confirmation again."""
+        return await self._set_trusted_desktop_control(False)
+
+    async def _set_trusted_desktop_control(self, enabled: bool) -> dict:
+        engine = getattr(self.state, "permission_engine", None)
+        store = getattr(self.state, "app_state_store", None)
+        if engine is None:
+            return {"status": "FAILED", "summary": "The permission engine is not running"}
+        engine.trusted_desktop_control = enabled
+        if store is not None:
+            await store.set("trusted_desktop_control", "true" if enabled else "false")
+        self._remember(f"{'enable' if enabled else 'disable'} trusted desktop control", "DONE")
+        return {"status": "DONE", "trusted_desktop_control": enabled}
+
+    async def desktop_get_permissions(self) -> dict:
+        """"What permissions do you have?" Reports the real, current state
+        of the one deterministic authority (PermissionEngine) -- never a
+        guess, and never something Gemini decides on its own."""
+        engine = getattr(self.state, "permission_engine", None)
+        enabled = bool(getattr(engine, "trusted_desktop_control", False)) if engine is not None else False
+        return {
+            "status": "DONE",
+            "trusted_desktop_control": enabled,
+            "summary": (
+                "Trusted desktop control is ON: ordinary local navigation (opening/focusing apps, "
+                "the Start menu, scrolling, ordinary clicks) runs without asking each time. Anything "
+                "consequential -- sending a message, buying, deleting, installing, signing in, "
+                "trading, or a terminal command -- still asks for confirmation."
+                if enabled else
+                "Trusted desktop control is OFF: every state-changing desktop click, selection or "
+                "typed action asks for confirmation first, the same conservative default as always."
+            ),
+        }
+
     def _note_target_app(self, target: str) -> None:
         self.last_target_app = target
         canonical = ALIASES.get(_normalize(target), _normalize(target))
@@ -279,6 +332,18 @@ class DesktopTools:
 
     async def desktop_close_app(self, target: str = "") -> dict:
         return await self._submit("windows_app", "close", {"target": target}, describe=f"close {target}")
+
+    async def desktop_open_start(self, query: str = "", activate_top_result: bool = False) -> dict:
+        """"Open Start." / "Open the Start menu." / "Open Start and search
+        for Bluetooth." / "Open Start and open Calculator." Deterministic
+        Windows Start-menu action (windows_app.open_start) -- never a
+        generic click/type, so this is always a normal Tier 1/2 auto-allow
+        action regardless of the trusted-desktop-control setting."""
+        describe = f"open Start{f' and search for {query!r}' if query else ''}"
+        return await self._submit(
+            "windows_app", "open_start",
+            {"query": query, "activate_top_result": activate_top_result}, describe=describe,
+        )
 
     async def calculator_calculate(self, expression: str = "") -> dict:
         """"Calculate 2345 times 17" -- opens Calculator (verified

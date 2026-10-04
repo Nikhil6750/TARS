@@ -312,3 +312,83 @@ def test_default_voice_is_sadaltager_and_configurable():
     assert Settings(_env_file=None, gemini_live_voice="Puck").gemini_live_voice == "Puck"
     assert GeminiLiveVoiceSession(SimpleNamespace(), lambda e: None, lambda p: False, voice="Achird").voice == "Achird"
     assert GeminiLiveVoiceSession(SimpleNamespace(), lambda e: None, lambda p: False).voice == "Sadaltager"
+
+
+# ---- mission: P0 Trusted Desktop Control -- enable/disable/status voice
+# tools relay the user's own request to the real PermissionEngine and
+# persist it; they never decide anything themselves.
+
+class _FakeEngine:
+    def __init__(self, trusted_desktop_control=False):
+        self.trusted_desktop_control = trusted_desktop_control
+
+
+class _FakeAppStateStore:
+    def __init__(self):
+        self.saved: dict[str, str] = {}
+
+    async def get(self, key):
+        return self.saved.get(key)
+
+    async def set(self, key, value):
+        self.saved[key] = value
+
+
+def _tools_with_permission_engine(trusted=False):
+    rt = Runtime()
+    engine = _FakeEngine(trusted)
+    store = _FakeAppStateStore()
+    state = SimpleNamespace(action_runtime=rt, permission_engine=engine, app_state_store=store)
+    return DesktopTools(state, lambda: ("", 0.0)), engine, store
+
+
+async def test_enable_trusted_control_flips_the_real_engine_and_persists_it():
+    t, engine, store = _tools_with_permission_engine(trusted=False)
+    out = await t.desktop_enable_trusted_control()
+    assert out["status"] == "DONE"
+    assert out["trusted_desktop_control"] is True
+    assert engine.trusted_desktop_control is True  # the ACTUAL engine the runtime consults, not a copy
+    assert store.saved["trusted_desktop_control"] == "true"
+
+
+async def test_disable_trusted_control_flips_the_real_engine_and_persists_it():
+    t, engine, store = _tools_with_permission_engine(trusted=True)
+    out = await t.desktop_disable_trusted_control()
+    assert out["status"] == "DONE"
+    assert out["trusted_desktop_control"] is False
+    assert engine.trusted_desktop_control is False
+    assert store.saved["trusted_desktop_control"] == "false"
+
+
+async def test_get_permissions_reports_the_real_current_state_not_a_guess():
+    t_off, _engine_off, _store_off = _tools_with_permission_engine(trusted=False)
+    out_off = await t_off.desktop_get_permissions()
+    assert out_off["trusted_desktop_control"] is False
+    assert "off" in out_off["summary"].lower()
+
+    t_on, _engine_on, _store_on = _tools_with_permission_engine(trusted=True)
+    out_on = await t_on.desktop_get_permissions()
+    assert out_on["trusted_desktop_control"] is True
+    assert "on" in out_on["summary"].lower()
+
+
+async def test_enable_trusted_control_fails_honestly_when_no_permission_engine_is_wired():
+    t = DesktopTools(SimpleNamespace(action_runtime=Runtime()), lambda: ("", 0.0))
+    out = await t.desktop_enable_trusted_control()
+    assert out["status"] == "FAILED"
+
+
+async def test_desktop_open_start_submits_the_windows_app_open_start_action():
+    t, rt, _ = tools()
+    out = await t.desktop_open_start("bluetooth", activate_top_result=True)
+    assert out["status"] == "DONE"
+    assert rt.requests[-1].skill == "windows_app"
+    assert rt.requests[-1].action == "open_start"
+    assert rt.requests[-1].arguments == {"query": "bluetooth", "activate_top_result": True}
+
+
+async def test_desktop_open_start_plain_requires_no_query():
+    t, rt, _ = tools()
+    out = await t.desktop_open_start()
+    assert out["status"] == "DONE"
+    assert rt.requests[-1].arguments == {"query": "", "activate_top_result": False}

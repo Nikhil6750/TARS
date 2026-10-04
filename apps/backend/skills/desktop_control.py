@@ -114,7 +114,14 @@ class DesktopControlSkill(BaseSkill):
             if mode not in _TYPE_MODES:
                 raise SkillValidationError("'mode' must be 'replace' or 'append'")
         elif action == "scroll_control":
-            _require_control_id(arguments)
+            # control_id is OPTIONAL here (mission: P0 Trusted Desktop
+            # Control section 8 -- "operate on the current
+            # PrimaryVisibleUserWindow... do not answer 'I don't have
+            # permission' for normal scrolling"): omitted/empty means
+            # "scroll whatever is currently in front," resolved the same
+            # way resolve_window(None) already resolves "current" for
+            # every other no-explicit-target action in this codebase.
+            _validate_optional_str(arguments, "control_id")
             if arguments.get("direction") not in _DIRECTIONS:
                 raise SkillValidationError("'direction' must be one of up/down/left/right")
             amount = arguments.get("amount", "small")
@@ -364,10 +371,32 @@ class DesktopControlSkill(BaseSkill):
     def _execute_scroll_control(
         self, request: ActionRequest, args: dict[str, Any], started: datetime
     ) -> ActionResult:
-        control = self._resolve_control(args["control_id"])
         direction = args["direction"]
         amount = args.get("amount", "small")
-        do_scroll(control, direction=direction, amount=amount)
+        control_id = args.get("control_id")
+        if control_id:
+            control = self._resolve_control(control_id)
+        else:
+            # No specific control resolved -- scroll whatever is currently
+            # in front (mission: P0 "do not answer 'I don't have
+            # permission' for normal scrolling"), the same
+            # resolve_window(None)/control_from_hwnd pair every other
+            # no-explicit-target action in this module already uses.
+            try:
+                hwnd, _exe, _title = resolve_window(None)
+                control = control_from_hwnd(hwnd)
+            except SkillExecutionError as exc:
+                return self._result(
+                    request, ActionStatus.FAILED, "Nothing to scroll: no window is currently in view.",
+                    risk_level=RiskLevel.LOW_RISK, error=str(exc), started_at=started,
+                )
+        try:
+            do_scroll(control, direction=direction, amount=amount)
+        except SkillExecutionError as exc:
+            return self._result(
+                request, ActionStatus.FAILED, f"Could not scroll {direction}: {exc}",
+                risk_level=RiskLevel.LOW_RISK, error=str(exc), started_at=started,
+            )
         return self._result(
             request,
             ActionStatus.SUCCEEDED,
