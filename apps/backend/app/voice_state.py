@@ -32,6 +32,17 @@ class VoiceProviders:
         self.ready = asyncio.Event()
         self.load_error: str | None = None
 
+    def stt_health(self) -> dict:
+        """Runtime STT health: provider/model/backend/state (never any secret)."""
+        health = getattr(self.stt, "health", None)
+        if health is not None:
+            return health.snapshot()
+        loading = not self.ready.is_set()
+        return {"provider": self.stt.name, "model": None, "backend": None,
+                "state": "STT_LOADING" if loading else ("STT_ERROR" if self.load_error else "STT_READY"),
+                "offline_capable": False, "detail": self.load_error,
+                "fallback": None}
+
     async def load(self, settings: Settings) -> None:
         loop = asyncio.get_running_loop()
         try:

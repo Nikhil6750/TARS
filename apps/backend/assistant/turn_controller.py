@@ -311,6 +311,16 @@ class AssistantTurnController:
                 self._inflight[actual_turn_id] = task
         return await asyncio.shield(task)
 
+    def requires_online(self, text: str) -> bool:
+        """True when answering `text` needs a cloud model (so an offline caller can say so
+        truthfully instead of failing or inventing an answer). Deterministic/state requests
+        and a local (Ollama/mock) assistant provider never do."""
+        if getattr(self._provider, "name", "") in {"ollama", "mock"}:
+            return False
+        return self._router.classify(text) in {
+            TurnIntent.NORMAL_CONVERSATION, TurnIntent.RESEARCH, TurnIntent.CHART_ANALYSIS,
+        }
+
     async def cancel_turn(self, turn_id: str) -> None:
         """Cancel the actual shielded execution, not only its stream subscriber."""
         async with self._lock:

@@ -16,6 +16,7 @@ import os
 
 from app.config import get_settings
 from voice.streaming import SherpaPartialEngine, SileroStreamingVAD
+from voice.stt_runtime import ConnectivityMonitor
 
 router = APIRouter(tags=["realtime"])
 
@@ -107,13 +108,35 @@ async def realtime(websocket: WebSocket):
 
     try:
         settings = get_settings()
-        use_gemini = (settings.voice_provider.lower() == "gemini_live"
-                      and time.monotonic() >= getattr(state, "gemini_unavailable_until", 0))
+        connectivity = getattr(state, "connectivity", None)
+        if connectivity is None:
+            connectivity = state.connectivity = ConnectivityMonitor(force_offline=getattr(settings, "force_offline", False))
+        online = connectivity.online()
+        stt_mode = str(getattr(settings, "stt_provider", "gemini_live")).lower()
+        gemini_ok = (settings.voice_provider.lower() == "gemini_live" and online
+                     and time.monotonic() >= getattr(state, "gemini_unavailable_until", 0)
+                     and bool(settings.gemini_api_key or getattr(state, "gemini_connect_override", None)))
         fallback_reason = None
-        if settings.voice_provider.lower() == "gemini_live" and not use_gemini:
-            fallback_reason = getattr(state, "gemini_unavailable_reason", "Gemini Live unavailable")
-        elif use_gemini and not settings.gemini_api_key and not getattr(state, "gemini_connect_override", None):
-            use_gemini, fallback_reason = False, "GEMINI_API_KEY is not set"
+        if stt_mode == "gemini_live":
+            use_gemini = gemini_ok
+            if not use_gemini:
+                fallback_reason = ("offline" if not online else
+                                   getattr(state, "gemini_unavailable_reason", None)
+                                   or ("GEMINI_API_KEY is not set" if not settings.gemini_api_key
+                                       else "Gemini Live unavailable"))
+        else:
+            # faster_whisper (default) / auto / mock: raw microphone audio stays local. Gemini Live audio is
+            # used only when the local model could not load AND the cloud is reachable.
+            use_gemini = False
+            try:
+                await asyncio.wait_for(voice.ready.wait(), 60)
+            except TimeoutError:
+                pass
+            local_ok = voice.ready.is_set() and voice.stt.name != "mock" and voice.tts.name != "mock"
+            if not local_ok and stt_mode in {"faster_whisper", "auto"} and gemini_ok:
+                use_gemini = True
+                await websocket.send_json({"type": "provider_status", "providers": {"stt": "DEGRADED"},
+                                           "detail": "Local speech recognition unavailable; using Gemini Live"})
         if not use_gemini:
             await asyncio.wait_for(voice.ready.wait(), 5)
         if getattr(state, "realtime_session", None) is not None:
@@ -143,7 +166,9 @@ async def realtime(websocket: WebSocket):
                 engine = await asyncio.to_thread(SherpaPartialEngine, model_dir)
             session = VoiceSessionController(state.turn_controller, voice, emit, vad,
                                              metrics=state.realtime_metrics, partial_engine=engine,
-                                             context_provider=lambda: voice_context(state))
+                                             context_provider=lambda: voice_context(state),
+                                             local_tools=TarsTools(state, uuid.uuid4().hex),
+                                             connectivity=connectivity)
             state.realtime_session = session
             sender = asyncio.create_task(send())
             await session.start()

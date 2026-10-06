@@ -16,7 +16,15 @@ from enum import Enum
 from uuid import uuid4
 
 from app.schemas import InputMode
-from assistant.turn_controller import WakePhraseMatcher
+from assistant.turn_controller import (
+    AssistantResponse,
+    TurnEvent,
+    TurnIntent,
+    TurnStatus,
+    WakePhraseMatcher,
+)
+from voice.local_intents import LocalIntentRouter, summarize
+from voice.stt_runtime import OFFLINE_REASONING_MESSAGE
 from voice.streaming import IncrementalWhisperSTT, LocalStreamingTTS, SherpaPartialEngine, SpeechChunker
 
 logger = logging.getLogger("tars.realtime")
@@ -79,8 +87,13 @@ class LatencyMetrics:
 
 class VoiceSessionController:
     def __init__(self, turns, voice, emit, vad, *, metrics=None, wake_aliases=None, partial_engine=None,
-                 context_provider=None):
+                 context_provider=None, local_tools=None, connectivity=None):
         self.context_provider = context_provider
+        # Local deterministic command path: transcript -> TarsTools, no LLM, no network.
+        self.local_tools, self.connectivity = local_tools, connectivity
+        self.local_router = LocalIntentRouter()
+        self.cloud_calls = 0
+        self.local_commands = 0
         self.turns, self.voice, self.emit = turns, voice, emit
         self.metrics = metrics or LatencyMetrics()
         self.state = VoiceState.IDLE
@@ -290,10 +303,7 @@ class VoiceSessionController:
                 context = self.context_provider() if self.context_provider else ""
                 if inspect.isawaitable(context):
                     context = await context
-                async for event in self.turns.stream_text(
-                    (context + " " + text) if context else text, turn_id=turn_id, conversation_id=self.session_id,
-                    input_mode=InputMode.voice, speak=False
-                ):
+                async for event in self._turn_events(text, context, turn_id):
                     if generation != self.generation or self.closed:
                         return
                     if event.type == "delta" and event.text:
@@ -330,6 +340,66 @@ class VoiceSessionController:
             if generation == self.generation:
                 await self.failure("assistant", type(exc).__name__)
                 await self.turns.cancel_turn(turn_id)
+
+    async def _turn_events(self, text: str, context: str, turn_id: str):
+        """Local deterministic commands first; otherwise the existing turn controller (online reasoning)."""
+        local = await self._try_local(text)
+        if local is not None:
+            self.local_commands += 1
+            yield TurnEvent(turn_id=turn_id, type="delta", text=local)
+            yield TurnEvent(turn_id=turn_id, type="complete", response=AssistantResponse(
+                turn_id=turn_id, display_text=local, speech_text=local, intent=TurnIntent.DETERMINISTIC,
+                status=TurnStatus.COMPLETED, provider="local_intent", latency_ms=0.0,
+                conversation_id=self.session_id))
+            return
+        if not self._online() and self.turns.requires_online(text):
+            message = OFFLINE_REASONING_MESSAGE
+            yield TurnEvent(turn_id=turn_id, type="delta", text=message)
+            yield TurnEvent(turn_id=turn_id, type="complete", response=AssistantResponse(
+                turn_id=turn_id, display_text=message, speech_text=message, intent=TurnIntent.NORMAL_CONVERSATION,
+                status=TurnStatus.COMPLETED, provider="offline_guard", latency_ms=0.0,
+                conversation_id=self.session_id))
+            return
+        self.cloud_calls += 1
+        async for event in self.turns.stream_text(
+            (context + " " + text) if context else text, turn_id=turn_id, conversation_id=self.session_id,
+            input_mode=InputMode.voice, speak=False
+        ):
+            yield event
+
+    def _online(self) -> bool:
+        return self.connectivity is None or self.connectivity.online()
+
+    async def _try_local(self, text: str) -> str | None:
+        """Returns the spoken result when `text` is handled locally, else None."""
+        tools = self.local_tools
+        if tools is None:
+            return None
+        pending = getattr(tools.desktop, "pending", None)
+        low = text.lower().strip(" .!?")
+        if pending and low in {"yes", "yeah", "yep", "confirm", "do it", "go ahead", "approve"}:
+            out = await tools.call("confirm_pending_action", {})
+            return summarize([("confirm", out)])
+        if pending and low in {"no", "nope", "cancel", "don't", "stop"}:
+            out = await tools.call("cancel_pending_action", {})
+            return summarize([("cancel", out)])
+        intent = self.local_router.route(text)
+        if intent is None:
+            return None
+        if intent.needs_cloud:
+            if self._online():
+                return None
+            return OFFLINE_REASONING_MESSAGE
+        results: list[tuple[str, dict]] = []
+        for name, args in intent.steps:
+            out = await tools.call(name, args)
+            results.append((name, out))
+            if out.get("status") not in {"DONE", "PAUSED", "RESUMED", "WATCHING", None} or out.get("error"):
+                break
+        if (intent.success_text and len(results) == len(intent.steps)
+                and all(r[1].get("status") == "DONE" for r in results)):
+            return intent.success_text
+        return summarize([r for r in results if r[1].get("status") != "DONE"] or results)
 
     async def playback(self, message: dict):
         turn = message.get("turn_id")

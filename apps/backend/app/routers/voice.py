@@ -46,6 +46,8 @@ class VoiceStatusResponse(BaseModel):
     stt_provider: str
     tts_provider: str
     vad_provider: str = "silero"
+    stt: dict | None = None
+    online: bool | None = None
     supported_providers: list[str] = [
         "openwakeword",
         "transcript_matcher",
@@ -59,8 +61,10 @@ class VoiceStatusResponse(BaseModel):
 
 
 @router.get("/api/v1/voice/status", response_model=VoiceStatusResponse)
-async def status(voice: VoiceProviders = Depends(get_voice_providers)) -> VoiceStatusResponse:
+async def status(request: Request, voice: VoiceProviders = Depends(get_voice_providers)) -> VoiceStatusResponse:
     return VoiceStatusResponse(
+        stt=voice.stt_health(),
+        online=getattr(getattr(request.app.state, "connectivity", None), "online", lambda: None)(),
         ready=voice.ready.is_set(),
         wake_word_provider="transcript_matcher",
         stt_provider=voice.stt.name,

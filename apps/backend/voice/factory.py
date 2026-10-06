@@ -31,13 +31,16 @@ def build_stt_provider(settings: Settings) -> SpeechToTextProvider:
     provider = settings.stt_provider.lower()
     if provider == "mock":
         return MockSpeechToTextProvider()
-    if provider == "faster_whisper":
+    if provider in {"faster_whisper", "gemini_live", "auto"}:
+        # gemini_live/auto still keep the local model: it is the offline path and the fallback.
         from voice.providers.faster_whisper_stt import FasterWhisperSTTProvider
 
         return FasterWhisperSTTProvider(
             model_size=settings.faster_whisper_model,
             device=settings.faster_whisper_device,
             compute_type=settings.faster_whisper_compute_type,
+            model_dir=settings.whisper_model_dir,
+            beam_size=settings.faster_whisper_beam_size,
         )
     raise ValueError(f"Unknown STT_PROVIDER '{settings.stt_provider}'")
 

@@ -73,10 +73,17 @@ class Settings(BaseSettings):
     vad_provider: str = "silero"
 
     # ---- STT ----
+    # faster_whisper (local, default) | gemini_live (cloud audio) | auto (local STT, Gemini audio only if
+    # the local model failed to load) | mock
     stt_provider: str = "mock"
-    faster_whisper_model: str = "base"
-    faster_whisper_device: str = "cpu"
-    faster_whisper_compute_type: str = "int8"
+    faster_whisper_model: str = "small.en"  # base.en | small.en | medium.en
+    faster_whisper_device: str = "auto"  # auto = CUDA when CTranslate2 sees one, else cpu
+    faster_whisper_compute_type: str = "auto"
+    faster_whisper_beam_size: int = 1
+    # Empty = %LOCALAPPDATA%\TARS\models\whisper (never inside the repo)
+    whisper_model_dir: str | None = None
+    # Application-layer cloud kill switch (offline acceptance / privacy): no cloud reasoning or Gemini Live.
+    force_offline: bool = False
     openai_api_key: str | None = None
 
     # ---- TTS ----
