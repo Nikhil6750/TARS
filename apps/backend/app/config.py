@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     faster_whisper_beam_size: int = 1
     # Empty = %LOCALAPPDATA%\TARS\models\whisper (never inside the repo)
     whisper_model_dir: str | None = None
+    # auto = Gemini Live when healthy, else local Faster-Whisper lane | online | offline
+    voice_mode: str = "auto"
     # Application-layer cloud kill switch (offline acceptance / privacy): no cloud reasoning or Gemini Live.
     force_offline: bool = False
     openai_api_key: str | None = None

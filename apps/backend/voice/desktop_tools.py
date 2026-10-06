@@ -33,7 +33,7 @@ DESKTOP_TOOL_NAMES = {
     "desktop_type_text", "desktop_scroll", "calculator_calculate", "browser_open_url", "browser_search", "files_list",
     "files_read_open", "run_terminal", "analyze_chart", "watch_this_chart", "confirm_pending_action",
     "cancel_pending_action", "desktop_enable_trusted_control", "desktop_disable_trusted_control",
-    "desktop_get_permissions",
+    "desktop_get_permissions", "system_control",
     "tradingview_status", "tradingview_set_symbol", "tradingview_set_timeframe",
     "web_get_context", "web_list_tabs", "web_focus_tab", "web_new_tab", "web_close_tab",
     "web_navigate", "web_back", "web_forward", "web_refresh",
@@ -344,6 +344,17 @@ class DesktopTools:
             "windows_app", "open_start",
             {"query": query, "activate_top_result": activate_top_result}, describe=describe,
         )
+
+    async def system_control(self, action: str = "", percent: float | None = None, step: float | None = None) -> dict:
+        """Native laptop control (windows_system skill): volume/mute/microphone/brightness/media/battery/
+        window management. Power actions (shutdown/restart/sleep) and window_close need confirmation."""
+        args: dict = {}
+        if percent is not None:
+            args["percent"] = percent
+        if step is not None:
+            args["step"] = step
+        out = await self._submit("windows_system", action, args, describe=f"system control: {action.replace('_', ' ')}")
+        return out
 
     async def calculator_calculate(self, expression: str = "") -> dict:
         """"Calculate 2345 times 17" -- opens Calculator (verified

@@ -94,6 +94,7 @@ class VoiceSessionController:
         self.local_router = LocalIntentRouter()
         self.cloud_calls = 0
         self.local_commands = 0
+        self.turn_log: deque[dict] = deque(maxlen=100)  # acceptance observer: transcript/route/result per turn
         self.turns, self.voice, self.emit = turns, voice, emit
         self.metrics = metrics or LatencyMetrics()
         self.state = VoiceState.IDLE
@@ -241,6 +242,9 @@ class VoiceSessionController:
             if kind == "final_transcript":
                 self.metrics.mark(self.turn_id, kind)
                 text = event["text"].strip()
+                self.turn_log.append({"turn": self.turn_id, "transcript": text, "ts": time.time(),
+                                      "stt_ms": self.metrics.latest.get("speech_ended_to_final_transcript"),
+                                      "route": None, "result": None})
                 # Session is explicitly live/listening; aliases are optional once active.
                 match = self._matcher.match(text)
                 if match:
@@ -327,6 +331,9 @@ class VoiceSessionController:
                         for chunk in chunker.feed("" if saw_delta else response.speech_text, final=True):
                             self.spoken.append(chunk)
                             await queue.put(chunk)
+                        if self.turn_log and self.turn_log[-1]["route"] == "cloud_reasoning":
+                            self.turn_log[-1]["result"] = (response.display_text or "")[:300]
+                            self.turn_log[-1]["provider"] = response.provider
                         await self.send("response_complete", response=response.model_dump(mode="json"))
             await queue.put(None)
             await self.tts_task
@@ -341,10 +348,21 @@ class VoiceSessionController:
                 await self.failure("assistant", type(exc).__name__)
                 await self.turns.cancel_turn(turn_id)
 
+    def _log_turn(self, route: str, result: str | None = None):
+        if self.turn_log:
+            self.turn_log[-1].update(route=route, **({"result": result[:300]} if result else {}))
+
+    def diag(self) -> dict:
+        return {"voice_provider": "LOCAL_STREAMING", "cloud_calls": self.cloud_calls,
+                "local_commands": self.local_commands, "turn_log": list(self.turn_log),
+                "stt": self.voice.stt.health.snapshot() if hasattr(self.voice.stt, "health") else None,
+                "microphone_muted": self.microphone_muted}
+
     async def _turn_events(self, text: str, context: str, turn_id: str):
         """Local deterministic commands first; otherwise the existing turn controller (online reasoning)."""
         local = await self._try_local(text)
         if local is not None:
+            self._log_turn("local_intent", local)
             self.local_commands += 1
             yield TurnEvent(turn_id=turn_id, type="delta", text=local)
             yield TurnEvent(turn_id=turn_id, type="complete", response=AssistantResponse(
@@ -354,6 +372,7 @@ class VoiceSessionController:
             return
         if not self._online() and self.turns.requires_online(text):
             message = OFFLINE_REASONING_MESSAGE
+            self._log_turn("offline_guard", message)
             yield TurnEvent(turn_id=turn_id, type="delta", text=message)
             yield TurnEvent(turn_id=turn_id, type="complete", response=AssistantResponse(
                 turn_id=turn_id, display_text=message, speech_text=message, intent=TurnIntent.NORMAL_CONVERSATION,
@@ -361,6 +380,7 @@ class VoiceSessionController:
                 conversation_id=self.session_id))
             return
         self.cloud_calls += 1
+        self._log_turn("cloud_reasoning")
         async for event in self.turns.stream_text(
             (context + " " + text) if context else text, turn_id=turn_id, conversation_id=self.session_id,
             input_mode=InputMode.voice, speak=False
@@ -378,10 +398,11 @@ class VoiceSessionController:
         pending = getattr(tools.desktop, "pending", None)
         low = text.lower().strip(" .!?")
         if pending and low in {"yes", "yeah", "yep", "confirm", "do it", "go ahead", "approve"}:
-            out = await tools.call("confirm_pending_action", {})
+            # The spoken "yes" IS the confirmation; resolve through the same path the UI button uses.
+            out = await tools.desktop.ui_confirm(True)
             return summarize([("confirm", out)])
         if pending and low in {"no", "nope", "cancel", "don't", "stop"}:
-            out = await tools.call("cancel_pending_action", {})
+            out = await tools.desktop.ui_confirm(False)
             return summarize([("cancel", out)])
         intent = self.local_router.route(text)
         if intent is None:

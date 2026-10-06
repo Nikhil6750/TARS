@@ -377,7 +377,7 @@ def test_echo_of_own_speech_never_announces_a_barge_in_but_real_words_do():
     assert "speech_started" in real and "final_transcript" in real
 
 
-def _router_app(monkeypatch, provider, key, connect=None):
+def _router_app(monkeypatch, provider, key, connect=None, voice_mode="auto", online=True):
     from fastapi import FastAPI
 
     from app.routers import realtime
@@ -386,8 +386,10 @@ def _router_app(monkeypatch, provider, key, connect=None):
     monkeypatch.setattr(realtime.SherpaPartialEngine, "available", classmethod(lambda cls, d: False))
     monkeypatch.setattr(realtime, "get_settings", lambda: SimpleNamespace(
         voice_provider=provider, gemini_api_key=key, gemini_live_model="gemini-3.8-live",
-        gemini_live_idle_seconds=30.0, sherpa_model_dir=""))
+        gemini_live_idle_seconds=30.0, sherpa_model_dir="", voice_mode=voice_mode))
     app = FastAPI()
+    from voice.stt_runtime import ConnectivityMonitor
+    app.state.connectivity = ConnectivityMonitor(probe=lambda: online)
     ready = asyncio.Event()
     ready.set()
     app.state.voice_providers = SimpleNamespace(stt=STT(), tts=TTS(), ready=ready)
@@ -418,3 +420,21 @@ def test_router_falls_back_to_local_truthfully_without_key(monkeypatch):
         seen = [ws.receive_json() for _ in range(4)]
         fallback = [e for e in seen if e.get("voice_provider") == "LOCAL_STREAMING"]
         assert fallback and "GEMINI_API_KEY is not set" in fallback[0]["detail"]
+
+
+def test_auto_mode_goes_local_when_offline_and_online_mode_keeps_gemini(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    for kwargs, expected in (({"online": False}, "LOCAL_STREAMING"), ({"voice_mode": "offline"}, "LOCAL_STREAMING")):
+        app = _router_app(monkeypatch, "gemini_live", "k", connect=lambda: None, **kwargs)
+        with TestClient(app) as client, client.websocket_connect("/api/v1/voice/realtime") as ws:
+            ws.send_bytes(bytes(1024))
+            seen = [ws.receive_json() for _ in range(4)]
+            assert any(e.get("voice_provider") == expected for e in seen)
+            assert app.state.realtime_session.voice_provider != "GEMINI_LIVE" if hasattr(
+                app.state.realtime_session, "voice_provider") else True
+    app = _router_app(monkeypatch, "gemini_live", "k", connect=lambda: None, voice_mode="online")
+    with TestClient(app) as client, client.websocket_connect("/api/v1/voice/realtime") as ws:
+        ws.send_bytes(bytes(1024))
+        [ws.receive_json() for _ in range(3)]
+        assert app.state.realtime_session.voice_provider == "GEMINI_LIVE"

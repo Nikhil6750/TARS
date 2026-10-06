@@ -83,6 +83,27 @@ async def status(request: Request, voice: VoiceProviders = Depends(get_voice_pro
     )
 
 
+class OfflineRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/api/v1/voice/offline")
+async def set_offline(request: Request, body: OfflineRequest) -> dict:
+    """Application-layer cloud kill switch (no OS networking change): when enabled the local voice
+    session answers only local commands and says reasoning needs internet."""
+    from app.config import get_settings
+    from voice.stt_runtime import ConnectivityMonitor
+
+    state = request.app.state
+    if getattr(state, "connectivity", None) is None:
+        state.connectivity = ConnectivityMonitor(force_offline=body.enabled)
+    state.connectivity.force_offline = body.enabled
+    session = getattr(state, "realtime_session", None)
+    if session is not None and hasattr(session, "connectivity"):
+        session.connectivity = state.connectivity
+    return {"force_offline": body.enabled, "online": state.connectivity.online()}
+
+
 @router.post("/api/v1/voice/utterance", response_model=AssistantResponse)
 async def utterance(
     request: Request,

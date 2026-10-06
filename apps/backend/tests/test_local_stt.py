@@ -177,7 +177,12 @@ class _TTS:
 class _Tools:
     def __init__(self):
         self.calls = []
-        self.desktop = SimpleNamespace(pending=None)
+        outer = self
+        self.desktop = SimpleNamespace(pending=None, ui_confirm=lambda ok: outer._confirm(ok))
+
+    async def _confirm(self, ok):
+        self.calls.append(("ui_confirm", ok))
+        return {"status": "DONE" if ok else "CANCELLED", "summary": "done"}
 
     async def call(self, name, args):
         self.calls.append((name, args))
@@ -254,14 +259,80 @@ async def test_pending_confirmation_yes_no_is_handled_locally():
     tools.desktop.pending = {"id": "1"}
     s = _session(tools, _Turns(), online=False)
     await _events(s, "yes")
-    assert tools.calls[-1][0] == "confirm_pending_action"
+    assert tools.calls[-1] == ("ui_confirm", True)
     await _events(s, "no")
-    assert tools.calls[-1][0] == "cancel_pending_action"
+    assert tools.calls[-1] == ("ui_confirm", False)
 
 
-def test_no_raw_audio_upload_path_in_local_mode():
-    """In faster_whisper mode the realtime route must not construct GeminiLiveVoiceSession when the
-    local model is ready (audio stays local)."""
+def test_faster_whisper_is_offline_lane_only():
+    """Online/auto: Gemini Live owns the mic. Faster-Whisper is used only when offline/forced/unavailable."""
     src = Path(__file__).resolve().parents[1].joinpath("app/routers/realtime.py").read_text(encoding="utf-8")
-    assert "use_gemini = False" in src and 'stt_mode == "gemini_live"' in src
-    assert "not local_ok and stt_mode in" in src
+    assert 'use_gemini = gemini_ok and mode != "offline"' in src
+    assert "stt_provider" not in src  # STT_PROVIDER no longer picks the lane
+
+
+# ---- native laptop control + system intents ----
+
+@pytest.mark.parametrize("phrase,action,args", [
+    ("Set volume to 30 percent", "set_volume", {"percent": 30}),
+    ("Increase volume by 10 percent", "volume_up", {"step": 10}),
+    ("Brightness down", "brightness_down", {}),
+    ("Mute", "mute_audio", {}),
+    ("Unmute", "unmute_audio", {}),
+    ("Mute microphone", "mute_microphone", {}),
+    ("Pause", "media_play_pause", {}),
+    ("Next track", "media_next", {}),
+    ("Restart the laptop", "restart", {}),
+])
+def test_system_intents(phrase, action, args):
+    intent = LocalIntentRouter().route(phrase)
+    assert intent.steps == [("system_control", {"action": action, **args})]
+
+
+def test_compound_intents_route_every_clause_or_nothing():
+    r = LocalIntentRouter()
+    assert [s[0] for s in r.route("Open Calculator and calculate 2345 times 17").steps] == ["calculator_calculate"]
+    assert [s[0] for s in r.route("Set volume to 30 and open YouTube Music").steps] == ["system_control", "desktop_open_app"]
+    assert r.route("Open Settings and go to Bluetooth") is None  # unknown clause -> not guessed
+
+
+def test_windows_system_risk_and_native_contract(monkeypatch):
+    from actions.permissions import PermissionEngine
+    from app.action_contracts import ActionStatus, RiskLevel
+    from skills import windows_system as ws
+
+    engine, skill = PermissionEngine(), ws.WindowsSystemSkill()
+    for ok in ("set_volume", "mute_audio", "set_brightness", "media_next", "window_switch"):
+        assert engine.classify(skill, ok, {"percent": 30}) is RiskLevel.LOW_RISK
+    for power in ("shutdown", "restart", "sleep", "window_close"):
+        assert engine.classify(skill, power, {}) is RiskLevel.CONFIRM_REQUIRED
+
+    state = {"vol": 50, "muted": True}
+    monkeypatch.setattr(ws, "_get_volume", lambda: (state["vol"], state["muted"]))
+    monkeypatch.setattr(ws, "_set_volume", lambda p: state.update(vol=p))
+    monkeypatch.setattr(ws, "_set_mute", lambda m: state.update(muted=m))
+    status, summary, data = skill._run("volume_up", {"step": 10})
+    assert status is ActionStatus.SUCCEEDED and state["vol"] == 60 and not state["muted"] and data["verified"]
+    monkeypatch.setattr(ws, "_set_volume", lambda p: None)  # driver ignores the write -> not claimed as done
+    status, *_ = skill._run("set_volume", {"percent": 10})
+    assert status is ActionStatus.FAILED
+    monkeypatch.setattr(ws, "_get_brightness", lambda: None)
+    status, summary, _ = skill._run("set_brightness", {"percent": 50})
+    assert status is ActionStatus.FAILED and "UNSUPPORTED" in summary
+    with pytest.raises(Exception):
+        asyncio.run(skill.validate("set_volume", {"percent": 150}))
+
+
+def test_uwp_corewindow_activates_its_application_frame(monkeypatch):
+    """Regression: Calculator/Settings resolve to an inner CoreWindow; activating/verifying that handle
+    never reached the foreground. The owning ApplicationFrameWindow must be the target."""
+    from skills import windows_app as wa
+
+    classes = {10: "Windows.UI.Core.CoreWindow", 20: "ApplicationFrameWindow", 30: "ApplicationFrameWindow"}
+    titles = {10: "Calculator", 20: "Calculator", 30: "Other"}
+    monkeypatch.setattr(wa.win32gui, "GetClassName", lambda h: classes[h])
+    monkeypatch.setattr(wa.win32gui, "GetWindowText", lambda h: titles[h])
+    monkeypatch.setattr(wa.win32gui, "IsWindowVisible", lambda h: True)
+    monkeypatch.setattr(wa.win32gui, "EnumWindows", lambda cb, extra: [cb(h, extra) for h in (30, 20)])
+    assert wa._activation_target(10) == 20
+    assert wa._activation_target(20) == 20  # ordinary windows are untouched

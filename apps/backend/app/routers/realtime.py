@@ -112,31 +112,22 @@ async def realtime(websocket: WebSocket):
         if connectivity is None:
             connectivity = state.connectivity = ConnectivityMonitor(force_offline=getattr(settings, "force_offline", False))
         online = connectivity.online()
-        stt_mode = str(getattr(settings, "stt_provider", "gemini_live")).lower()
+        # VOICE_MODE: auto (Gemini Live when healthy, else local Faster-Whisper) | online | offline.
+        # Faster-Whisper is the OFFLINE/fallback lane; it never sits in front of Gemini Live online.
+        mode = str(getattr(settings, "voice_mode", "auto")).lower()
         gemini_ok = (settings.voice_provider.lower() == "gemini_live" and online
                      and time.monotonic() >= getattr(state, "gemini_unavailable_until", 0)
                      and bool(settings.gemini_api_key or getattr(state, "gemini_connect_override", None)))
+        use_gemini = gemini_ok and mode != "offline"
         fallback_reason = None
-        if stt_mode == "gemini_live":
-            use_gemini = gemini_ok
-            if not use_gemini:
-                fallback_reason = ("offline" if not online else
-                                   getattr(state, "gemini_unavailable_reason", None)
-                                   or ("GEMINI_API_KEY is not set" if not settings.gemini_api_key
-                                       else "Gemini Live unavailable"))
-        else:
-            # faster_whisper (default) / auto / mock: raw microphone audio stays local. Gemini Live audio is
-            # used only when the local model could not load AND the cloud is reachable.
-            use_gemini = False
-            try:
-                await asyncio.wait_for(voice.ready.wait(), 60)
-            except TimeoutError:
-                pass
-            local_ok = voice.ready.is_set() and voice.stt.name != "mock" and voice.tts.name != "mock"
-            if not local_ok and stt_mode in {"faster_whisper", "auto"} and gemini_ok:
-                use_gemini = True
-                await websocket.send_json({"type": "provider_status", "providers": {"stt": "DEGRADED"},
-                                           "detail": "Local speech recognition unavailable; using Gemini Live"})
+        if not use_gemini and settings.voice_provider.lower() == "gemini_live":
+            if mode == "offline":
+                fallback_reason = "VOICE_MODE=OFFLINE"
+            elif not online:
+                fallback_reason = "offline"
+            else:
+                fallback_reason = (getattr(state, "gemini_unavailable_reason", None)
+                                   if time.monotonic() < getattr(state, "gemini_unavailable_until", 0) else None)                     or ("GEMINI_API_KEY is not set" if not settings.gemini_api_key else "Gemini Live unavailable")
         if not use_gemini:
             await asyncio.wait_for(voice.ready.wait(), 5)
         if getattr(state, "realtime_session", None) is not None:

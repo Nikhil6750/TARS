@@ -14,6 +14,18 @@ _RISK_ORDER = {
 }
 
 _KNOWN_ACTION_POLICY: dict[str, dict[str, RiskLevel]] = {
+    # Native laptop control: ordinary reversible hardware actions are auto-allowed (LOW_RISK);
+    # power actions and closing a window (may discard unsaved work) always confirm.
+    "windows_system": {
+        **dict.fromkeys(("get_volume", "get_microphone_mute", "get_brightness", "get_battery_status"),
+                        RiskLevel.READ_ONLY),
+        **dict.fromkeys((
+            "set_volume", "volume_up", "volume_down", "mute_audio", "unmute_audio", "mute_microphone",
+            "unmute_microphone", "set_brightness", "brightness_up", "brightness_down", "media_play_pause",
+            "media_next", "media_previous", "media_stop", "window_minimize", "window_maximize",
+            "window_restore", "window_switch"), RiskLevel.LOW_RISK),
+        **dict.fromkeys(("shutdown", "restart", "sleep", "window_close"), RiskLevel.CONFIRM_REQUIRED),
+    },
     "windows_app": {
         "launch": RiskLevel.LOW_RISK,
         "focus": RiskLevel.LOW_RISK,

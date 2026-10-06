@@ -72,15 +72,101 @@ def _expression(raw: str) -> str | None:
     return expr if re.fullmatch(r"[\d.+\-*/ ]+", expr) and re.search(r"\d\s*[+\-*/]\s*\d", expr) else None
 
 
+_NUM = r"(\d{1,3})(?:\s*(?:percent|%))?"
+
+
+def _system_intent(low: str) -> LocalIntent | None:
+    """Native laptop control phrases -> windows_system (no LLM, no UI automation)."""
+    def sc(name, label, **args):
+        return LocalIntent(name, [("system_control", {"action": label, **args})])
+
+    mic = r"(?:the\s+|my\s+)?(?:microphone|mic)"
+    if re.fullmatch(rf"(?:mute|turn off)\s+{mic}", low):
+        return sc("mic_mute", "mute_microphone")
+    if re.fullmatch(rf"(?:unmute|turn on)\s+{mic}", low):
+        return sc("mic_unmute", "unmute_microphone")
+    if re.fullmatch(r"(?:mute|silence)(?:\s+(?:the\s+)?(?:audio|sound|volume|speakers|laptop|computer|it))?", low):
+        return sc("mute", "mute_audio")
+    if re.fullmatch(r"unmute(?:\s+(?:the\s+)?(?:audio|sound|volume|speakers|laptop|computer|it))?", low):
+        return sc("unmute", "unmute_audio")
+    if m := re.fullmatch(rf"(?:set|put|change|make)\s+(?:the\s+)?volume\s+(?:to|at)\s+{_NUM}", low):
+        return sc("set_volume", "set_volume", percent=int(m.group(1)))
+    if m := re.fullmatch(rf"(?:set|put|change|make)\s+(?:the\s+)?brightness\s+(?:to|at)\s+{_NUM}", low):
+        return sc("set_brightness", "set_brightness", percent=int(m.group(1)))
+    for noun, prefix in (("volume", "volume"), ("brightness", "brightness")):
+        if m := re.fullmatch(rf"(?:turn\s+(?:the\s+)?{noun}\s+(up|down)|(?:increase|raise|lower|decrease|reduce)\s+"
+                             rf"(?:the\s+)?{noun}|{noun}\s+(up|down)|(?:increase|raise|lower|decrease|reduce)\s+"
+                             rf"(?:the\s+)?{noun}\s+by\s+(\d{{1,3}})(?:\s*(?:percent|%))?)", low):
+            word = low
+            down = bool(re.search(r"\b(down|lower|decrease|reduce)\b", word))
+            by = re.search(r"by\s+(\d{1,3})", word)
+            args = {"step": int(by.group(1))} if by else {}
+            return sc(f"{prefix}_{'down' if down else 'up'}", f"{prefix}_{'down' if down else 'up'}", **args)
+        if m := re.fullmatch(rf"(?:increase|raise|lower|decrease|reduce)\s+(?:the\s+)?{noun}\s+by\s+{_NUM}", low):
+            down = bool(re.match(r"(?:lower|decrease|reduce)", low))
+            return sc(f"{prefix}_{'down' if down else 'up'}", f"{prefix}_{'down' if down else 'up'}",
+                      step=int(m.group(1)))
+    media = (
+        (r"(?:pause|pause\s+(?:the\s+)?(?:music|song|media|video|playback))", "media_play_pause"),
+        (r"(?:play|resume|play\s+(?:the\s+)?(?:music|song|media|video)|resume\s+(?:the\s+)?(?:music|playback))",
+         "media_play_pause"),
+        (r"(?:play\s*/?\s*pause|toggle\s+(?:play|playback))", "media_play_pause"),
+        (r"(?:next|skip)(?:\s+(?:track|song))?|next\s+song|skip\s+(?:this\s+)?(?:track|song)", "media_next"),
+        (r"(?:previous|last)\s+(?:track|song)|go\s+back\s+a\s+(?:track|song)|previous", "media_previous"),
+        (r"stop(?:\s+(?:the\s+)?(?:music|song|media|playback))", "media_stop"),
+    )
+    for pattern, action in media:
+        if re.fullmatch(pattern, low):
+            return sc(action, action)
+    if re.fullmatch(r"(?:what(?:'s| is)\s+(?:my\s+|the\s+)?battery(?:\s+(?:level|status|at))?|battery(?:\s+status)?|how\s+much\s+battery.*)", low):
+        return sc("battery", "get_battery_status")
+    if m := re.fullmatch(r"(minimi[sz]e|maximi[sz]e|restore)(?:\s+(?:this|the|current))?(?:\s+window)?", low):
+        return sc("window", f"window_{m.group(1)[:3].replace('res', 'restore').replace('min', 'minimize').replace('max', 'maximize')}")
+    if re.fullmatch(r"(?:switch|next)\s+window|alt\s*tab", low):
+        return sc("window_switch", "window_switch")
+    if re.fullmatch(r"close\s+(?:this|the|current)?\s*window", low):
+        return sc("window_close", "window_close")
+    if re.fullmatch(r"(?:restart|reboot)(?:\s+(?:the|my))?(?:\s+(?:laptop|computer|pc|machine))?", low):
+        return sc("restart", "restart")
+    if re.fullmatch(r"(?:shut\s*down|power\s+off|turn\s+off)(?:\s+(?:the|my))?(?:\s+(?:laptop|computer|pc|machine))?", low):
+        return sc("shutdown", "shutdown")
+    if re.fullmatch(r"(?:put\s+(?:the|my)\s+(?:laptop|computer|pc)\s+to\s+sleep|sleep(?:\s+(?:the\s+)?(?:laptop|computer|pc))?|go\s+to\s+sleep)", low):
+        return sc("sleep", "sleep")
+    return None
+
+
 class LocalIntentRouter:
     """route(text) -> LocalIntent | None. Never performs I/O."""
 
     def route(self, text: str) -> LocalIntent | None:
+        """Whole phrase first; then 'A and B' / 'A then B' compounds where EVERY clause routes locally."""
+        whole = self._route_one(text)
+        if whole is not None:
+            return whole
+        value = re.sub(r"[.!?,]+$", "", text.strip()).strip()
+        parts = [p.strip() for p in re.split(r"\s*(?:,\s*)?(?:\band then\b|\bthen\b|\band\b)\s+", value, flags=re.I) if p.strip()]
+        if len(parts) < 2:
+            return None
+        intents = [self._route_one(p) for p in parts]
+        if any(i is None or i.needs_cloud for i in intents):
+            return None
+        steps: list[tuple[str, dict]] = []
+        for i, intent in enumerate(intents):
+            # "open calculator" immediately followed by "calculate ..." -- calculate opens it itself.
+            if (intent.name == "open_app" and i + 1 < len(intents) and intents[i + 1].name == "calculate"
+                    and intent.steps[0][1]["target"] == "calculator"):
+                continue
+            steps.extend(intent.steps)
+        return LocalIntent("compound", steps, success_text=None)
+
+    def _route_one(self, text: str) -> LocalIntent | None:
         value = re.sub(r"[.!?,]+$", "", text.strip()).strip()
         if not value:
             return None
         low = value.lower()
 
+        if system := _system_intent(low):
+            return system
         if match := _ARITH.match(value):
             expr = _expression(match.group("expr"))
             if expr:
@@ -143,6 +229,9 @@ def summarize(results: list[tuple[str, dict]]) -> str:
     parts = []
     for name, out in results:
         status = out.get("status")
+        if status == "NEEDS_CONFIRMATION":
+            parts.append("That needs your confirmation. Say yes or no.")
+            continue
         text = out.get("summary") or out.get("error") or ""
         if name == "calculator_calculate" and out.get("data"):
             text = out.get("summary") or text

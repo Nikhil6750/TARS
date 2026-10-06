@@ -280,6 +280,8 @@ def _tool_declarations():
              parameters=obj(control_id=("STRING", "control_id from desktop_list_controls"), label=("STRING", "Human-readable name of what is clicked"))),
         decl(name="desktop_type_text", description="Type text into a control found via desktop_list_controls. Needs the user's confirmation.",
              parameters=obj(control_id=("STRING", "control_id"), text=("STRING", "Text to type"), label=("STRING", "Name of the control"))),
+        decl(name="system_control", description="Native laptop control, executed locally in well under a second with the result read back from Windows -- never use screenshots or Settings for these. Actions: set_volume(percent), volume_up/volume_down(step, default 10), mute_audio, unmute_audio, get_volume; mute_microphone, unmute_microphone, get_microphone_mute; set_brightness(percent), brightness_up/brightness_down(step), get_brightness (reports UNSUPPORTED if the display has no software brightness); media_play_pause ('play'/'pause'/'resume'), media_next, media_previous, media_stop (controls whatever media session is active -- do not assume an app); get_battery_status; window_minimize, window_maximize, window_restore, window_switch; and the CONFIRMATION-REQUIRED actions shutdown, restart, sleep, window_close -- for those, ask the user to say yes or no, then call confirm_pending_action; never run them without it. Ordinary actions need no confirmation. Report only what the tool returned.",
+             parameters=obj(action=("STRING", "One of the action names above"), percent=("NUMBER", "0-100, for set_volume/set_brightness"), step=("NUMBER", "Amount for *_up/*_down, default 10"))),
         decl(name="desktop_scroll", description="Scroll up/down/left/right. For 'scroll down'/'scroll up' with no specific target named, omit control_id entirely -- it scrolls whatever window is currently in front. Pass a control_id from desktop_list_controls only when scrolling one specific control inside a window.",
              parameters=obj(control_id=("STRING", "Optional control_id from desktop_list_controls; omit to scroll the current window"), direction=("STRING", "up, down, left or right"))),
         decl(name="browser_open_url", description="Open an http(s) URL in the browser.", parameters=obj(url=("STRING", "Full URL"))),
@@ -359,7 +361,7 @@ class TarsTools:
             if name in DESKTOP_TOOL_NAMES:
                 allowed = {"target", "control_id", "label", "text", "direction", "url", "query", "path", "command",
                           "question", "symbol", "timeframe", "value", "submit", "timeout", "mode", "expression",
-                          "activate_top_result"}
+                          "activate_top_result", "action", "percent", "step"}
                 return await self.desktop.call(name, {k: v for k, v in (args or {}).items() if k in allowed})
             return await getattr(self, name)(**{k: v for k, v in (args or {}).items()
                                                 if k in {"symbol", "limit", "hours_ahead", "question", "context",

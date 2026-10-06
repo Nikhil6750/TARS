@@ -196,12 +196,41 @@ def _force_foreground(hwnd: int) -> None:
         attached_target = bool(_user32.AttachThreadInput(cur_thread, target_thread, True))
     try:
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        # A lone Alt tap marks this process as having just received input, which lifts Windows'
+        # foreground lock for the SetForegroundWindow call that follows (no UI side effect).
+        win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+        win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
         win32gui.SetForegroundWindow(hwnd)
+        if win32gui.GetForegroundWindow() != hwnd:
+            # Escalation inside the same bounded attempt: topmost toggle + SwitchToThisWindow.
+            flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW
+            win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+            win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+            _user32.SwitchToThisWindow(hwnd, True)
     finally:
         if attached_fg:
             _user32.AttachThreadInput(cur_thread, fg_thread, False)
         if attached_target:
             _user32.AttachThreadInput(cur_thread, target_thread, False)
+
+
+def _activation_target(hwnd: int) -> int:
+    """The top-level window to activate for `hwnd` (itself unless it is a UWP CoreWindow)."""
+    try:
+        if win32gui.GetClassName(hwnd) != "Windows.UI.Core.CoreWindow":
+            return hwnd
+        title = win32gui.GetWindowText(hwnd)
+        frames: list[int] = []
+
+        def visit(h, _):
+            if (win32gui.GetClassName(h) == "ApplicationFrameWindow" and win32gui.IsWindowVisible(h)
+                    and win32gui.GetWindowText(h) == title):
+                frames.append(h)
+
+        win32gui.EnumWindows(visit, None)
+        return frames[0] if frames else hwnd
+    except Exception:
+        return hwnd
 
 
 def _activate_and_verify_foreground(hwnd: int, *, max_attempts: int = 5, settle_seconds: float = 0.2) -> bool:
@@ -217,15 +246,19 @@ def _activate_and_verify_foreground(hwnd: int, *, max_attempts: int = 5, settle_
     `win32gui.SetForegroundWindow` call can then raise `pywintypes.error` ("Invalid window
     handle") instead of merely being silently denied. One bad attempt must not crash the whole
     action; it counts as a failed attempt and the bounded retry continues."""
+    # UWP/modern apps (Calculator, Settings, ...) are enumerated as their inner CoreWindow, which is
+    # NOT what Windows reports as the foreground window and which does not un-minimize the app:
+    # activate (and verify against) the owning ApplicationFrameWindow instead.
+    target = _activation_target(hwnd)
     for _ in range(max_attempts):
         try:
-            _force_foreground(hwnd)
+            _force_foreground(target)
         except Exception:
             logger.warning("[foreground] activation attempt raised for hwnd=%s", hwnd, exc_info=True)
             time.sleep(settle_seconds)
             continue
         time.sleep(settle_seconds)
-        if win32gui.GetForegroundWindow() == hwnd:
+        if win32gui.GetForegroundWindow() in (target, hwnd):
             return True
     return False
 
