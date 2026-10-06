@@ -122,7 +122,10 @@ class DesktopControlSkill(BaseSkill):
             # "scroll whatever is currently in front," resolved the same
             # way resolve_window(None) already resolves "current" for
             # every other no-explicit-target action in this codebase.
-            _validate_optional_str(arguments, "control_id")
+            # An empty string is what the voice layer sends for "no specific control" (live: Gemini
+            # sends control_id="" for "scroll down"); treat it exactly like omitted.
+            if arguments.get("control_id") not in (None, ""):
+                _validate_optional_str(arguments, "control_id")
             if arguments.get("direction") not in _DIRECTIONS:
                 raise SkillValidationError("'direction' must be one of up/down/left/right")
             amount = arguments.get("amount", "small")

@@ -336,3 +336,155 @@ def test_uwp_corewindow_activates_its_application_frame(monkeypatch):
     monkeypatch.setattr(wa.win32gui, "EnumWindows", lambda cb, extra: [cb(h, extra) for h in (30, 20)])
     assert wa._activation_target(10) == 20
     assert wa._activation_target(20) == 20  # ordinary windows are untouched
+
+
+def test_windows_system_initialises_com_on_its_worker_thread(monkeypatch):
+    """Regression (live): 'CoInitialize has not been called' made every spoken volume command fail."""
+    import sys
+    from types import ModuleType
+
+    from skills import windows_system as ws
+
+    calls = []
+    fake = ModuleType("pythoncom")
+    fake.CoInitialize = lambda: calls.append("init")
+    fake.CoUninitialize = lambda: calls.append("uninit")
+    monkeypatch.setitem(sys.modules, "pythoncom", fake)
+    monkeypatch.setattr(ws, "_get_volume", lambda: (40, False))
+    status, *_ = ws.WindowsSystemSkill()._run_com("get_volume", {})
+    assert calls == ["init", "uninit"] and status.value == "SUCCEEDED"
+
+
+def test_numeric_strings_are_accepted_for_step_and_percent():
+    from skills import windows_system as ws
+
+    assert ws._step({"step": "10"}) == 10 and ws._percent({"percent": "30%"}) == 30
+    with pytest.raises(Exception):
+        ws._percent({"percent": True})
+
+
+async def test_local_ack_gates_microphone_so_speakers_do_not_self_interrupt():
+    """Regression (live, speakers): TARS's own spoken confirmation reached the mic, Gemini interrupted
+    and the confirmation was cut off. Audio must not be forwarded to Gemini while it plays."""
+    import time as _time
+
+    from voice.gemini_live import GeminiLiveVoiceSession
+
+    sent = []
+    s = GeminiLiveVoiceSession(SimpleNamespace(), lambda e: asyncio.sleep(0), lambda b: True)
+    s._live = object()
+
+    async def fake_send(chunk):
+        sent.append(chunk)
+
+    s._send_audio = fake_send
+    s.provider_status["microphone"] = "CONNECTED"
+    await s.push_audio(bytes(1024))
+    assert len(sent) == 1
+    s._ack_gate_until = _time.monotonic() + 5
+    await s.push_audio(bytes(1024))
+    assert len(sent) == 1  # gated
+    s._ack_gate_until = 0
+    await s.push_audio(bytes(1024))
+    assert len(sent) == 2
+
+
+async def test_unanswered_turn_is_ended_by_local_vad_not_left_open():
+    """Regression (live): Gemini streamed the user's words but never ended the turn -> no tool call for 50+ s.
+    Our VAD must force end-of-turn after sustained silence if the server has not started answering."""
+    from voice.gemini_live import FORCE_END_SILENCE_S, GeminiLiveVoiceSession
+
+    calls = []
+
+    class Live:
+        async def send_realtime_input(self, **kw):
+            calls.append(kw)
+
+    s = GeminiLiveVoiceSession(SimpleNamespace(), lambda e: asyncio.sleep(0), lambda b: True)
+    s._live = Live()
+    for _ in range(10):
+        await s._watch_end_of_turn(True)
+    for _ in range(int(FORCE_END_SILENCE_S / 0.032) + 3):
+        await s._watch_end_of_turn(False)
+    assert calls == [{"audio_stream_end": True}]  # exactly once
+    for _ in range(100):
+        await s._watch_end_of_turn(False)
+    assert len(calls) == 1
+
+    calls.clear()  # server answered first -> never force
+    for _ in range(10):
+        await s._watch_end_of_turn(True)
+    s._awaiting_server = False
+    for _ in range(100):
+        await s._watch_end_of_turn(False)
+    assert calls == []
+
+
+def test_close_by_name_uses_close_app_never_foreground_window_close():
+    """Regression (live): 'Close File Explorer' became a foreground-window close while TARS was in front."""
+    r = LocalIntentRouter()
+    assert r.route("Can you close File Explorer?").steps == [("desktop_close_app", {"target": "file explorer"})]
+    assert r.route("close this window") is None
+    src = Path(__file__).resolve().parents[1].joinpath("voice/gemini_live.py").read_text(encoding="utf-8")
+    assert "shutdown, restart, sleep, window_close" not in src  # not advertised to Gemini any more
+
+
+async def test_report_watchdog_speaks_when_gemini_stays_silent_and_defers_when_it_speaks(monkeypatch):
+    """Regression (live): after desktop_close_app finished Gemini never reported back."""
+    from voice import gemini_live as G
+
+    monkeypatch.setattr(G, "REPORT_WAIT_S", 0.05)
+    spoken = []
+
+    class TTS:
+        name = "fake"
+
+        async def synthesize(self, text):
+            spoken.append(text)
+            import io, wave
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(bytes(4800))
+            return SimpleNamespace(audio=buf.getvalue())
+
+    events = []
+
+    async def emit(e):
+        events.append(e)
+
+    s = G.GeminiLiveVoiceSession(SimpleNamespace(), emit, lambda b: False, ack_tts=TTS())
+    done = {"status": "DONE", "summary": "Closed 'File Explorer'."}
+    await s._report_watchdog(done, s.generation, s._tool_seq)
+    assert spoken == ["Closed 'File Explorer'."] and s._ack_muted  # reported + late duplicate suppressed
+    assert any(e["type"] == "audio_pcm" for e in events)
+
+    spoken.clear(); s._ack_muted = False; s._first_audio = True  # Gemini already speaking -> stay quiet
+    await s._report_watchdog(done, s.generation, s._tool_seq)
+    assert spoken == []
+    s._first_audio = False
+    await s._report_watchdog(done, s.generation, s._tool_seq + 1)  # model moved on to another tool
+    assert spoken == []
+    from voice.session import VoiceState
+    s.state, s._first_audio, s._ack_muted = VoiceState.LISTENING, False, False
+    await s._report_watchdog({"status": "FAILED", "summary": "Calculator is not installed."}, s.generation, s._tool_seq)
+    assert spoken == ["That didn't work. Calculator is not installed."]
+
+
+async def test_scroll_with_empty_control_id_is_valid_and_wrapper_omits_it():
+    """Regression (live): 'Open Start and scroll down' opened Start then scroll_control was DENIED
+    because Gemini sent control_id=''."""
+    from skills.desktop_control import DesktopControlSkill
+    from voice.desktop_tools import DesktopTools
+
+    await DesktopControlSkill().validate("scroll_control", {"control_id": "", "direction": "down", "amount": "small"})
+    with pytest.raises(Exception):
+        await DesktopControlSkill().validate("scroll_control", {"control_id": 5, "direction": "down"})
+    sent = {}
+
+    class Tools(DesktopTools):
+        async def _submit(self, skill, action, arguments, *, describe):
+            sent.update(arguments)
+            return {"status": "DONE"}
+
+    await Tools(SimpleNamespace(), lambda: ("", 0.0)).desktop_scroll(control_id="", direction="down")
+    assert sent == {"direction": "down", "amount": "small"}

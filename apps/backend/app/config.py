@@ -94,10 +94,13 @@ class Settings(BaseSettings):
     # gemini_live (primary, cloud) | local_streaming (sherpa + faster-whisper + Pocket TTS fallback)
     voice_provider: str = "gemini_live"
     gemini_api_key: str = ""
-    gemini_live_model: str = "gemini-3.8-live"
+    gemini_live_model: str = "gemini-3.1-flash-live-preview"
     # Sadaltager (Knowledgeable, default) | Achird (Friendly) | Puck (Upbeat) | Sulafat (Warm)
     gemini_live_voice: str = "Sadaltager"
-    gemini_live_idle_seconds: float = 25.0
+    # Keep the realtime session open between commands (reconnecting costs ~1-2 s and clips first words).
+    gemini_live_idle_seconds: float = 600.0
+    # Speak a verified native system action (volume/brightness/...) from local TTS immediately.
+    local_action_ack: bool = True
     sherpa_model_dir: str = "~/.cache/tars-models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
     fish_speech_model_path: str | None = None
     fish_speech_api_url: str = "http://localhost:8080"

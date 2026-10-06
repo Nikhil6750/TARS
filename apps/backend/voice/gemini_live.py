@@ -53,6 +53,14 @@ def resolve_trading_terms(text: str) -> str:
 INPUT_RATE = 16000
 # A working microphone path, even in a quiet room, is far above this; drivers that gate silence sit at -100 dB.
 MIC_SILENT_DB = -85.0
+REPORT_WAIT_S = 2.2  # if Gemini has not started speaking this long after a quick tool finished, TARS reports it
+REPORT_TOOLS = {"desktop_open_app", "desktop_focus_window", "desktop_close_app", "desktop_open_start",
+                "desktop_scroll", "calculator_calculate", "tradingview_set_symbol", "tradingview_set_timeframe",
+                "system_control", "browser_open_url", "browser_search", "web_navigate", "web_new_tab",
+                "pause_market_watching", "resume_market_watching", "watch_market", "unwatch_market"}
+FORCE_END_SILENCE_S = 1.2  # local-VAD silence after which an unanswered turn is ended by us, not the server
+ACK_ECHO_TAIL_S = 0.6  # room/speaker tail after the local confirmation ends
+END_SILENCE_MS = 400  # user-silence before Gemini commits the turn
 MIC_SILENT_AFTER_S = 90.0
 OUTPUT_RATE = 24000
 
@@ -172,6 +180,10 @@ Desktop control (all through TARS's guarded action layer)
   always target the currently open TradingView window -- you do not need to re-open or re-name it for a follow-up
   in the same conversation. If a symbol/timeframe change reports NOT_VERIFIED, say you asked for the change but
   couldn't confirm it took effect; do not claim it worked.
+- "Close File Explorer" / "close Notepad" / "close the calculator" -> desktop_close_app with that app's plain name (it
+  closes that named app right away; no confirmation is needed unless the tool itself returns NEEDS_CONFIRMATION).
+  Never call confirm_pending_action unless a confirmation is actually waiting and the user has just said yes.
+  Closing an app window is unrelated to the trading rule about orders and positions below.
 - If a click, typing or other state-changing action returns NEEDS_CONFIRMATION, ask the user plainly ("Click Save in
   Notepad, yes?"). Only after they clearly say yes call confirm_pending_action; if they say no call
   cancel_pending_action. Never confirm on your own.
@@ -264,7 +276,7 @@ def _tool_declarations():
              parameters=obj(target=("STRING", "The app's plain spoken name, exactly as the user said it"))),
         decl(name="desktop_focus_window", description="Bring an already running application/window to the front (switch to it). Use the plain spoken app name here too.",
              parameters=obj(target=("STRING", "Application name, e.g. tradingview, chrome, metatrader"))),
-        decl(name="desktop_close_app", description="Close a running application's window by its plain spoken name.",
+        decl(name="desktop_close_app", description="'Close File Explorer' / 'close Notepad' / 'close the calculator': closes that NAMED application's window immediately (the app itself still prompts about unsaved work). Use this, never system_control, to close anything by name. If it ever returns NEEDS_CONFIRMATION, ask yes/no and only then call confirm_pending_action.",
              parameters=obj(target=("STRING", "Application name, e.g. calculator, notepad"))),
         decl(name="desktop_open_start", description="'Open Start.' / 'Open the Start menu.' / 'Open Start and search for Bluetooth.' / 'Open Start and open Calculator.' Opens the real Windows Start menu (never a guess -- the real taskbar Start button), optionally types a query into its own built-in search, and optionally activates the matching search result. Ordinary Tier-1/2 local navigation -- never needs confirmation.",
              parameters=obj(query=("STRING", "Optional text to search for in Start, e.g. 'Bluetooth' or 'Calculator'. Leave empty to just open Start."),
@@ -280,7 +292,7 @@ def _tool_declarations():
              parameters=obj(control_id=("STRING", "control_id from desktop_list_controls"), label=("STRING", "Human-readable name of what is clicked"))),
         decl(name="desktop_type_text", description="Type text into a control found via desktop_list_controls. Needs the user's confirmation.",
              parameters=obj(control_id=("STRING", "control_id"), text=("STRING", "Text to type"), label=("STRING", "Name of the control"))),
-        decl(name="system_control", description="Native laptop control, executed locally in well under a second with the result read back from Windows -- never use screenshots or Settings for these. Actions: set_volume(percent), volume_up/volume_down(step, default 10), mute_audio, unmute_audio, get_volume; mute_microphone, unmute_microphone, get_microphone_mute; set_brightness(percent), brightness_up/brightness_down(step), get_brightness (reports UNSUPPORTED if the display has no software brightness); media_play_pause ('play'/'pause'/'resume'), media_next, media_previous, media_stop (controls whatever media session is active -- do not assume an app); get_battery_status; window_minimize, window_maximize, window_restore, window_switch; and the CONFIRMATION-REQUIRED actions shutdown, restart, sleep, window_close -- for those, ask the user to say yes or no, then call confirm_pending_action; never run them without it. Ordinary actions need no confirmation. Report only what the tool returned.",
+        decl(name="system_control", description="Native laptop control, executed locally in well under a second with the result read back from Windows -- never use screenshots or Settings for these. Actions: set_volume(percent), volume_up/volume_down(step, default 10), mute_audio, unmute_audio, get_volume; mute_microphone, unmute_microphone, get_microphone_mute; set_brightness(percent), brightness_up/brightness_down(step), get_brightness (reports UNSUPPORTED if the display has no software brightness); media_play_pause ('play'/'pause'/'resume'), media_next, media_previous, media_stop (controls whatever media session is active -- do not assume an app); get_battery_status; window_minimize, window_maximize, window_restore, window_switch (these act on the window currently in front); and the CONFIRMATION-REQUIRED actions shutdown, restart, sleep -- for those, ask the user to say yes or no, then call confirm_pending_action; never run them without it. Ordinary actions need no confirmation. Report only what the tool returned.",
              parameters=obj(action=("STRING", "One of the action names above"), percent=("NUMBER", "0-100, for set_volume/set_brightness"), step=("NUMBER", "Amount for *_up/*_down, default 10"))),
         decl(name="desktop_scroll", description="Scroll up/down/left/right. For 'scroll down'/'scroll up' with no specific target named, omit control_id entirely -- it scrolls whatever window is currently in front. Pass a control_id from desktop_list_controls only when scrolling one specific control inside a window.",
              parameters=obj(control_id=("STRING", "Optional control_id from desktop_list_controls; omit to scroll the current window"), direction=("STRING", "up, down, left or right"))),
@@ -728,8 +740,20 @@ class GeminiLiveVoiceSession:
 
     def __init__(self, tools, emit, vad, *, model="gemini-3.8-live", voice=DEFAULT_VOICE, idle_seconds=25.0,
                  connect: Callable[[], Awaitable] | None = None, metrics: LatencyMetrics | None = None,
-                 speech_open_frames=8):
+                 speech_open_frames=8, ack_tts=None):
         self.tools, self.emit, self.vad = tools, emit, vad
+        # Local TTS used ONLY for an immediate spoken confirmation of verified native system actions
+        # (Gemini's own post-tool reply varies from ~1 s to 5 s+). None = Gemini speaks everything.
+        self.ack_tts = ack_tts
+        self._ack_task = None
+        self._report_task = None
+        self._ack_muted = False
+        self._ack_gate_until = 0.0
+        self._tool_seq = 0  # bumps on every tool call; lets the report watchdog notice the model moved on
+        # Safety net for the server's end-of-speech detection (observed: turn left open for 50+ s with no
+        # tool call): our own VAD ends the turn if Gemini has not started answering.
+        self._utt_speech, self._utt_silence, self._awaiting_server, self._forced_end = False, 0.0, False, False
+        self.raw: deque[dict] = deque(maxlen=60)  # last server messages (types only, no audio) for diagnostics  # mic is not forwarded to Gemini while our own confirmation plays
         self.model, self.idle_seconds = model, idle_seconds
         self.voice = voice or DEFAULT_VOICE
         self._last_final_user = ("", 0.0)
@@ -841,8 +865,15 @@ class GeminiLiveVoiceSession:
             system_instruction=SYSTEM_PROMPT,
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=self.voice))),
-            input_audio_transcription=types.AudioTranscriptionConfig(),
+            # Pin English: with no hint Gemini transcribed clear English commands as Portuguese.
+            input_audio_transcription=types.AudioTranscriptionConfig(language_codes=["en-US"]),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            # Commit the turn quickly after the user stops: short commands should not wait out the
+            # server's default silence window.
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                    silence_duration_ms=END_SILENCE_MS)),
             tools=_tool_declarations(),
         )
         return client.aio.live.connect(model=self.model, config=config)
@@ -902,6 +933,7 @@ class GeminiLiveVoiceSession:
         if self.provider_status["microphone"] in ("DISCONNECTED", "STARTING"):
             self.provider_status["microphone"] = "CONNECTED"  # frames are arriving; health() refines it
             await self._status()
+            await self.wake()  # first live (unmuted) audio: connect now so the first command is not clipped
         self._pending.extend(frame)
         while len(self._pending) >= 1024:
             chunk = bytes(self._pending[:1024])
@@ -910,8 +942,13 @@ class GeminiLiveVoiceSession:
             self._account(chunk, speech)
             if speech:
                 self._last_activity = time.monotonic()
+                self._last_speech_pc = time.perf_counter()
             if self._live:
-                await self._send_audio(chunk)
+                # Speakers: the mic hears TARS's own local confirmation, and Gemini's server would treat
+                # that as the user talking over it and interrupt (cutting the confirmation off).
+                if time.monotonic() >= self._ack_gate_until:
+                    await self._send_audio(chunk)
+                    await self._watch_end_of_turn(speech)
                 continue
             self._preroll.append(chunk)
             self._speech_frames = self._speech_frames + 1 if speech else 0
@@ -962,7 +999,28 @@ class GeminiLiveVoiceSession:
                         "health": self.mic_health()},
                 "gemini": self.provider_status["gemini_live"], "transcript": self.last_transcript,
                 "voice_state": self.state.value, "voice_provider": self.voice_provider,
-                "microphone_muted": self.microphone_muted}
+                "microphone_muted": self.microphone_muted, "raw": list(self.raw)}
+
+    async def _watch_end_of_turn(self, speech: bool):
+        if speech:
+            self._utt_speech, self._utt_silence, self._forced_end = True, 0.0, False
+            self._awaiting_server = True
+            return
+        if not self._utt_speech:
+            return
+        self._utt_silence += 0.032
+        if self._utt_silence >= FORCE_END_SILENCE_S and self._awaiting_server and not self._forced_end:
+            self._forced_end, self._utt_speech = True, False
+            live = self._live
+            if live is None:
+                return
+            try:
+                await live.send_realtime_input(audio_stream_end=True)
+                self.metrics.latest["forced_end_of_turn"] = self.metrics.latest.get("forced_end_of_turn", 0) + 1
+                logger.info("gemini live: server did not end the user turn after %.1fs of silence; forced it",
+                            self._utt_silence)
+            except Exception as exc:
+                logger.warning("forced end of turn failed: %s", type(exc).__name__)
 
     async def _send_audio(self, chunk: bytes):
         live = self._live
@@ -996,7 +1054,17 @@ class GeminiLiveVoiceSession:
 
     async def _handle(self, message):
         content = getattr(message, "server_content", None)
+        self.raw.append({"t": round(time.time(), 2), "tool_call": bool(getattr(message, "tool_call", None)),
+                         "go_away": bool(getattr(message, "go_away", None)),
+                         **({k: bool(getattr(content, k, None)) for k in (
+                             "turn_complete", "generation_complete", "interrupted", "input_transcription",
+                             "output_transcription", "model_turn")} if content else {})})
+        if getattr(message, "tool_call", None) or (content and (getattr(content, "model_turn", None)
+                                                                or getattr(content, "turn_complete", None))):
+            self._awaiting_server = False
         if getattr(message, "tool_call", None):
+            if self._ack_muted:
+                self._muted, self._ack_muted = False, False  # model continues the task: let it report
             for call in message.tool_call.function_calls or []:
                 self._tool_tasks[call.id] = asyncio.create_task(self._run_tool(call))
         if getattr(message, "tool_call_cancellation", None):
@@ -1059,6 +1127,12 @@ class GeminiLiveVoiceSession:
         await self._finalize_user()
         if not self._first_audio:
             self._first_audio = True
+            last_speech, done = getattr(self, "_last_speech_pc", None), getattr(self, "_tool_result_pc", None)
+            if last_speech:
+                self.metrics.latest["speech_end_to_first_audio_ms"] = round((time.perf_counter() - last_speech) * 1000)
+            if done:
+                self.metrics.latest["tool_result_to_first_audio_ms"] = round((time.perf_counter() - done) * 1000)
+                self._tool_result_pc = None
             if self._last_user_at:
                 self.metrics.latest["last_user_text_to_first_audio"] = round((time.perf_counter() - self._last_user_at) * 1000, 1)
             await self.transition(VoiceState.ASSISTANT_SPEAKING)
@@ -1079,6 +1153,7 @@ class GeminiLiveVoiceSession:
         await self._finalize_user()
         text = self._assistant_text.strip()
         self._assistant_text, self._first_audio, self._muted = "", False, False
+        self._ack_muted = False
         if text:
             await self.send("response_complete", response={
                 "display_text": text, "speech_text": text, "status": "completed",
@@ -1091,6 +1166,10 @@ class GeminiLiveVoiceSession:
         from voice.activity import describe_tool_call
 
         name, args = call.name, dict(call.args or {})
+        self._tool_seq += 1
+        last_speech = getattr(self, "_last_speech_pc", None)
+        if last_speech:  # local-VAD end of the user's speech -> Gemini's tool call (model + end-of-turn wait)
+            self.metrics.latest["speech_end_to_tool_call_ms"] = round((time.perf_counter() - last_speech) * 1000)
         # The displayed text is derived from the real call about to run, not
         # invented by Gemini -- see voice/activity.py's module docstring.
         await self.send("tool_call", name=name, text=describe_tool_call(name, args))
@@ -1109,6 +1188,7 @@ class GeminiLiveVoiceSession:
 
         status = result.get("status") if isinstance(result, dict) else None
         final_status = status or ("FAILED" if "error" in result else "DONE")
+        self._tool_result_pc = time.perf_counter()
         await self.send("tool_result", name=name, status=final_status, text=describe_tool_result(name, args, final_status))
         desktop = getattr(self.tools, "desktop", None)
         if status == "NEEDS_CONFIRMATION" and desktop is not None and desktop.pending:
@@ -1119,11 +1199,66 @@ class GeminiLiveVoiceSession:
         live = self._live
         if live is None:
             return
+        if (self.ack_tts is not None and name == "system_control" and final_status == "DONE"
+                and isinstance(result, dict) and result.get("summary")
+                and not (result.get("data") or {}).get("dispatched")):
+            # Verified native action: confirm it aloud NOW (local TTS) and hold back Gemini's slower,
+            # redundant follow-up until it either calls another tool or ends the turn.
+            self._muted = self._ack_muted = True
+            self._ack_task = asyncio.create_task(self._speak_ack(str(result["summary"]), self.generation))
         try:
             await live.send_tool_response(function_responses=[
                 types.FunctionResponse(id=call.id, name=name, response=result)])
         except Exception as exc:
             logger.warning("send_tool_response failed: %s", type(exc).__name__)
+            return
+        if self.ack_tts is not None and name in REPORT_TOOLS and not self._ack_muted and isinstance(result, dict):
+            self._report_task = asyncio.create_task(
+                self._report_watchdog(result, self.generation, self._tool_seq))
+
+    async def _report_watchdog(self, result: dict, generation: int, tool_seq: int):
+        """Gemini sometimes finishes a tool and never reports back. If it has not begun speaking (and has
+        not moved on to another tool) shortly after the tool finished, say the verified result ourselves."""
+        try:
+            await asyncio.sleep(REPORT_WAIT_S)
+            if (generation != self.generation or self.closed or tool_seq != self._tool_seq
+                    or self._first_audio or self._ack_muted or self.state is VoiceState.ASSISTANT_SPEAKING
+                    or self.state is VoiceState.USER_SPEAKING):
+                return
+            status = result.get("status")
+            if status == "NEEDS_CONFIRMATION":
+                text = "That needs your confirmation. Say yes or no."
+            else:
+                text = str(result.get("summary") or result.get("error") or "").strip()
+                if status not in (None, "DONE") and text:
+                    text = f"That didn't work. {text}"
+            if not text:
+                return
+            self.metrics.latest["report_watchdog_fired"] = self.metrics.latest.get("report_watchdog_fired", 0) + 1
+            self._muted = self._ack_muted = True  # drop a late duplicate from the model
+            await self._speak_ack(text, generation)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("report watchdog failed: %s", type(exc).__name__)
+
+    async def _speak_ack(self, text: str, generation: int):
+        try:
+            started = time.perf_counter()
+            result = await asyncio.wait_for(self.ack_tts.synthesize(text), 8)
+            if generation != self.generation or self.closed:
+                return
+            from voice.audio_utils import wav_to_pcm16
+
+            pcm, rate = wav_to_pcm16(result.audio)
+            self.metrics.latest["local_ack_synth_ms"] = round((time.perf_counter() - started) * 1000)
+            self._first_audio = True
+            self._ack_gate_until = time.monotonic() + len(pcm) / (2 * rate) + ACK_ECHO_TAIL_S
+            await self.transition(VoiceState.ASSISTANT_SPEAKING)
+            await self.send("audio_pcm", sample_rate=rate, audio=base64.b64encode(pcm).decode("ascii"))
+        except Exception as exc:  # the action already ran; if the local voice fails Gemini still speaks
+            logger.warning("local ack failed: %s", type(exc).__name__)
+            self._muted = self._ack_muted = False
 
     # ---- controls used by the router / UI ------------------------------------
     async def interrupt(self):
@@ -1165,6 +1300,8 @@ class GeminiLiveVoiceSession:
             self.mic["last_frame_at"] = time.monotonic()
             self.mic["first_frame_at"] = time.monotonic()
         await self._status(detail="Microphone muted" if muted else "Microphone active", microphone_muted=muted)
+        if not muted:
+            await self.wake()  # unmuting = ready: connect before the user speaks, not after
 
     async def wake(self):
         """Orb click: open the Gemini session now instead of waiting for speech (no-op if already open)."""

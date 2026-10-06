@@ -43,8 +43,18 @@ def _clamp(value: float) -> int:
     return max(0, min(100, int(round(value))))
 
 
+def _num(value: Any) -> Any:
+    """Gemini sometimes sends numbers as strings ("10"); accept those, never bools."""
+    if isinstance(value, str):
+        try:
+            return float(value.strip().rstrip("%"))
+        except ValueError:
+            return value
+    return value
+
+
 def _percent(arguments: dict[str, Any], key: str = "percent") -> int:
-    value = arguments.get(key)
+    value = _num(arguments.get(key))
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SkillValidationError(f"'{key}' must be a number between 0 and 100")
     if not 0 <= value <= 100:
@@ -53,7 +63,7 @@ def _percent(arguments: dict[str, Any], key: str = "percent") -> int:
 
 
 def _step(arguments: dict[str, Any]) -> int:
-    value = arguments.get("step", _DEFAULT_STEP)
+    value = _num(arguments.get("step", _DEFAULT_STEP))
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= 100:
         raise SkillValidationError("'step' must be between 1 and 100")
     return int(round(value))
@@ -161,6 +171,20 @@ def _show_window(hwnd: int, command: int) -> None:
     win32gui.ShowWindow(hwnd, command)
 
 
+def _is_tars_window(hwnd: int) -> bool:
+    """TARS's own companion/orb windows must never be minimised/closed by a voice command."""
+    try:
+        import win32gui
+        import win32process
+        import psutil
+
+        title = win32gui.GetWindowText(hwnd)
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        return title.startswith("TARS") and "antigravity" not in title.lower() and             psutil.Process(pid).name().lower().startswith("tars")
+    except Exception:
+        return False
+
+
 def _close_window(hwnd: int) -> None:
     import win32con
     import win32gui
@@ -217,7 +241,7 @@ class WindowsSystemSkill(BaseSkill):
         risk = self.classify_risk(action, args)
         t0 = time.perf_counter()
         try:
-            status, summary, data = await asyncio.to_thread(self._run, action, args)
+            status, summary, data = await asyncio.to_thread(self._run_com, action, args)
         except SkillExecutionError:
             raise
         except Exception as exc:  # native API failure is reported, never faked
@@ -227,6 +251,17 @@ class WindowsSystemSkill(BaseSkill):
                             error=None if status is ActionStatus.SUCCEEDED else summary)
 
     # ------------------------------------------------------------------------------------
+    def _run_com(self, action: str, a: dict[str, Any]) -> tuple[ActionStatus, str, dict]:
+        """Core Audio and WMI are COM: a thread-pool thread is not COM-initialized, so initialise
+        explicitly per call (otherwise it only works when a pool thread happened to be initialised)."""
+        import pythoncom
+
+        pythoncom.CoInitialize()
+        try:
+            return self._run(action, a)
+        finally:
+            pythoncom.CoUninitialize()
+
     def _run(self, action: str, a: dict[str, Any]) -> tuple[ActionStatus, str, dict]:
         ok, bad = ActionStatus.SUCCEEDED, ActionStatus.FAILED
         if action == "get_volume":
@@ -302,6 +337,8 @@ class WindowsSystemSkill(BaseSkill):
             hwnd = _foreground_hwnd()
             if not hwnd:
                 return bad, "There is no foreground window.", {}
+            if _is_tars_window(hwnd):
+                return bad, "The window in front is TARS itself, so I left it alone.", {"outcome": "REFUSED_SELF"}
             if action == "window_close":
                 _close_window(hwnd)
             else:

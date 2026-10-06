@@ -495,9 +495,10 @@ class DesktopTools:
         return await self._submit("desktop_control", "list_controls", args, describe="list on-screen controls")
 
     async def desktop_scroll(self, control_id: str = "", direction: str = "down") -> dict:
-        return await self._submit("desktop_control", "scroll_control",
-                                  {"control_id": control_id, "direction": direction, "amount": "small"},
-                                  describe=f"scroll {direction}")
+        args = {"direction": direction, "amount": "small"}
+        if control_id and control_id.strip():
+            args["control_id"] = control_id.strip()  # omitted = scroll whatever window is in front
+        return await self._submit("desktop_control", "scroll_control", args, describe=f"scroll {direction}")
 
     async def browser_open_url(self, url: str = "") -> dict:
         return await self._submit("browser", "open_url", {"url": url}, describe=f"open {url}")

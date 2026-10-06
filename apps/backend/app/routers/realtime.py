@@ -146,7 +146,9 @@ async def realtime(websocket: WebSocket):
             session = GeminiLiveVoiceSession(
                 TarsTools(state, uuid.uuid4().hex), emit, vad, model=settings.gemini_live_model, voice=getattr(settings, "gemini_live_voice", "Sadaltager"),
                 idle_seconds=settings.gemini_live_idle_seconds, metrics=state.realtime_metrics,
-                connect=getattr(state, "gemini_connect_override", None))
+                connect=getattr(state, "gemini_connect_override", None),
+                ack_tts=(voice.tts if getattr(settings, "local_action_ack", True) and voice.ready.is_set()
+                         and voice.tts.name != "mock" else None))
             state.realtime_session = session
             sender = asyncio.create_task(send())
             await session.start()

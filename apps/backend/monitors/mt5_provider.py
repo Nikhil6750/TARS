@@ -46,6 +46,13 @@ def _mt5_terminal_process_running() -> bool:
     raises -- a failed check just means "can't confirm", reported as plain
     DISCONNECTED rather than guessing AUTH_REQUIRED."""
     try:
+        import psutil
+
+        return any((p.info["name"] or "").lower() in _MT5_PROCESS_NAMES
+                   for p in psutil.process_iter(["name"]))
+    except Exception:
+        pass
+    try:
         proc = subprocess.run(  # noqa: S603, S607
             ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=5,
         )
@@ -142,6 +149,11 @@ class MT5Provider:
         self._mt5 = mt5
         try:
             if not mt5.terminal_info():
+                # mt5.initialize() LAUNCHES the terminal when it is not running, so polling it every
+                # second relaunched MetaTrader the moment the user closed it. Never start MT5 from a
+                # monitor: attach only to a terminal that is already running.
+                if not self.process_checker():
+                    return {"state": MT5State.DISCONNECTED, "detail": "MT5 terminal is not running"}
                 if not mt5.initialize():
                     error = mt5.last_error()
                     if self.process_checker():

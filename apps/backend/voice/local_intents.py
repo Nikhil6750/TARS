@@ -124,8 +124,10 @@ def _system_intent(low: str) -> LocalIntent | None:
         return sc("window", f"window_{m.group(1)[:3].replace('res', 'restore').replace('min', 'minimize').replace('max', 'maximize')}")
     if re.fullmatch(r"(?:switch|next)\s+window|alt\s*tab", low):
         return sc("window_switch", "window_switch")
-    if re.fullmatch(r"close\s+(?:this|the|current)?\s*window", low):
-        return sc("window_close", "window_close")
+    if m := re.fullmatch(r"(?:can you\s+)?close\s+(?:the\s+)?([a-z0-9 ]{2,30}?)(?:\s+(?:app|window|application))?", low):
+        name = m.group(1).strip()
+        if name not in {"this", "current", "it", "that", "window"}:
+            return LocalIntent("close_app", [("desktop_close_app", {"target": name})])
     if re.fullmatch(r"(?:restart|reboot)(?:\s+(?:the|my))?(?:\s+(?:laptop|computer|pc|machine))?", low):
         return sc("restart", "restart")
     if re.fullmatch(r"(?:shut\s*down|power\s+off|turn\s+off)(?:\s+(?:the|my))?(?:\s+(?:laptop|computer|pc|machine))?", low):

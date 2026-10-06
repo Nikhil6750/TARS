@@ -94,18 +94,29 @@ def test_mt5_states_are_truthful():
     c = Collector()
     missing = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: None)
     assert missing.poll_once()["state"] is MT5State.NOT_INSTALLED
-    # No MT5 process at all (process_checker=False, explicit): truly unreachable.
-    down = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: FakeMT5(ok=False),
+    # No MT5 process at all: DISCONNECTED, and the monitor must NEVER call initialize() -- that call
+    # launches the terminal, which made MetaTrader reopen itself every time the user closed it.
+    fake = FakeMT5(ok=False)
+    fake.initialize_calls = 0
+    original_initialize = fake.initialize
+
+    def counting_initialize(*a, **k):
+        fake.initialize_calls += 1
+        return original_initialize(*a, **k)
+
+    fake.initialize = counting_initialize
+    down = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: fake,
                        process_checker=lambda: False)
     snap = down.poll_once()
-    assert snap["state"] is MT5State.DISCONNECTED and "not reachable" in snap["detail"]
+    assert snap["state"] is MT5State.DISCONNECTED and "not running" in snap["detail"]
+    assert fake.initialize_calls == 0
 
     class Boom(FakeMT5):
         def account_info(self):
             raise RuntimeError("x")
 
     err = MT5Provider(["EURUSD"], c.publish, no_state, module_loader=lambda: Boom(),
-                      process_checker=lambda: False)
+                      process_checker=lambda: True)
     assert err.poll_once()["state"] is MT5State.ERROR
 
 
