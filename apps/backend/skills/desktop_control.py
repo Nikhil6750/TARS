@@ -81,6 +81,7 @@ _MAX_TYPE_TEXT_CHARS = 20_000
 
 class DesktopControlSkill(BaseSkill):
     name = "desktop_control"
+    blocking_io = True  # synchronous UI Automation: run in a worker thread (see actions/runtime.py)
     description = "Keyboard/mouse/UI Automation control of the desktop (click, type, scroll, read selected text/clipboard)."
     capabilities: tuple[str, ...] = tuple(_RISK_BY_ACTION)
 

@@ -36,6 +36,22 @@ from app.contracts import (
 from app.ws_manager import ConnectionManager
 
 
+async def _execute_skill(skill, request):
+    """Skills that drive the desktop with synchronous UI Automation (`blocking_io = True`) would freeze the
+    whole event loop for seconds (live: the voice WebSocket timed out and dropped mid-calculation).
+    Run those in a worker thread with its own COM-initialised loop; all other skills run inline as before."""
+    if not getattr(skill, "blocking_io", False):
+        return await skill.execute(request)
+
+    def run():
+        import uiautomation as auto
+
+        with auto.UIAutomationInitializerInThread():
+            return asyncio.run(skill.execute(request))
+
+    return await asyncio.to_thread(run)
+
+
 class ActionRuntime:
     def __init__(
         self,
@@ -426,7 +442,7 @@ class ActionRuntime:
         await self._broadcast(running)
         try:
             candidate = await asyncio.wait_for(
-                skill.execute(request),
+                _execute_skill(skill, request),
                 timeout=execution_timeout or self.execution_timeout,
             )
             result = self._normalize_skill_result(request, candidate, risk, now)

@@ -141,6 +141,71 @@ def _tokens_for(expression: str) -> list[str]:
     return buttons
 
 
+def _speakable(expression: str, value: float) -> str:
+    """'2345 times 17 equals 39865.' -- what TTS can say cleanly (no '*' or trailing '.0')."""
+    words = {"*": "times", "/": "divided by", "+": "plus", "-": "minus", "%": "mod"}
+    spoken = "".join(f" {words[c]} " if c in words else c for c in expression)
+    number = str(int(value)) if float(value).is_integer() else repr(value)
+    return f"{' '.join(spoken.split())} equals {number}."
+
+
+_KEY_SAFE_CHARS = set("0123456789.+-*/")  # plain arithmetic only; '%' and parentheses use the button path
+
+
+def _type_expression(hwnd: int, expression: str) -> bool:
+    """Fast path: each UI-Automation Invoke() on Calculator's buttons blocks ~0.5 s (Windows), so a
+    multiplication took 6 s. Typing the same keys takes well under a second. Guards: Calculator must be the
+    verified foreground window immediately before typing, only plain arithmetic keys are sent, and '=' is used
+    (never Enter). The caller verifies the displayed result and falls back to buttons if it differs."""
+    import win32api
+    import win32con
+    import win32gui
+
+    if not set(expression.replace(" ", "")) <= _KEY_SAFE_CHARS:
+        return False
+    if win32gui.GetForegroundWindow() != hwnd and win32gui.GetForegroundWindow() != _frame_of(hwnd):
+        return False
+
+    def tap(vk: int, shift: bool = False) -> None:
+        if shift:
+            win32api.keybd_event(win32con.VK_SHIFT, 0, 0, 0)
+        win32api.keybd_event(vk, 0, 0, 0)
+        win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+        if shift:
+            win32api.keybd_event(win32con.VK_SHIFT, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.01)
+
+    tap(win32con.VK_ESCAPE)  # Calculator: Esc = clear
+    for ch in expression.replace(" ", "") + "=":
+        scan = win32api.VkKeyScan(ch)
+        tap(scan & 0xFF, bool(scan >> 8 & 1))
+    return True
+
+
+def _frame_of(hwnd: int) -> int:
+    from skills.windows_app import _activation_target
+
+    return _activation_target(hwnd)
+
+
+def _button_map(root: auto.Control, automation_ids: set[str], *, max_nodes: int = 600) -> dict[str, auto.Control]:
+    """ONE breadth-first pass over Calculator's UI tree collecting every needed button. A fresh deep
+    `Control(searchFromControl=...)` search per key cost ~0.4 s each (6+ s for one multiplication)."""
+    found: dict[str, auto.Control] = {}
+    queue, seen = [root], 0
+    while queue and seen < max_nodes and len(found) < len(automation_ids):
+        node = queue.pop(0)
+        seen += 1
+        try:
+            aid = node.AutomationId
+            if aid in automation_ids and aid not in found:
+                found[aid] = node
+            queue.extend(node.GetChildren())
+        except Exception:
+            continue
+    return found
+
+
 def _find_button(root: auto.Control, automation_id: str) -> auto.Control:
     control = auto.Control(searchFromControl=root, AutomationId=automation_id, searchDepth=20)
     # Small bounded grace period, not a zero-timeout check: Calculator's
@@ -189,6 +254,7 @@ def _read_result(root: auto.Control) -> float:
 
 class CalculatorSkill(BaseSkill):
     name = "calculator"
+    blocking_io = True  # synchronous UI Automation: run in a worker thread (see actions/runtime.py)
     description = "Perform a strictly-validated arithmetic calculation in the real Windows Calculator app."
     capabilities: tuple[str, ...] = ("calculate",)
 
@@ -233,12 +299,30 @@ class CalculatorSkill(BaseSkill):
 
         root = control_from_hwnd(hwnd)
         try:
+            if _type_expression(hwnd, expression):
+                time.sleep(0.2)
+                try:
+                    typed = _read_result(root)
+                except SkillExecutionError:
+                    typed = None
+                if typed is not None and abs(typed - expected) < 1e-9:
+                    return self._result(
+                        request, ActionStatus.SUCCEEDED, _speakable(expression, typed),
+                        risk_level=RiskLevel.LOW_RISK,
+                        data={"outcome": "SUCCESS", "expression": expression, "result": typed,
+                              "window_title": title, "method": "keyboard"},
+                        started_at=started,
+                    )
+                # Typed result did not verify (keys may not have arrived): redo it with the real buttons.
             _clear(root)
             time.sleep(_SETTLE_SECONDS)
-            for button_id in _tokens_for(expression):
-                do_invoke(_find_button(root, button_id))
+            tokens = _tokens_for(expression)
+            buttons = _button_map(root, {*tokens, "equalButton"})
+            for button_id in tokens:
+                # Fall back to the slow search only for a button the single pass did not find.
+                do_invoke(buttons.get(button_id) or _find_button(root, button_id))
                 time.sleep(_SETTLE_SECONDS)
-            do_invoke(_find_button(root, "equalButton"))
+            do_invoke(buttons.get("equalButton") or _find_button(root, "equalButton"))
             time.sleep(_SETTLE_SECONDS)
             displayed = _read_result(root)
         except SkillExecutionError:
@@ -260,7 +344,7 @@ class CalculatorSkill(BaseSkill):
                 started_at=started,
             )
         return self._result(
-            request, ActionStatus.SUCCEEDED, f"{expression} = {displayed!r}",
+            request, ActionStatus.SUCCEEDED, _speakable(expression, displayed),
             risk_level=RiskLevel.LOW_RISK,
             data={"outcome": "SUCCESS", "expression": expression, "result": displayed, "window_title": title},
             started_at=started,

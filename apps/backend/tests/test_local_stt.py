@@ -511,3 +511,56 @@ async def test_batched_tool_calls_run_in_order_not_in_parallel():
     second = SimpleNamespace(id="2", name="desktop_scroll", args={"direction": "down"})
     await asyncio.gather(s._run_tool(first), s._run_tool(second))
     assert order == ["desktop_open_start:start", "desktop_open_start:end", "desktop_scroll:start", "desktop_scroll:end"]
+
+
+async def test_blocking_ui_automation_skills_do_not_freeze_the_event_loop():
+    """Regression (live): calculator_calculate blocked the loop for seconds; the voice WebSocket timed out,
+    the session dropped, and the result never reached Gemini."""
+    import threading
+    import time as _time
+
+    from actions import runtime as rt
+
+    main_thread = threading.get_ident()
+    seen = {}
+
+    class Blocking:
+        blocking_io = True
+
+        async def execute(self, request):
+            seen["thread"] = threading.get_ident()
+            _time.sleep(0.4)  # synchronous UI Automation stand-in
+            return "done"
+
+    class Inline:
+        async def execute(self, request):
+            seen["inline_thread"] = threading.get_ident()
+            return "inline"
+
+    ticks = []
+
+    async def heartbeat():
+        for _ in range(8):
+            await asyncio.sleep(0.05)
+            ticks.append(1)
+
+    import types as _types
+
+    fake_auto = _types.ModuleType("uiautomation")
+
+    class Init:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    fake_auto.UIAutomationInitializerInThread = Init
+    import sys as _sys
+    _sys.modules["uiautomation"] = fake_auto
+    try:
+        hb = asyncio.create_task(heartbeat())
+        result = await rt._execute_skill(Blocking(), None)
+        await hb
+    finally:
+        _sys.modules.pop("uiautomation", None)
+    assert result == "done" and seen["thread"] != main_thread
+    assert len(ticks) >= 6  # the loop kept running while the skill blocked
+    assert await rt._execute_skill(Inline(), None) == "inline" and seen["inline_thread"] == main_thread

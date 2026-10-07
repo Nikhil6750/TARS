@@ -263,3 +263,11 @@ def test_calculator_skill_can_never_target_an_arbitrary_app_or_control():
 def test_calculator_capabilities_are_exactly_one_action():
     skill = CalculatorSkill()
     assert skill.capabilities == ("calculate",)
+
+
+def test_summary_is_speakable():
+    from skills.calculator import _speakable
+
+    assert _speakable("2345*17", 39865.0) == "2345 times 17 equals 39865."
+    assert _speakable("99/3", 33.0) == "99 divided by 3 equals 33."
+    assert _speakable("1/4", 0.25) == "1 divided by 4 equals 0.25."
