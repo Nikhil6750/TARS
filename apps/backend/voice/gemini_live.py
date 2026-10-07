@@ -749,6 +749,7 @@ class GeminiLiveVoiceSession:
         self._report_task = None
         self._ack_muted = False
         self._ack_gate_until = 0.0
+        self._tool_lock = asyncio.Lock()  # FIFO: tool calls in one batch execute in order
         self._tool_seq = 0  # bumps on every tool call; lets the report watchdog notice the model moved on
         # Safety net for the server's end-of-speech detection (observed: turn left open for 50+ s with no
         # tool call): our own VAD ends the turn if Gemini has not started answering.
@@ -1166,6 +1167,15 @@ class GeminiLiveVoiceSession:
         from voice.activity import describe_tool_call
 
         name, args = call.name, dict(call.args or {})
+        # Gemini batches dependent calls ("open Start" + "scroll down") in one message. They must run in the
+        # order given, never in parallel: the scroll raced ahead of Start opening and hit the wrong window.
+        async with self._tool_lock:
+            return await self._run_tool_locked(call, name, args)
+
+    async def _run_tool_locked(self, call, name, args):
+        from google.genai import types
+        from voice.activity import describe_tool_call
+
         self._tool_seq += 1
         last_speech = getattr(self, "_last_speech_pc", None)
         if last_speech:  # local-VAD end of the user's speech -> Gemini's tool call (model + end-of-turn wait)

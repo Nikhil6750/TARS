@@ -34,6 +34,7 @@ from app.action_contracts import (
 )
 from skills._desktop_automation import (
     ControlHandleCache,
+    _foreground_user_hwnd,
     build_active_window_context,
     control_from_hwnd,
     do_focus,
@@ -48,6 +49,7 @@ from skills._desktop_automation import (
     resolve_window,
     serialize_control,
     walk_actionable_controls,
+    wheel_scroll,
 )
 
 try:
@@ -378,44 +380,41 @@ class DesktopControlSkill(BaseSkill):
         direction = args["direction"]
         amount = args.get("amount", "small")
         control_id = args.get("control_id")
+        wheel_hwnd = None
         if control_id:
             control = self._resolve_control(control_id)
         else:
-            # No specific control resolved -- scroll whatever is currently
-            # in front (mission: P0 "do not answer 'I don't have
-            # permission' for normal scrolling"), the same
-            # resolve_window(None)/control_from_hwnd pair every other
-            # no-explicit-target action in this module already uses.
+            # No specific control: scroll what the user is actually looking at -- the real foreground
+            # window (e.g. the Start menu, which resolve_window(None) does NOT return), unless that is
+            # TARS's own orb, in which case fall back to the primary visible user window.
             try:
-                hwnd, _exe, _title = resolve_window(None)
+                hwnd = _foreground_user_hwnd()
+                if hwnd is None:
+                    hwnd, _exe, _title = resolve_window(None)
                 control = control_from_hwnd(hwnd)
             except SkillExecutionError as exc:
                 return self._result(
                     request, ActionStatus.FAILED, "Nothing to scroll: no window is currently in view.",
                     risk_level=RiskLevel.LOW_RISK, error=str(exc), started_at=started,
                 )
-            # Reproduced live: a real window's own top-level control
-            # frequently does not expose ScrollPattern directly even
-            # though it plainly has scrollable content (confirmed against
-            # both a real Chrome window and the Start/Search surface) --
-            # search its descendants (bounded) for the element that
-            # actually does, same as how a human would just scroll
-            # whatever is under the mouse rather than the outer frame.
-            scrollable = find_scrollable_descendant(control)
+            scrollable = find_scrollable_descendant(control, direction=direction)
             if scrollable is not None:
                 control = scrollable
+            else:
+                wheel_hwnd = hwnd  # nothing UI Automation can scroll: use the real mouse wheel
+        method = "uia"
         try:
-            do_scroll(control, direction=direction, amount=amount)
+            if wheel_hwnd is not None:
+                wheel_scroll(wheel_hwnd, direction=direction, amount=amount)
+                method = "mouse_wheel"
+            else:
+                do_scroll(control, direction=direction, amount=amount)
         except SkillExecutionError as exc:
             return self._result(
                 request, ActionStatus.FAILED, f"Could not scroll {direction}: {exc}",
                 risk_level=RiskLevel.LOW_RISK, error=str(exc), started_at=started,
             )
         except Exception as exc:
-            # A resolved element can go stale between being found and being
-            # scrolled (same class of issue as a stale foreground hwnd
-            # elsewhere in this codebase) -- a raw COM error must not crash
-            # the whole action, only report it as a truthful failure.
             return self._result(
                 request, ActionStatus.FAILED, f"Could not scroll {direction}: the target became unavailable.",
                 risk_level=RiskLevel.LOW_RISK, error=f"{type(exc).__name__}: {exc}", started_at=started,
@@ -425,7 +424,7 @@ class DesktopControlSkill(BaseSkill):
             ActionStatus.SUCCEEDED,
             f"Scrolled {direction} ({amount}).",
             risk_level=RiskLevel.LOW_RISK,
-            data={"direction": direction, "amount": amount},
+            data={"direction": direction, "amount": amount, "method": method},
             started_at=started,
         )
 

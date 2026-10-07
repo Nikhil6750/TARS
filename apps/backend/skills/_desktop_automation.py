@@ -511,7 +511,53 @@ _SCROLL_AXES = {
 }
 
 
-def find_scrollable_descendant(control: auto.Control, *, max_depth: int = 15) -> auto.Control | None:
+def _foreground_user_hwnd() -> int | None:
+    """The real foreground window, or None if it is nothing or TARS's own companion/orb window."""
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd or not win32gui.IsWindowVisible(hwnd):
+        return None
+    try:
+        title = win32gui.GetWindowText(hwnd)
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        if _TARS_WINDOW_TITLE_RE.match(title) and _TARS_EXE_RE.match(_process_executable_name(pid)):
+            return None
+    except Exception:
+        return None
+    return hwnd
+
+
+def _can_scroll(node: auto.Control, direction: str) -> bool:
+    try:
+        pattern = node.GetPattern(auto.PatternId.ScrollPattern)
+        if pattern is None:
+            return False
+        return bool(pattern.HorizontallyScrollable if direction in ("left", "right") else pattern.VerticallyScrollable)
+    except Exception:
+        return False
+
+
+def wheel_scroll(hwnd: int, *, direction: str, amount: str) -> None:
+    """Real mouse-wheel input over the window's centre. Some surfaces (the Windows 11 Start/Search menu is a
+    web UI) expose ScrollPattern elements that report 'not scrollable', so UI Automation cannot scroll them,
+    yet the wheel does (verified by before/after pixels). The cursor is restored afterwards."""
+    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    notches = 8 if amount == "large" else 4
+    delta = 120 * notches
+    old = win32api.GetCursorPos()
+    try:
+        win32api.SetCursorPos(((left + right) // 2, (top + bottom) // 2))
+        time.sleep(0.05)
+        if direction in ("up", "down"):
+            win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, delta if direction == "up" else -delta, 0)
+        else:
+            win32api.mouse_event(0x01000, 0, 0, delta if direction == "right" else -delta, 0)  # MOUSEEVENTF_HWHEEL
+        time.sleep(0.15)
+    finally:
+        win32api.SetCursorPos(old)
+
+
+def find_scrollable_descendant(control: auto.Control, *, max_depth: int = 15,
+                               direction: str | None = None) -> auto.Control | None:
     """Bounded breadth-first search for the first descendant exposing
     ScrollPattern. Reproduced live (mission: P0 Trusted Desktop Control --
     "do not answer 'I don't have permission' for normal scrolling"): a
@@ -525,7 +571,8 @@ def find_scrollable_descendant(control: auto.Control, *, max_depth: int = 15) ->
     while queue and seen < 2000:
         node, depth = queue.pop(0)
         seen += 1
-        if node.GetPattern(auto.PatternId.ScrollPattern) is not None:
+        if node.GetPattern(auto.PatternId.ScrollPattern) is not None and (
+                direction is None or _can_scroll(node, direction)):
             return node
         if depth >= max_depth:
             continue

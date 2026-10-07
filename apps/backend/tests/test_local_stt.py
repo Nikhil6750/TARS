@@ -488,3 +488,26 @@ async def test_scroll_with_empty_control_id_is_valid_and_wrapper_omits_it():
 
     await Tools(SimpleNamespace(), lambda: ("", 0.0)).desktop_scroll(control_id="", direction="down")
     assert sent == {"direction": "down", "amount": "small"}
+
+
+async def test_batched_tool_calls_run_in_order_not_in_parallel():
+    """Regression (live): 'Open Start' and 'scroll down' arrived in one batch and ran concurrently, so the
+    scroll hit the window that was in front before Start had opened."""
+    from voice.gemini_live import GeminiLiveVoiceSession
+
+    order = []
+
+    class Tools:
+        desktop = None
+
+        async def call(self, name, args):
+            order.append(f"{name}:start")
+            await asyncio.sleep(0.15 if name == "desktop_open_start" else 0.0)
+            order.append(f"{name}:end")
+            return {"status": "DONE"}
+
+    s = GeminiLiveVoiceSession(Tools(), lambda e: asyncio.sleep(0), lambda b: False)
+    first = SimpleNamespace(id="1", name="desktop_open_start", args={})
+    second = SimpleNamespace(id="2", name="desktop_scroll", args={"direction": "down"})
+    await asyncio.gather(s._run_tool(first), s._run_tool(second))
+    assert order == ["desktop_open_start:start", "desktop_open_start:end", "desktop_scroll:start", "desktop_scroll:end"]

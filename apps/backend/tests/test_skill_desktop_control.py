@@ -190,7 +190,8 @@ async def test_execute_scroll_control_falls_back_to_the_current_window_when_no_c
 
     fake_window_control = MagicMock()
     skill = DesktopControlSkill()
-    with patch("skills.desktop_control.resolve_window", return_value=(555, "notepad.exe", "Untitled - Notepad")) as resolve, \
+    with patch("skills.desktop_control._foreground_user_hwnd", return_value=None), \
+         patch("skills.desktop_control.resolve_window", return_value=(555, "notepad.exe", "Untitled - Notepad")) as resolve, \
          patch("skills.desktop_control.control_from_hwnd", return_value=fake_window_control) as from_hwnd, \
          patch("skills.desktop_control.do_scroll") as scroll:
         result = await skill.execute(_request("scroll_control", {"direction": "down"}))
@@ -206,7 +207,8 @@ async def test_execute_scroll_control_fails_truthfully_when_nothing_is_in_view()
     from unittest.mock import patch
 
     skill = DesktopControlSkill()
-    with patch("skills.desktop_control.resolve_window", side_effect=SkillExecutionError("no foreground window is available")):
+    with patch("skills.desktop_control._foreground_user_hwnd", return_value=None), \
+         patch("skills.desktop_control.resolve_window", side_effect=SkillExecutionError("no foreground window is available")):
         result = await skill.execute(_request("scroll_control", {"direction": "up"}))
 
     assert result.status == ActionStatus.FAILED
@@ -442,3 +444,24 @@ def test_find_scrollable_descendant_gives_up_bounded_when_nothing_matches():
     root.GetChildren.return_value = [leaf]
 
     assert find_scrollable_descendant(root) is None
+
+
+async def test_scroll_targets_the_real_foreground_window_and_uses_the_wheel_when_uia_cannot_scroll():
+    """Regression (live): 'Open Start and scroll down' scrolled nothing. resolve_window(None) returned the IDE,
+    not the Start menu, and the Start surface's ScrollPatterns all report 'not scrollable', so UIA cannot do it."""
+    from unittest.mock import MagicMock, patch
+
+    skill = DesktopControlSkill()
+    with patch("skills.desktop_control._foreground_user_hwnd", return_value=777), \
+         patch("skills.desktop_control.resolve_window") as resolve, \
+         patch("skills.desktop_control.control_from_hwnd", return_value=MagicMock()) as from_hwnd, \
+         patch("skills.desktop_control.find_scrollable_descendant", return_value=None), \
+         patch("skills.desktop_control.wheel_scroll") as wheel, \
+         patch("skills.desktop_control.do_scroll") as uia:
+        result = await skill.execute(_request("scroll_control", {"direction": "down"}))
+
+    resolve.assert_not_called()
+    from_hwnd.assert_called_once_with(777)
+    wheel.assert_called_once_with(777, direction="down", amount="small")
+    uia.assert_not_called()
+    assert result.status == ActionStatus.SUCCEEDED and result.data["method"] == "mouse_wheel"
