@@ -20,14 +20,28 @@ class MarketStore:
     def _dir(self, provider: str, instrument: str, timeframe: str) -> Path:
         return self.root / "market" / provider / instrument.upper() / timeframe
 
-    def write_bars(self, bars: pd.DataFrame) -> list[Path]:
-        """One parquet file per (provider, instrument, timeframe, year); rewriting a year replaces it."""
+    def write_bars(self, bars: pd.DataFrame, merge: bool = False, replace_range: tuple | None = None) -> list[Path]:
+        """One parquet file per (provider, instrument, timeframe, year). merge=False replaces the year file;
+        merge=True keeps existing rows OUTSIDE the incoming time range and splices the new rows in (so a bounded
+        re-ingest never destroys other months of the same year). replace_range=(start, end) widens the replaced window to the
+        whole REQUESTED range [start, end) so rows a newer normalisation no longer emits cannot linger from older ingests."""
         first = bars.iloc[0]
         d = self._dir(first["provider"], first["instrument"], first["source_timeframe"])
         d.mkdir(parents=True, exist_ok=True)
         written: list[Path] = []
         for year, part in bars.groupby(bars["timestamp_utc"].dt.year):
             path = d / f"{year}.parquet"
+            if merge and path.exists():
+                old = pq.read_table(path).to_pandas()
+                old["timestamp_utc"] = pd.to_datetime(old["timestamp_utc"], utc=True)
+                lo, hi = part["timestamp_utc"].min(), part["timestamp_utc"].max()
+                if replace_range is not None:
+                    lo = min(lo, pd.Timestamp(replace_range[0]).tz_convert("UTC"))
+                    hi_excl = pd.Timestamp(replace_range[1]).tz_convert("UTC")
+                    keep = old[(old["timestamp_utc"] < lo) | (old["timestamp_utc"] >= max(hi_excl, hi + pd.Timedelta(1, "ns")))]
+                else:
+                    keep = old[(old["timestamp_utc"] < lo) | (old["timestamp_utc"] > hi)]
+                part = pd.concat([keep, part], ignore_index=True).sort_values("timestamp_utc", kind="stable").reset_index(drop=True)
             table = pa.Table.from_pandas(part[list(CANONICAL_COLUMNS)], schema=ARROW_SCHEMA, preserve_index=False)
             pq.write_table(table, path, compression="zstd")
             written.append(path)

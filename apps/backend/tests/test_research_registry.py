@@ -96,21 +96,26 @@ def test_untouched_test_can_be_consumed_only_once(reg):
 
 
 # ---- research memory ---------------------------------------------------------------------------------
+def _real(**over):
+    return _spec(diagnostic=False, **over)
+
+
 def _dead(reg, spec=None):
-    hid = reg.register(spec or _spec())
+    hid = reg.register(spec or _real())
     reg.transition(hid, "REJECTED", "test")
     return hid
 
 
 def test_memory_blocks_repeating_rejected_research(reg):
     old = _dead(reg)
-    verdict = ResearchMemory(reg).check(_spec())
+    verdict = ResearchMemory(reg).check(_real())
     assert not verdict.allowed and old in verdict.reason
 
 
 def test_memory_allows_materially_different_rejected_follow_up(reg):
     old = _dead(reg)
     d = copy.deepcopy(demo_spec_dict())
+    d["diagnostic"] = False
     d["mechanism"] = {"who_provides_opportunity": "liquidity providers widening quotes around scheduled central bank announcements",
                       "why_it_may_persist": "inventory risk transfer is compensated and recurring each policy cycle",
                       "edge_should_exist_when": "policy surprise creates one-sided flow", "edge_should_disappear_when": "event risk is fully priced"}
@@ -120,9 +125,10 @@ def test_memory_allows_materially_different_rejected_follow_up(reg):
 
 
 def test_memory_blocks_live_duplicate_and_ignores_unrelated(reg):
-    reg.register(_spec())
-    assert not ResearchMemory(reg).check(_spec()).allowed
+    reg.register(_real())
+    assert not ResearchMemory(reg).check(_real()).allowed
     other = copy.deepcopy(demo_spec_dict())
+    other["diagnostic"] = False
     other["instruments"] = ["USDJPY"]
     assert ResearchMemory(reg).check(parse_spec(other)).allowed
 
@@ -131,5 +137,10 @@ def test_agent_submit_refuses_rejected_repeat(reg, tmp_path):
     _dead(reg)
     agent = QuantResearchAgent(reg, MarketStore(tmp_path), tmp_path / "reports")
     with pytest.raises(ResearchRejected):
-        agent.submit(_spec())
+        agent.submit(_real())
     assert len(reg.list()) == 1  # nothing new registered
+
+
+def test_diagnostics_never_block_real_hypotheses(reg):
+    _dead(reg, _spec())  # a rejected DIAGNOSTIC carries no research claim
+    assert ResearchMemory(reg).check(_real()).allowed

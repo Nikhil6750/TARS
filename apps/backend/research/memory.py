@@ -53,8 +53,8 @@ class ResearchMemory:
         fp = spec.fingerprint()
         matches: list[MemoryMatch] = []
         for row in self.registry.list():
-            if row["id"] == exclude:
-                continue
+            if row["id"] == exclude or row["diagnostic"]:
+                continue  # pipeline diagnostics are not research claims and never block real hypotheses
             full = self.registry.get(row["id"])
             theirs = _tokens(full["hypothesis"] + " " + _mech_text(full["mechanism"]))
             their_mech = _tokens(_mech_text(full["mechanism"]))

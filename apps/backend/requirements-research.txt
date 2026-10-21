@@ -3,3 +3,4 @@ duckdb>=1.1
 pyarrow>=17
 pandas>=2.2
 numpy>=2.0
+tzdata>=2024.1

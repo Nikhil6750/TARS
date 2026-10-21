@@ -30,6 +30,10 @@ CLASSIFICATION = {"PRELIMINARY": "PRELIMINARY_EVIDENCE", "VALIDATING": "PRELIMIN
                   "PROPOSED": "HYPOTHESIS", "RUNNING": "HYPOTHESIS"}
 
 
+class FinalDataAccessDenied(PermissionError):
+    """Raised when code tries to load the FINAL_UNTOUCHED period without explicit promotion to final testing."""
+
+
 class ResearchRejected(RuntimeError):
     """The proposal was refused before registration (research memory)."""
 
@@ -50,22 +54,27 @@ class QuantResearchAgent:
         return self.registry.register(spec)
 
     # ---- data -----------------------------------------------------------------------------------
-    def _load(self, spec: ResearchSpec, inst: str, upto: pd.Timestamp) -> tuple[pd.DataFrame, pd.Timestamp]:
+    def _load(self, spec: ResearchSpec, inst: str, upto: pd.Timestamp, *, final_ok: bool = False) -> tuple[pd.DataFrame, pd.Timestamp]:
+        if upto > pd.Timestamp(spec.validation.end).tz_convert("UTC") and not final_ok:
+            raise FinalDataAccessDenied("loading data beyond the validation period is reserved for explicit final testing")
         tf_min = TIMEFRAME_MINUTES[spec.data.timeframe]
         warm_start = pd.Timestamp(spec.development.start).tz_convert("UTC") - pd.Timedelta(minutes=tf_min * (WARMUP_BARS + spec.embargo_bars))
         bars = self.store.read_bars(spec.data.provider, inst, spec.data.source_timeframe, warm_start, upto)
         return bars, warm_start
 
-    def _prepare(self, spec: ResearchSpec, upto: pd.Timestamp) -> tuple[dict[str, pd.DataFrame], dict[str, DataQualityReport], str]:
+    def _prepare(self, spec: ResearchSpec, upto: pd.Timestamp, *, final_ok: bool = False, on_final_load=None
+                 ) -> tuple[dict[str, pd.DataFrame], dict[str, DataQualityReport], str]:
         derived, reports, versions = {}, {}, []
         for inst in spec.instruments:
-            bars, _ = self._load(spec, inst, upto)
+            if final_ok and on_final_load is not None:
+                on_final_load()  # record the FIRST access before any final row is read
+            bars, _ = self._load(spec, inst, upto, final_ok=final_ok)
             rep = validate_bars(bars, timeframe=spec.data.source_timeframe)
             reports[inst] = rep
             if rep.blocks_experiment:
                 continue
             versions.append(self.store.data_version(bars))
-            derived[inst] = derive_timeframe(bars, spec.data.timeframe).reset_index(drop=True)
+            derived[inst] = derive_timeframe(bars, spec.data.timeframe, drop_partial_tail=True).reset_index(drop=True)
         return derived, reports, "+".join(versions)
 
     # ---- main run (development + validation only) ---------------------------------------------------
@@ -104,6 +113,10 @@ class QuantResearchAgent:
         lookahead = sorted({f for b in derived.values() for f in verify_causality(b.iloc[:4000].reset_index(drop=True), spec.features)})
         n_family = self.registry.trials_in_family(spec.instruments, exclude=hid)
         pre = pre_run_warnings(spec, n_family_trials=n_family, lookahead_features=lookahead)
+        conflicts = self.registry.final_access_conflicts(spec, exclude=hid)
+        if conflicts:
+            pre.append(ResearchWarning("FINAL_PERIOD_NOT_UNTOUCHED", "the final period was already loaded by "
+                       + ", ".join(c["experiment_id"] for c in conflicts) + "; it can no longer serve as untouched data for this spec"))
         if any(w.blocking for w in pre):
             return self._fail(hid, spec, "BLOCKING_WARNING: " + "; ".join(w.code for w in pre if w.blocking), {},
                               {"warnings": pre})
@@ -199,7 +212,10 @@ class QuantResearchAgent:
         if rec["status"] != "PRELIMINARY":
             raise RegistryError(f"{hid} is {rec['status']}; only PRELIMINARY experiments may face the untouched test")
         t0, t1 = (pd.Timestamp(spec.untouched_test.start).tz_convert("UTC"), pd.Timestamp(spec.untouched_test.end).tz_convert("UTC"))
-        derived, reports, dver = self._prepare(spec, t1)
+        conflicts = self.registry.final_access_conflicts(spec, exclude=hid)
+        if conflicts:  # refuse BEFORE touching the data: it is no longer untouched
+            raise RegistryError(f"final period no longer untouched: already accessed by {[c['experiment_id'] for c in conflicts]}")
+        derived, reports, dver = self._prepare(spec, t1, final_ok=True, on_final_load=lambda: self.registry.mark_final_access(hid))
         blocked = {i: sorted(r.codes("BLOCK")) for i, r in reports.items() if r.blocks_experiment}
         if blocked:  # refuse BEFORE burning the one-shot test
             raise RegistryError(f"test-period data quality blocks the test (not consumed): {blocked}")
@@ -261,12 +277,21 @@ class QuantResearchAgent:
             "parameter_neighbours": res.get("neighbours"), "criteria": res.get("criteria"),
             "multiple_testing": res.get("multiple_testing"), "regimes": r["regime_results"],
             "warnings": r["warnings"], "failure_reason": r["failure_reason"],
+            "final_data": {"first_accessed_at": r.get("final_first_accessed_at"), "untouched": not r.get("final_first_accessed_at")},
+            "diagnostic_kind": spec.diagnostic_kind, "cost_notes": _cost_notes(spec),
             "allowed_conclusions": "Only a status of VALIDATED permits VALIDATED_FINDING; a profitable backtest alone never does.",
         }
         text = json.dumps(pkt, default=str)
         if len(text) > max_chars:  # drop the bulkiest optional sections first
             pkt["regimes"] = "TRUNCATED_FOR_SIZE (see report file)"
         return clean(pkt)
+
+
+def _cost_notes(spec: ResearchSpec) -> dict:
+    c = spec.costs
+    return {"spread": "real observed bid/ask (x%g)" % c.spread_mult, "commission_round_turn": c.commission_round_turn,
+            "slippage_per_side": c.slippage_per_side, "latency_bars": c.latency_bars,
+            "financing": "DISABLED placeholder (intraday research)" if c.financing_per_bar == 0 else c.financing_per_bar}
 
 
 def _slim(m: dict | None) -> dict | None:

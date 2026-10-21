@@ -88,6 +88,9 @@ class ExperimentRegistry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            cols = {r[1] for r in c.execute("PRAGMA table_info(experiments)")}
+            if "final_first_accessed_at" not in cols:  # forward migration for registries created before Phase 3B
+                c.execute("ALTER TABLE experiments ADD COLUMN final_first_accessed_at TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30)
@@ -188,3 +191,37 @@ class ExperimentRegistry:
             if want & set(row["instruments"].split(",")):
                 n += 1
         return n
+
+    # ---- FINAL_UNTOUCHED access tracking -------------------------------------------------------------
+    def mark_final_access(self, hid: str) -> bool:
+        """Record the FIRST time this experiment's final period was loaded. Returns True if this call was the first."""
+        now = _now()
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            cur = c.execute("SELECT final_first_accessed_at FROM experiments WHERE id=?", (hid,)).fetchone()[0]
+            if cur:
+                return False
+            c.execute("UPDATE experiments SET final_first_accessed_at=?, updated_at=? WHERE id=?", (now, now, hid))
+            c.execute("INSERT INTO experiment_events (experiment_id,at,event,detail) VALUES (?,?,?,?)", (hid, now, "FINAL_ACCESSED", ""))
+        return True
+
+    def final_access_conflicts(self, spec: "ResearchSpec", exclude: str | None = None) -> list[dict]:
+        """Other experiments that already loaded a final period overlapping this spec's on a shared instrument:
+        that data can no longer be called untouched for this spec."""
+        out = []
+        t = spec.untouched_test
+        with self._conn() as c:
+            rows = c.execute("SELECT id, final_first_accessed_at, spec_json FROM experiments WHERE final_first_accessed_at IS NOT NULL").fetchall()
+        for r in rows:
+            if r["id"] == exclude:
+                continue
+            other = ResearchSpec.model_validate_json(r["spec_json"])
+            if set(other.instruments) & set(spec.instruments) and other.untouched_test.start < t.end and t.start < other.untouched_test.end:
+                out.append({"experiment_id": r["id"], "first_accessed_at": r["final_first_accessed_at"]})
+        return out
+
+    def annotate(self, hid: str, note: str) -> None:
+        """Append-only note on an experiment's history (never edits the frozen definition or results)."""
+        self.get(hid)
+        with self._conn() as c:
+            c.execute("INSERT INTO experiment_events (experiment_id,at,event,detail) VALUES (?,?,?,?)", (hid, _now(), "NOTE", note[:2000]))

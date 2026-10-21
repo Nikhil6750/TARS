@@ -42,7 +42,7 @@ def test_quiet_market_does_not_escalate():
     b = _bars()
     st = compute_market_state(b, now=_now(b))
     assert st.data_freshness == "FRESH" and not st.requires_reasoning and st.significance < 0.6
-    assert st.session in {"ASIA", "LONDON", "NEWYORK", "OFF"} and st.instrument == "EURUSD"
+    assert st.session in {"ASIA", "LONDON", "LONDON_NY_OVERLAP", "NEWYORK", "OFF"} and st.instrument == "EURUSD"
     assert set(st.returns) == {"1bar", "5bar", "15bar", "60bar"} and st.rolling_volatility and st.volatility_percentile is not None
 
 
@@ -155,7 +155,7 @@ def test_director_rejects_oversized_or_malformed(lab):
 
 def test_director_propose_goes_through_validation_and_memory(lab):
     reg, agent = lab
-    good = {"classification": "HYPOTHESIS", "summary": "diagnostic idea", "spec": demo_spec_dict()}
+    good = {"classification": "HYPOTHESIS", "summary": "an idea", "spec": {**demo_spec_dict(), "diagnostic": False}}
     res = run(ResearchDirector(_llm(good), reg, agent).propose_hypothesis("anything"))
     assert res.experiment_id == "H0001" and res.spec is not None
     # same idea again -> blocked by research memory, nothing new registered

@@ -25,7 +25,10 @@ SYSTEM_PROMPT = (
     "mechanism and produce structured ResearchSpecs; a deterministic Quant Agent runs every calculation. You never "
     "compute statistics yourself, never ask for parameter tuning until a result looks good, and never claim an edge "
     "from a backtest alone. Every conclusion must be classified as exactly one of: HYPOTHESIS, PRELIMINARY_EVIDENCE, "
-    "VALIDATED_FINDING, UNSUPPORTED_CLAIM, FAILED_EXPERIMENT. Reply with a single JSON object only."
+    "VALIDATED_FINDING, UNSUPPORTED_CLAIM, FAILED_EXPERIMENT. Reply with a single JSON object only, exactly this shape: "
+    '{"classification": "<one of the five classes>", "summary": "<1-3 sentences>", "reasoning": "<brief>", '
+    '"decision": "REJECT|REFINE|VALIDATE_NEXT|NONE", "spec": <ResearchSpec object or null>, "next_steps": ["<short>"]}. '
+    "No prose outside the JSON, no markdown fences, and use only the evidence given."
 )
 
 
@@ -95,11 +98,18 @@ class ResearchDirector:
         body = packet if isinstance(packet, str) else json.dumps(packet, default=str)
         if len(body) > MAX_PACKET_CHARS:
             raise DirectorError(f"evidence packet is {len(body)} chars (> {MAX_PACKET_CHARS}); send summaries, not raw data")
-        raw = await self.llm(SYSTEM_PROMPT, f"TASK: {task}\n{instruction}\n\nEVIDENCE:\n{body}")
-        try:
-            return DirectorOutput.model_validate(_extract_json(raw))
-        except ValidationError as exc:
-            raise DirectorError(f"Claude reply failed schema validation: {exc.errors()[0]['msg']}") from exc
+        prompt = f"TASK: {task}\n{instruction}\n\nEVIDENCE:\n{body}"
+        last: Exception | None = None
+        for attempt in range(2):  # one corrective retry for malformed output; never more
+            extra = "" if attempt == 0 else f"\n\nYour previous reply was rejected ({last}). Reply with ONLY one JSON object matching the schema."
+            raw = await self.llm(SYSTEM_PROMPT, prompt + extra)
+            try:
+                return DirectorOutput.model_validate(_extract_json(raw))
+            except ValidationError as exc:
+                last = DirectorError(f"schema validation: {exc.errors()[0]['msg']}")
+            except DirectorError as exc:
+                last = exc
+        raise DirectorError(f"Claude reply unusable after retry: {last}")
 
     def _result(self, task: str, out: DirectorOutput, statuses: list[str], **kw) -> DirectorResult:
         cls, why = enforce_epistemics(out.classification, statuses)

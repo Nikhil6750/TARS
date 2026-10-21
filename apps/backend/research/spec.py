@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from .costs import CostModel
 from .schema import TIMEFRAME_MINUTES
@@ -143,12 +143,14 @@ class ResearchSpec(_Strict):
     costs: CostModel = Field(default_factory=CostModel)
     development: Period
     validation: Period
-    untouched_test: Period
+    untouched_test: Period = Field(validation_alias=AliasChoices("untouched_test", "final_untouched"),
+                                   description="FINAL_UNTOUCHED period: never loaded until explicitly promoted to final testing")
     embargo_bars: int = Field(0, ge=0, description="bars skipped between periods to stop feature-window leakage")
     regime_tests: list[str] = Field(default_factory=lambda: ["session", "volatility", "trend_range", "year", "direction"])
     sensitivity: Sensitivity = Field(default_factory=Sensitivity)
     rejection: RejectionCriteria = Field(default_factory=RejectionCriteria)
     diagnostic: bool = Field(False, description="pipeline smoke test; never evidence of an edge")
+    diagnostic_kind: Literal["SYNTHETIC_DIAGNOSTIC", "REAL_DATA_DIAGNOSTIC"] | None = None
     differs_from: list[str] = Field(default_factory=list, description="experiment IDs this materially differs from, with reason in hypothesis")
     differs_because: str = ""
 
@@ -184,13 +186,18 @@ class ResearchSpec(_Strict):
             for fname in var:
                 if fname not in kinds or kinds[fname] not in KINDS_NEED_N:
                     raise ValueError(f"parameter variant references unknown/non-parametric feature '{fname}'")
+        if self.diagnostic_kind and not self.diagnostic:
+            raise ValueError("diagnostic_kind requires diagnostic=true")
         if self.differs_from and len(self.differs_because.strip()) < 20:
             raise ValueError("differs_from requires a substantive differs_because")
         return self
 
     # ---- identity -------------------------------------------------------------------------------
     def canonical_json(self) -> str:
-        return json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        d = self.model_dump(mode="json")
+        if d.get("diagnostic_kind") is None:
+            d.pop("diagnostic_kind", None)  # keeps hashes of specs frozen before this field existed
+        return json.dumps(d, sort_keys=True, separators=(",", ":"))
 
     def spec_hash(self) -> str:
         return hashlib.sha256(self.canonical_json().encode()).hexdigest()

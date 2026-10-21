@@ -11,14 +11,8 @@ import pandas as pd
 
 from .costs import CostModel
 from .features import compute_features, evaluate_conditions, mid_ohlc
+from .sessions import classify_sessions
 from .spec import ResearchSpec
-
-SESSIONS = (("ASIA", 0, 7), ("LONDON", 7, 13), ("NEWYORK", 13, 21), ("OFF", 21, 24))
-
-
-def session_of(hour: int) -> str:
-    return next(name for name, lo, hi in SESSIONS if lo <= hour < hi)
-
 
 def regime_context(bars: pd.DataFrame, atr: pd.Series) -> pd.DataFrame:
     """Causal regime tags per bar (no future data): ATR percentile vs trailing window, efficiency ratio."""
@@ -47,6 +41,7 @@ def simulate(bars: pd.DataFrame, spec: ResearchSpec, costs: CostModel, *, start:
     short_sig = evaluate_conditions(feats, spec.signal.short_when).to_numpy()
     atr = feats[spec.exit.atr_feature].to_numpy()
     reg = regime_context(bars, feats[spec.exit.atr_feature])
+    sessions = classify_sessions(ts).to_numpy()
     a = {k: bars[k].to_numpy(dtype=float) for k in ("bid_open", "bid_high", "bid_low", "bid_close",
                                                      "ask_open", "ask_high", "ask_low", "ask_close")}
     ex = spec.exit
@@ -96,7 +91,7 @@ def simulate(bars: pd.DataFrame, spec: ResearchSpec, costs: CostModel, *, start:
             "entry_price": entry_fill, "exit_price": exit_fill, "risk": risk, "bars_held": held, "exit_reason": reason,
             "gross_pnl": gross, "net_pnl": net, "gross_r": gross / risk, "net_r": net / risk,
             "cost_r": (gross - net) / risk, "spread_at_entry": a["ask_open"][j] - a["bid_open"][j],
-            "session": session_of(t_sig.hour), "volatility": reg["volatility"].iloc[i],
+            "session": sessions[i], "volatility": reg["volatility"].iloc[i],
             "trend_range": reg["trend_range"].iloc[i], "year": int(ts.iloc[exit_bar].year),
         })
         i = exit_bar + 1

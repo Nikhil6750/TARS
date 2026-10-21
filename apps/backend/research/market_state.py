@@ -11,7 +11,7 @@ import pandas as pd
 
 from trading.market_watch_service import EventCandidate, requires_reasoning
 
-from .backtest import session_of
+from .sessions import session_of
 from .schema import TIMEFRAME_MINUTES, pip_size
 
 EVENT_WINDOW_MIN = 30
@@ -62,7 +62,7 @@ def compute_market_state(bars: pd.DataFrame, *, now: datetime | None = None, eve
     tf_min = TIMEFRAME_MINUTES.get(str(bars["source_timeframe"].iloc[-1]) if len(bars) else "M1", 1)
     notes: list[str] = []
     if len(bars) == 0:
-        return MarketState(inst, now.isoformat(), {}, None, None, None, "UNKNOWN", None, session_of(now.hour), {}, {}, [], {},
+        return MarketState(inst, now.isoformat(), {}, None, None, None, "UNKNOWN", None, session_of(now), {}, {}, [], {},
                            "UNAVAILABLE", "UNAVAILABLE", 0.0, 0.0, False, "no data", ["no bars"])
     last_ts = bars["timestamp_utc"].iloc[-1]
     fresh = _freshness(last_ts, now, tf_min)
@@ -152,7 +152,7 @@ def compute_market_state(bars: pd.DataFrame, *, now: datetime | None = None, eve
         need, reason = True, "watcher gate passed, data fresh, significance above noise floor"
     else:
         need, reason = False, "below escalation threshold" if not gate else "gate passed but significance low"
-    return MarketState(inst, now.isoformat(), returns, vol, pct, z, sstate, cur / pip_size(inst), session_of(now.hour), regime,
+    return MarketState(inst, now.isoformat(), returns, vol, pct, z, sstate, cur / pip_size(inst), session_of(now), regime,
                        near, recent, cross, fresh, chart, sig, float(conf), need, reason, notes)
 
 
