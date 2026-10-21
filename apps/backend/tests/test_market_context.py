@@ -123,7 +123,16 @@ def test_as_evidence_text_honest_about_absence():
                         mt5={"state": "DISCONNECTED_AUTH_REQUIRED", "detail": "not authenticated"},
                         calendar=[], news=[])
     text = ctx.as_evidence_text()
-    assert "not currently monitored" in text
+    assert "no fresh chart read available" in text
     assert "DISCONNECTED_AUTH_REQUIRED" in text
     assert "No important calendar events" in text
     assert "No recent significant news" in text
+
+
+def test_stale_chart_frame_is_never_current_evidence():
+    ctx = MarketContext(symbol="XAUUSD", timeframe="15m",
+                        tradingview={"monitoring": True, "evidence": "STALE", "symbol": "XAUUSD", "timeframe": "15m"},
+                        mt5={"state": "DISCONNECTED"}, calendar=[], news=[])
+    text = ctx.as_evidence_text()
+    assert "actively watching" not in text
+    assert "STALE" in text

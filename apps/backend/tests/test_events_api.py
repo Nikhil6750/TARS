@@ -232,3 +232,13 @@ def test_rejects_ai_confidence_field(client):
     # event must never contain it regardless.
     assert resp.status_code == 201
     assert "ai_confidence" not in resp.json()
+
+
+def test_health_distinguishes_voice_lanes(client):
+    body = client.get("/api/v1/health").json()
+    # stt/tts are the OFFLINE fallback lane; the lane fields say what is actually in use.
+    assert body["offline_stt_provider"] == body["stt_provider"]
+    assert body["offline_tts_provider"] == body["tts_provider"]
+    assert body["voice_mode"] in {"auto", "online", "offline"}
+    assert body["active_voice_lane"].split(" ")[0] in {"gemini_live", "local_streaming", "idle"}
+    assert body["gemini_live_health"].split(":")[0] in {"HEALTHY", "UNHEALTHY", "NOT_CONFIGURED"}

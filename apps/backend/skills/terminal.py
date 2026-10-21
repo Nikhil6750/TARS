@@ -25,6 +25,7 @@ from app.action_contracts import (
     SkillExecutionError,
     SkillValidationError,
 )
+from trading.execution_guard import DISABLED_MESSAGE, is_broker_order, live_trading_enabled
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 120.0
@@ -166,6 +167,9 @@ class TerminalSkill(BaseSkill):
                 f"timeout_seconds {timeout} exceeds hard max of {MAX_TIMEOUT_SECONDS}"
             )
 
+        if is_broker_order(command) and not live_trading_enabled():
+            raise SkillValidationError(DISABLED_MESSAGE)
+
         # Defense in depth: validate() also refuses BLOCKED commands rather
         # than relying solely on the runtime enforcing classify_risk()'s
         # output.
@@ -177,6 +181,9 @@ class TerminalSkill(BaseSkill):
             raise SkillExecutionError(f"unsupported terminal action '{request.action}'")
 
         command = request.arguments["command"]
+        if is_broker_order(command) and not live_trading_enabled():
+            return self._result(request, ActionStatus.BLOCKED, DISABLED_MESSAGE,
+                                risk_level=RiskLevel.BLOCKED, data={"command": command}, error=DISABLED_MESSAGE)
         risk = classify_command(command)
         if risk is RiskLevel.BLOCKED:
             # execute() is safe to call directly in tests, but a BLOCKED

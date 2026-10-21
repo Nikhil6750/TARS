@@ -23,6 +23,10 @@ _DB_INDEPENDENT_SKILLS = {
     # the same pattern again -- always registered, fails closed at
     # execute() with no SkillManager wired (skills/skill_registry_skill.py).
     "skills",
+    # Native Windows controls (volume/brightness/Start) and the Calculator skill are
+    # intentionally registered, db-independent skills (commits 861a66a, af9fdfa).
+    "windows_system",
+    "calculator",
 }
 
 

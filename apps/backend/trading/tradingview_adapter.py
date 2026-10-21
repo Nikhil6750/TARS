@@ -115,6 +115,7 @@ class TradingViewAdapter:
         if latest is None:
             return {
                 "monitoring": False, "state": "NOT FOUND", "detail": "No chart window observed yet",
+                "evidence": "UNAVAILABLE",
                 "symbol": symbol, "timeframe": timeframe,
                 "identity_source": identity_source, "vision_identity_conflict": conflict,
             }
@@ -125,6 +126,7 @@ class TradingViewAdapter:
         return {
             "monitoring": monitoring, "state": "MONITORING" if monitoring else "NOT FOUND",
             "detail": f"{label}, analysed {age_s}s ago", "freshness": freshness,
+            "evidence": "CURRENT" if monitoring else "STALE",
             "symbol": symbol, "timeframe": timeframe,
             "identity_source": identity_source, "vision_identity_conflict": conflict,
         }

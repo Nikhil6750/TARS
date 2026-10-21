@@ -23,6 +23,7 @@ from uuid import UUID
 
 from actions.errors import ConfirmationReplayError
 from app.action_contracts import ActionRequest, ActionSource, ActionStatus, RiskLevel
+from trading.execution_guard import is_broker_order
 from skills.app_resolver import ALIASES, _normalize
 
 logger = logging.getLogger("tars.desktop_tools")
@@ -541,7 +542,7 @@ class DesktopTools:
                                   describe=f"type into '{label or control_id}'")
 
     async def run_terminal(self, command: str = "") -> dict:
-        if _TRADE_TERMINAL.search(command or ""):
+        if _TRADE_TERMINAL.search(command or "") or is_broker_order(command):
             return {"status": "BLOCKED", "summary": "Order placement through scripts is not allowed; trading is read-only."}
         return await self._submit("terminal", "run_command", {"command": command}, describe=f"run '{command[:60]}'")
 

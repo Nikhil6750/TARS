@@ -45,11 +45,12 @@ class MarketContext:
         lines = [f"Symbol: {self.symbol}" + (f" (currently viewed on {self.timeframe})" if self.timeframe else "")]
 
         tv = self.tradingview
-        if tv.get("monitoring"):
+        # Only CURRENT frames are evidence; STALE/UNAVAILABLE (state NOT FOUND) never are.
+        if tv.get("monitoring") and tv.get("evidence", "CURRENT") == "CURRENT":
             lines.append(f"TradingView: actively watching {tv.get('symbol') or self.symbol} "
                         f"{tv.get('timeframe') or ''}, chart freshness {tv.get('freshness', 'unknown')}.")
         else:
-            lines.append("TradingView: not currently monitored (no fresh chart read available).")
+            lines.append(f"TradingView: {tv.get('evidence', 'UNAVAILABLE')} - no fresh chart read available; do not treat any earlier chart as current evidence.")
         if self.vision_identity_conflict:
             lines.append(
                 "Note: the chart's own vision read of symbol/timeframe disagreed with TARS's "

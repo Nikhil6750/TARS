@@ -149,3 +149,12 @@ class HealthResponse(BaseModel):
     stt_provider: str
     tts_provider: str
     wake_word_provider: str
+    # Voice lane truth: stt_provider/tts_provider above are the OFFLINE fallback lane
+    # (kept for compatibility); these fields say which lane is actually in use.
+    voice_mode: str = "auto"
+    active_voice_lane: str = "idle"
+    online_voice_provider: str = ""
+    offline_stt_provider: str = ""
+    offline_tts_provider: str = ""
+    gemini_live_health: str = "unknown"
+    live_trading_enabled: bool = False

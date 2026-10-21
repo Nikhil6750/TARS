@@ -76,14 +76,16 @@ class MonitorManager:
         except Exception as exc:
             return {"state": "ERROR", "detail": type(exc).__name__}
         if latest is None:
-            return {"state": "NOT FOUND", "detail": "No chart window observed yet"}
+            return {"state": "NOT FOUND", "detail": "No chart window observed yet", "evidence": "UNAVAILABLE"}
         freshness = latest.freshness().value
         age = round(latest.age_ms() / 1000)
         ident = latest.identity
         label = f"{getattr(ident, 'symbol', None) or 'chart'} {getattr(ident, 'timeframe', None) or ''}".strip()
         if freshness in {"hot", "warm"}:
-            return {"state": "MONITORING", "detail": f"{label}, analysed {age}s ago", "freshness": freshness}
-        return {"state": "NOT FOUND", "detail": f"Last chart frame {age}s ago ({label})", "freshness": freshness}
+            return {"state": "MONITORING", "detail": f"{label}, analysed {age}s ago", "freshness": freshness,
+                    "evidence": "CURRENT"}
+        return {"state": "NOT FOUND", "detail": f"Last chart frame {age}s ago ({label})", "freshness": freshness,
+                "evidence": "STALE"}
 
     # ---- status ----------------------------------------------------------
     async def status(self) -> dict:

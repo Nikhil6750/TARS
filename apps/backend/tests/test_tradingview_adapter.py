@@ -140,7 +140,7 @@ async def test_monitor_chart_reports_not_found_when_nothing_observed():
     adapter, _, _ = _adapter(store=_FakeStore(None))
     out = await adapter.monitor_chart()
     assert out == {"monitoring": False, "state": "NOT FOUND", "detail": "No chart window observed yet",
-                   "symbol": None, "timeframe": None,
+                   "evidence": "UNAVAILABLE", "symbol": None, "timeframe": None,
                    "identity_source": "vision", "vision_identity_conflict": False}
 
 
@@ -159,6 +159,7 @@ async def test_monitor_chart_reports_not_found_when_stale():
     assert out["monitoring"] is False
     assert out["state"] == "NOT FOUND"
     assert out["freshness"] == "stale"
+    assert out["evidence"] == "STALE"
 
 
 # ---- mission section 2: verified structured identity outranks vision ----
