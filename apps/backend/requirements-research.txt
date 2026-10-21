@@ -1,0 +1,5 @@
+# Quant research laboratory (Phase 3A): columnar storage + analytics. Installed separately from the voice stack.
+duckdb>=1.1
+pyarrow>=17
+pandas>=2.2
+numpy>=2.0
