@@ -152,11 +152,14 @@ def fake_opener(missing_bid=(), base=2900.0):
         wd = day.weekday()
         if wd == 5:
             return b""
+        from zoneinfo import ZoneInfo
+        edt = day.replace(hour=12).astimezone(ZoneInfo("America/New_York")).utcoffset().total_seconds() == -4 * 3600
+        close_m, open_m = (21 if edt else 22) * 60, (22 if edt else 23) * 60     # 17:00 / 18:00 New York in UTC, DST-correct
         mins = list(range(1440))
         if wd == 4:
-            mins = list(range(22 * 60))
+            mins = list(range(close_m))
         if wd == 6:
-            mins = list(range(23 * 60, 1440))
+            mins = list(range(open_m, 1440))
         if side == "BID" and day.date() in missing_bid:
             mins = mins[: len(mins) // 2]
         seed = y * 10000 + mth * 100 + d
@@ -171,7 +174,9 @@ def test_dukascopy_url_month_is_zero_indexed_and_days_are_utc():
     assert url.endswith("/XAUUSD/2025/02/13/BID_candles_min_1.bi5")
     days = p.days(datetime(2025, 3, 1, tzinfo=timezone.utc), datetime(2025, 3, 4, tzinfo=timezone.utc))
     assert [d.day for d in days] == [1, 2, 3]
-    assert p.estimate_download_bytes("XAUUSD", datetime(2025, 3, 1, tzinfo=timezone.utc), datetime(2025, 3, 4, tzinfo=timezone.utc)) == 3 * 2 * 20000
+    assert p.estimate_download_bytes("XAUUSD", datetime(2025, 3, 1, tzinfo=timezone.utc), datetime(2025, 3, 4, tzinfo=timezone.utc)) == 2 * 2 * 20000  # Saturday skipped
+    assert DukascopyProvider(skip_closed_days=False).estimate_download_bytes(
+        "XAUUSD", datetime(2025, 3, 1, tzinfo=timezone.utc), datetime(2025, 3, 4, tzinfo=timezone.utc)) == 3 * 2 * 20000
 
 
 def test_normalize_decodes_prices_merges_bid_ask_and_keeps_provenance_columns(tmp_path):
@@ -570,11 +575,14 @@ except Exception:  # pragma: no cover
 
 @pytest.mark.skipif(not _real, reason="bounded real XAUUSD sample not ingested on this machine")
 def test_real_xauusd_sample_schema_and_quality():
-    bars = MarketStore(REAL_ROOT).read_bars("dukascopy", "XAUUSD", "M1")
+    st = MarketStore(REAL_ROOT)
+    bars = st.read_bars("dukascopy", "XAUUSD", "M1", end=st.final_start("XAUUSD"))
     assert tuple(bars.columns) == CANONICAL_COLUMNS and str(bars["timestamp_utc"].dt.tz) == "UTC"
-    assert len(bars) > 20000 and (bars["bid_close"].between(1500, 5000)).all() and bars["spread"].min() >= 0
+    assert len(bars) > 20000 and (bars["bid_close"].between(1000, 6000)).all() and bars["spread"].min() >= 0
     rep = validate_bars(bars)
-    assert not rep.codes("BLOCK") - {"MISSING_BARS", "LARGE_GAPS"} or rep.passed
+    # the store holds non-contiguous ingested months (coverage holes are NOT data gaps); judge quality on the contiguous 2025 sample
+    sample = bars[(bars["timestamp_utc"] >= pd.Timestamp("2025-02-03", tz="UTC")) & (bars["timestamp_utc"] < pd.Timestamp("2025-04-04", tz="UTC"))]
+    assert validate_bars(sample).passed
 
 
 # ============================ provider padding, merge range, annotations, prompt schema, benchmark =========================
@@ -602,18 +610,18 @@ def padded_opener(base=2900.0):
 
 
 def test_padded_closed_market_rows_are_dropped_counted_and_reported(tmp_path):
-    p = DukascopyProvider(opener=padded_opener())
+    p = DukascopyProvider(opener=padded_opener(), skip_closed_days=False, sleep=lambda s: None)
     s, e = datetime(2025, 3, 3, tzinfo=timezone.utc), datetime(2025, 3, 10, tzinfo=timezone.utc)   # Mon..Sun
     res = ingest(p, "XAUUSD", s, e, tmp_path, reserve_bytes=1)
     st = res.provenance["normalization"]
     assert st["rows_dropped"] > 0 and st["rows_in"] == 7 * 1440 and st["rows_out"] == res.rows
-    assert st["dropped_weekly_closure"] >= 2880 and st["rows_dropped"] == st["dropped_weekly_closure"] + st["dropped_daily_break"]
+    assert st["dropped_weekly_closure"] >= 2880 and st["rows_dropped"] == st["dropped_weekly_closure"] + st["dropped_daily_break"] + st["dropped_long_dead_runs"]
     assert st["closed_nonflat_rows_kept"] >= 0   # this fake feed has real (non-flat) rows during the gold break; they are kept, never dropped
     bars = MarketStore(tmp_path).read_bars("dukascopy", "XAUUSD", "M1")
     meta = get_meta("XAUUSD")
     assert not is_market_closed(bars["timestamp_utc"], meta).any()
     assert res.quality.passed and gap_summary(res.quality)["MARKET_CLOSED"] >= 1 and gap_summary(res.quality)["PROVIDER_GAP"] == 0
-    assert res.provenance["source"]["normalization_version"] == "dukascopy-m1-v2"
+    assert res.provenance["source"]["normalization_version"] == "dukascopy-m1-v3"
 
 
 def test_non_flat_rows_inside_closure_are_kept_and_warned(tmp_path):
@@ -624,7 +632,7 @@ def test_non_flat_rows_inside_closure_are_kept_and_warned(tmp_path):
         if "/2025/02/08_" in url or url.endswith("/2025/02/08/BID_candles_min_1.bi5") or "/2025/02/08/" in url:  # Sat 2025-03-08
             body[0:24] = RECORD.pack(0, 2900000, 2900500, 2899000, 2901000, 0.5)   # a genuinely moving candle on a closed day
         return lzma.compress(bytes(body))
-    p = DukascopyProvider(opener=opener)
+    p = DukascopyProvider(opener=opener, skip_closed_days=False, sleep=lambda s: None)
     res = ingest(p, "XAUUSD", datetime(2025, 3, 7, tzinfo=timezone.utc), datetime(2025, 3, 10, tzinfo=timezone.utc), tmp_path, reserve_bytes=1)
     assert res.provenance["normalization"]["closed_nonflat_rows_kept"] >= 1            # never silently discarded
     assert "BARS_DURING_MARKET_CLOSURE" in res.quality.codes("WARN")

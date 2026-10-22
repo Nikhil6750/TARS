@@ -184,9 +184,9 @@ def test_agent_never_loads_untouched_test_period(tmp_path):
     seen = []
     orig = spy_store.read_bars
 
-    def spy(provider, inst, tf="M1", start=None, end=None):
+    def spy(provider, inst, tf="M1", start=None, end=None, **kw):
         seen.append(end)
-        return orig(provider, inst, tf, start, end)
+        return orig(provider, inst, tf, start, end, **kw)
     spy_store.read_bars = spy
     reg = ExperimentRegistry(tmp_path / "r.sqlite")
     agent = QuantResearchAgent(reg, spy_store, tmp_path / "rep")

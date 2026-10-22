@@ -8,9 +8,10 @@ import pandas as pd
 
 from .instruments import get_meta, has_meta
 from .schema import CANONICAL_COLUMNS, PRICE_COLUMNS, TIMEFRAME_MINUTES
-from .sessions import is_daily_break, is_known_holiday, is_market_closed
+from .sessions import explain_gap, is_daily_break, is_known_holiday, is_market_closed
 
 BLOCK, WARN, INFO = "BLOCK", "WARN", "INFO"
+QUALITY_VERSION = 3   # 3: US-holiday reduced-hours pattern + holiday-vs-break label precedence
 
 
 @dataclass
@@ -29,6 +30,7 @@ class DataQualityReport:
     first_ts: str | None
     last_ts: str | None
     issues: list[QualityIssue] = field(default_factory=list)
+    provider_gaps: list = field(default_factory=list)   # unexplained gaps: (first_missing, last_missing, missing_bars), capped
 
     @property
     def blocks_experiment(self) -> bool:
@@ -43,7 +45,8 @@ class DataQualityReport:
 
     def to_dict(self) -> dict:
         return {"rows": self.rows, "instrument": self.instrument, "first_ts": self.first_ts,
-                "last_ts": self.last_ts, "passed": self.passed, "issues": [asdict(i) for i in self.issues]}
+                "last_ts": self.last_ts, "passed": self.passed, "issues": [asdict(i) for i in self.issues],
+                "provider_gaps": self.provider_gaps[:200]}
 
 
 def _market_closed(ts: pd.Series) -> pd.Series:
@@ -53,7 +56,8 @@ def _market_closed(ts: pd.Series) -> pd.Series:
 
 
 def validate_bars(bars: pd.DataFrame, *, timeframe: str | None = None, max_missing_fraction: float = 0.02,
-                  max_gap_minutes: float = 240.0, spread_outlier_mult: float = 8.0) -> DataQualityReport:
+                  max_gap_minutes: float = 240.0, spread_outlier_mult: float = 8.0,
+                  max_large_gaps: int = 0) -> DataQualityReport:
     inst = str(bars["instrument"].iloc[0]) if len(bars) and "instrument" in bars else "?"
     rep = DataQualityReport(rows=len(bars), instrument=inst, first_ts=None, last_ts=None)
 
@@ -115,7 +119,7 @@ def validate_bars(bars: pd.DataFrame, *, timeframe: str | None = None, max_missi
     s = ts.drop_duplicates().sort_values().reset_index(drop=True)
     gaps = s.diff().dropna()
     over = gaps[gaps > step]
-    n_closed = n_expected = 0
+    n_closed = n_expected = n_short = 0
     missing_provider = 0
     large_provider_gaps = 0
     if len(over):
@@ -123,30 +127,38 @@ def validate_bars(bars: pd.DataFrame, *, timeframe: str | None = None, max_missi
         ends = s.iloc[over.index].reset_index(drop=True)
         for a_ts, b_ts in zip(starts, ends):
             first_missing, last_missing = a_ts + step, b_ts - step
-            probe = pd.Series([first_missing, last_missing])
-            if meta:
-                weekend = bool(is_market_closed(probe, meta).any())
-                brk = bool(is_daily_break(probe, meta).all()) or bool(is_daily_break(pd.Series([first_missing]), meta).iloc[0])
-            else:
-                weekend, brk = bool(_market_closed(probe).any()), False
-            holiday = bool(is_known_holiday(probe).any())
             span = b_ts - a_ts
-            if weekend and span <= pd.Timedelta(hours=72):
+            if meta:
+                ex = explain_gap(first_missing, b_ts, meta)
+                cat, unexplained = ex["category"], ex["unexplained_minutes"]
+            else:  # unknown instrument: coarse UTC fallback
+                probe = pd.Series([first_missing, last_missing])
+                cat = "MARKET_CLOSED" if bool(_market_closed(probe).any()) and span <= pd.Timedelta(hours=72) else "PROVIDER_GAP"
+                unexplained = int(span / pd.Timedelta(minutes=1)) - 1
+            if cat in ("MARKET_CLOSED", "HOLIDAY_WINDOW"):
                 n_closed += 1
-            elif (brk and (span - step) <= pd.Timedelta(minutes=90)) or (holiday and span <= pd.Timedelta(hours=30)):
+            elif cat == "EXPECTED_GAP":
                 n_expected += 1
+            elif cat == "UNVERIFIED_SHORT":
+                n_short += 1
             else:
-                missing = int(span // step) - 1
+                missing = max(int(unexplained // (step / pd.Timedelta(minutes=1))), 1)
                 missing_provider += missing
-                if span > pd.Timedelta(minutes=max_gap_minutes):
+                if len(rep.provider_gaps) < 2000:
+                    rep.provider_gaps.append((str(first_missing), str(last_missing), missing))
+                if pd.Timedelta(minutes=unexplained) > pd.Timedelta(minutes=max_gap_minutes):
                     large_provider_gaps += 1
     add("GAPS_MARKET_CLOSED", INFO, n_closed, "weekly-closure gaps (expected)", "MARKET_CLOSED")
-    add("GAPS_EXPECTED", INFO, n_expected, "daily-break / holiday gaps (expected)", "EXPECTED_GAP")
+    add("GAPS_EXPECTED", INFO, n_expected, "daily-break gaps (expected)", "EXPECTED_GAP")
+    add("GAPS_UNVERIFIED_SHORT", WARN, n_short, "gaps on commonly-shortened days (Dec 24/26/31, Easter Monday): not assumed closed", "WARNING")
     in_session_expected = max(int((~closed).sum()) + missing_provider, 1)
     frac = missing_provider / in_session_expected
     add("MISSING_BARS", BLOCK if frac > max_missing_fraction else WARN, missing_provider,
         f"{frac:.2%} of expected in-session bars missing (limit {max_missing_fraction:.0%})", "PROVIDER_GAP")
-    add("LARGE_GAPS", BLOCK, large_provider_gaps, f"unexplained gaps longer than {max_gap_minutes:.0f} minutes", "PROVIDER_GAP")
+    # A few isolated outages are normal for retail feeds: they are listed (and trades spanning them are excluded by the agent).
+    # Only a systemic pattern blocks the dataset.
+    add("LARGE_GAPS", BLOCK if large_provider_gaps > max_large_gaps else WARN, large_provider_gaps,
+        f"unexplained gaps longer than {max_gap_minutes:.0f} minutes (blocking above {max_large_gaps})", "PROVIDER_GAP")
     ret = np.log(bars["bid_close"]).diff().abs()
     if ret.notna().sum() > 50:
         sd = float(ret.std())

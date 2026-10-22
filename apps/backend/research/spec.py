@@ -80,9 +80,22 @@ class Condition(_Strict):
         return v
 
 
+SESSION_NAMES = {"ASIA", "LONDON", "LONDON_NY_OVERLAP", "NEWYORK", "OFF"}
+
+
 class SignalDef(_Strict):
     long_when: list[Condition] = Field(default_factory=list)
     short_when: list[Condition] = Field(default_factory=list)
+    entry_sessions: list[str] | None = Field(None, description="optional: only signals whose bar falls in these DST-aware sessions can enter")
+
+    @field_validator("entry_sessions")
+    @classmethod
+    def _sess(cls, v):
+        if v is not None:
+            bad = set(v) - SESSION_NAMES
+            if bad or not v:
+                raise ValueError(f"entry_sessions must be a non-empty subset of {sorted(SESSION_NAMES)}")
+        return v
 
     @model_validator(mode="after")
     def _some(self):
@@ -197,6 +210,8 @@ class ResearchSpec(_Strict):
         d = self.model_dump(mode="json")
         if d.get("diagnostic_kind") is None:
             d.pop("diagnostic_kind", None)  # keeps hashes of specs frozen before this field existed
+        if d["signal"].get("entry_sessions") is None:
+            d["signal"].pop("entry_sessions", None)
         return json.dumps(d, sort_keys=True, separators=(",", ":"))
 
     def spec_hash(self) -> str:
@@ -216,6 +231,7 @@ class ResearchSpec(_Strict):
             "signal": {side: sorted((kind_of(c.left), c.op, kind_of(c.right) if isinstance(c.right, str) else "const")
                                     for c in getattr(self.signal, side)) for side in ("long_when", "short_when")},
             "target": self.exit.target_r is not None,
+            "sessions": sorted(self.signal.entry_sessions or []),
         }
         return hashlib.sha256(json.dumps(structure, sort_keys=True, default=str).encode()).hexdigest()[:16]
 

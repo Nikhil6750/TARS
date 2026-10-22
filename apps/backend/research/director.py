@@ -19,6 +19,7 @@ from .spec import ResearchSpec, ResearchSpecError, parse_spec
 
 LLM = Callable[[str, str], Awaitable[str]]
 MAX_PACKET_CHARS = 16000
+NL = chr(10)
 
 SYSTEM_PROMPT = (
     "You are the lead quantitative researcher for TARS. You formulate falsifiable hypotheses with an explicit market "
@@ -120,19 +121,45 @@ class ResearchDirector:
         return res
 
     # ---- the six director functions ---------------------------------------------------------------------
-    async def propose_hypothesis(self, topic: str, context: str = "") -> DirectorResult:
-        """Claude drafts a ResearchSpec; it is validated, checked against research memory, then frozen in the registry."""
+    async def propose_hypothesis(self, topic: str, context: str = "", brief: str | None = None,
+                                 policy_check: Callable[[ResearchSpec], list[str]] | None = None) -> DirectorResult:
+        """Claude drafts a ResearchSpec; it is validated (schema, then optional policy_check), checked against research memory and
+        only then frozen in the registry. A rejected draft gets exactly ONE corrective retry quoting the problems."""
         digest = [{"id": r["id"], "title": r["title"], "status": r["status"], "failure": r["failure_reason"]} for r in self.registry.list()][-40:]
-        out = await self._ask("propose_hypothesis", "Return JSON {classification:'HYPOTHESIS', summary, reasoning, spec:<ResearchSpec>}. "
-                              "Do not repeat REJECTED/FAILED work listed below unless the mechanism is materially different "
-                              "(then fill differs_from/differs_because).", {"topic": topic, "context": context, "registry": digest})
-        res = self._result("propose_hypothesis", out, [])
-        if out.spec is None:
-            raise DirectorError("propose_hypothesis returned no spec")
-        try:
-            spec = parse_spec(out.spec)
-        except ResearchSpecError as exc:
-            res.notes.append(f"SPEC_INVALID: {exc}")
+        instruction = ("Return JSON {classification:'HYPOTHESIS', summary, reasoning, spec:<ResearchSpec>}. "
+                       "Do not repeat REJECTED/FAILED work listed below unless the mechanism is materially different "
+                       "(then fill differs_from/differs_because).")
+        if brief:
+            instruction += NL * 2 + brief
+        packet = {"topic": topic, "context": context, "registry": digest} if not brief else {"topic": topic}
+        notes: list[str] = []
+        res: DirectorResult | None = None
+        spec: ResearchSpec | None = None
+        for attempt in range(2):
+            extra = "" if attempt == 0 else (NL * 2 + "YOUR PREVIOUS spec was rejected: " + notes[-1] +
+                                           " Return the corrected COMPLETE spec (same idea; change only what is named).")
+            out = await self._ask("propose_hypothesis", instruction + extra, packet)
+            res = self._result("propose_hypothesis", out, [], notes=list(notes))
+            if out.spec is None:
+                notes.append("no spec returned")
+                continue
+            try:
+                cand = parse_spec(out.spec)
+            except ResearchSpecError as exc:
+                notes.append(f"SPEC_INVALID: {exc}")
+                res.notes = list(notes)
+                continue
+            problems = policy_check(cand) if policy_check else []
+            if problems:
+                notes.append("POLICY: " + "; ".join(problems))
+                res.notes = list(notes)
+                continue
+            spec = cand
+            break
+        assert res is not None
+        res.notes = list(notes)
+        if spec is None:
+            res.notes.append("NOT_REGISTERED: no acceptable spec after one corrective retry")
             return res
         try:
             res.experiment_id = self.agent.submit(spec)

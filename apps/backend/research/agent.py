@@ -22,16 +22,12 @@ from .quality import DataQualityReport, validate_bars
 from .registry import ExperimentRegistry, RegistryError
 from .schema import TIMEFRAME_MINUTES, derive_timeframe
 from .spec import ResearchSpec
-from .storage import MarketStore
+from .storage import FinalDataAccessDenied, MarketStore  # noqa: F401 (re-exported)
 
 WARMUP_BARS = 600
 CLASSIFICATION = {"PRELIMINARY": "PRELIMINARY_EVIDENCE", "VALIDATING": "PRELIMINARY_EVIDENCE",
                   "VALIDATED": "VALIDATED_FINDING", "REJECTED": "FAILED_EXPERIMENT", "FAILED": "FAILED_EXPERIMENT",
                   "PROPOSED": "HYPOTHESIS", "RUNNING": "HYPOTHESIS"}
-
-
-class FinalDataAccessDenied(PermissionError):
-    """Raised when code tries to load the FINAL_UNTOUCHED period without explicit promotion to final testing."""
 
 
 class ResearchRejected(RuntimeError):
@@ -45,6 +41,20 @@ class QuantResearchAgent:
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.memory = memory or ResearchMemory(registry)
+        self._gaps: dict[str, list] = {}
+        self.excluded_gap_trades = 0
+
+    def _sim(self, inst: str, bars, spec, costs, **kw):
+        """simulate() + deterministic exclusion of trades whose life overlaps an unexplained provider gap (counted, reported)."""
+        t = simulate(bars, spec, costs, **kw)
+        gaps = self._gaps.get(inst) or []
+        if gaps and len(t):
+            hit = pd.Series(False, index=t.index)
+            for a, b in gaps:
+                hit |= (t["entry_time"] <= b) & (t["exit_time"] >= a)
+            self.excluded_gap_trades += int(hit.sum())
+            t = t[~hit].reset_index(drop=True)
+        return t
 
     # ---- intake ---------------------------------------------------------------------------------
     def submit(self, spec: ResearchSpec) -> str:
@@ -59,7 +69,8 @@ class QuantResearchAgent:
             raise FinalDataAccessDenied("loading data beyond the validation period is reserved for explicit final testing")
         tf_min = TIMEFRAME_MINUTES[spec.data.timeframe]
         warm_start = pd.Timestamp(spec.development.start).tz_convert("UTC") - pd.Timedelta(minutes=tf_min * (WARMUP_BARS + spec.embargo_bars))
-        bars = self.store.read_bars(spec.data.provider, inst, spec.data.source_timeframe, warm_start, upto)
+        bars = self.store.read_bars(spec.data.provider, inst, spec.data.source_timeframe, warm_start, upto,
+                                    authorized_final=final_ok, purpose="untouched_test")
         return bars, warm_start
 
     def _prepare(self, spec: ResearchSpec, upto: pd.Timestamp, *, final_ok: bool = False, on_final_load=None
@@ -69,8 +80,11 @@ class QuantResearchAgent:
             if final_ok and on_final_load is not None:
                 on_final_load()  # record the FIRST access before any final row is read
             bars, _ = self._load(spec, inst, upto, final_ok=final_ok)
-            rep = validate_bars(bars, timeframe=spec.data.source_timeframe)
+            years = max((bars["timestamp_utc"].iloc[-1] - bars["timestamp_utc"].iloc[0]).days / 365.25, 0.0) if len(bars) > 1 else 0.0
+            # a few isolated outages per year are normal for a retail feed (listed, trades spanning them excluded); more is systemic
+            rep = validate_bars(bars, timeframe=spec.data.source_timeframe, max_large_gaps=int(years * 5))
             reports[inst] = rep
+            self._gaps[inst] = [(pd.Timestamp(a), pd.Timestamp(b)) for a, b, _ in rep.provider_gaps]
             if rep.blocks_experiment:
                 continue
             versions.append(self.store.data_version(bars))
@@ -124,14 +138,16 @@ class QuantResearchAgent:
         d0, d1 = (pd.Timestamp(spec.development.start).tz_convert("UTC"), pd.Timestamp(spec.development.end).tz_convert("UTC"))
         v0, v1 = (pd.Timestamp(spec.validation.start).tz_convert("UTC"), val_end)
         dev_t, val_t = [], []
+        self.excluded_gap_trades = 0
         stress = {"dev": {}, "val": {}}
         feats_by_inst = {i: compute_features(b, spec.features) for i, b in derived.items()}
         for inst, bars in derived.items():
             f = feats_by_inst[inst]
             for label, (a, b, emb), sink in (("dev", (d0, d1, 0), dev_t), ("val", (v0, v1, spec.embargo_bars), val_t)):
-                t = simulate(bars, spec, spec.costs, start=a, end=b, feats=f, embargo_bars=emb)
+                t = self._sim(inst, bars, spec, spec.costs, start=a, end=b, feats=f, embargo_bars=emb)
                 t["instrument"] = inst
                 sink.append(t)
+        primary_excluded = self.excluded_gap_trades   # primary dev+validation run only (stress re-runs excluded)
         dev_trades = pd.concat(dev_t, ignore_index=True) if dev_t else pd.DataFrame()
         val_trades = pd.concat(val_t, ignore_index=True) if val_t else pd.DataFrame()
         dev_m, val_m = compute_metrics(dev_trades), compute_metrics(val_trades)
@@ -139,7 +155,7 @@ class QuantResearchAgent:
         def stressed(costs, start, end, emb):
             out = []
             for inst, bars in derived.items():
-                t = simulate(bars, spec, costs, start=start, end=end, feats=feats_by_inst[inst], embargo_bars=emb)
+                t = self._sim(inst, bars, spec, costs, start=start, end=end, feats=feats_by_inst[inst], embargo_bars=emb)
                 out.append(t)
             return compute_metrics(pd.concat(out, ignore_index=True))
         sens = {}
@@ -156,7 +172,7 @@ class QuantResearchAgent:
             vs = spec.model_copy(update={"features": [f.model_copy(update={"n": var.get(f.name, f.n)}) for f in spec.features]})
             tv = []
             for inst, bars in derived.items():
-                tv.append(simulate(bars, vs, spec.costs, start=v0, end=v1, feats=compute_features(bars, vs.features), embargo_bars=spec.embargo_bars))
+                tv.append(self._sim(inst, bars, vs, spec.costs, start=v0, end=v1, feats=compute_features(bars, vs.features), embargo_bars=spec.embargo_bars))
             m = compute_metrics(pd.concat(tv, ignore_index=True))
             neighbours.append({"variant": var, "trades": m.get("trades", 0), "net_expectancy_r": m.get("net_expectancy_r")})
 
@@ -172,7 +188,9 @@ class QuantResearchAgent:
                    "multiple_testing": multiple_testing(n_family + 1), "cost_model": spec.costs.model_dump(),
                    "periods": {k: [str(getattr(spec, p).start), str(getattr(spec, p).end)] for k, p in
                                (("development", "development"), ("validation", "validation"), ("untouched_test", "untouched_test"))},
-                   "untouched_test": "NOT_EVALUATED"}
+                   "untouched_test": "NOT_EVALUATED",
+                   "provider_gap_exclusions": {"unexplained_gaps": {i: len(g) for i, g in self._gaps.items()},
+                                               "trades_excluded_spanning_gaps": primary_excluded}}
         failed = [k for k, v in checks.items() if not v["pass"]]
         self.registry.record(hid, results_json=clean(results), regime_results_json=clean(regimes),
                              warnings_json=[w.to_dict() for w in warns])
@@ -223,7 +241,7 @@ class QuantResearchAgent:
         self.registry.transition(hid, "VALIDATING", "untouched test authorised")
         trades = []
         for inst, bars in derived.items():
-            t = simulate(bars, spec, spec.costs, start=t0, end=t1, feats=compute_features(bars, spec.features), embargo_bars=spec.embargo_bars)
+            t = self._sim(inst, bars, spec, spec.costs, start=t0, end=t1, feats=compute_features(bars, spec.features), embargo_bars=spec.embargo_bars)
             t["instrument"] = inst
             trades.append(t)
         tr = pd.concat(trades, ignore_index=True)

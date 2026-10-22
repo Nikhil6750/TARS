@@ -39,6 +39,9 @@ def simulate(bars: pd.DataFrame, spec: ResearchSpec, costs: CostModel, *, start:
     last_bar = idx_in[-1]
     long_sig = evaluate_conditions(feats, spec.signal.long_when).to_numpy()
     short_sig = evaluate_conditions(feats, spec.signal.short_when).to_numpy()
+    if spec.signal.entry_sessions:   # decided from the SIGNAL bar's own timestamp (causal) in DST-aware session terms
+        ok = classify_sessions(ts).isin(spec.signal.entry_sessions).to_numpy()
+        long_sig, short_sig = long_sig & ok, short_sig & ok
     atr = feats[spec.exit.atr_feature].to_numpy()
     reg = regime_context(bars, feats[spec.exit.atr_feature])
     sessions = classify_sessions(ts).to_numpy()

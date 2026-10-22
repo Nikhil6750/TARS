@@ -4,7 +4,11 @@ Record layout (24 bytes, big endian): uint32 seconds-from-day-start, uint32 open
 float32 volume. Prices are integers scaled by 10**price_precision. URL months are ZERO-indexed (00 = January)."""
 from __future__ import annotations
 
+import hashlib
+import http.client
 import lzma
+import random
+import threading
 import struct
 import time
 import urllib.error
@@ -12,16 +16,19 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 
 from ..instruments import get_meta
 from ..schema import make_bars
 from ..sessions import is_daily_break, is_market_closed
 from .base import MarketDataProvider, RawCache, RawFile
+from .download import HttpFailure, IntegrityError, Manifest, RateGovernor, backoff_delay, verify_bi5
 
-NORMALIZATION_VERSION = "dukascopy-m1-v2"  # v2: explicit, counted removal of provider closed-market padding
+NORMALIZATION_VERSION = "dukascopy-m1-v3"  # v3: also drops long (>=30 min) flat zero-volume runs (holidays / dead periods)
 BASE = "https://datafeed.dukascopy.com/datafeed"
 RECORD = struct.Struct(">IIIIIf")
+LONG_DEAD_RUN_MIN = 30
 AVG_FILE_BYTES = 20_000  # observed ~15-17 KB/day/side for XAUUSD M1; padded
 
 
@@ -32,10 +39,16 @@ class PartialFetchError(RuntimeError):
 class DukascopyProvider(MarketDataProvider):
     name = "dukascopy"
 
-    def __init__(self, workers: int = 6, timeout: float = 90.0, retries: int = 3, opener=None) -> None:
+    def __init__(self, workers: int = 8, timeout: float = 45.0, retries: int = 14, opener=None, min_interval: float = 0.12,
+                 skip_closed_days: bool = True, sleep=time.sleep) -> None:
         self.workers, self.timeout, self.retries = workers, timeout, retries
-        self._open = opener or self._http_get
+        self._open = opener or self._http_get_once
+        self._sleep = sleep
+        self.skip_closed_days = skip_closed_days   # Saturday (UTC) lies wholly inside the weekly closure of every supported instrument
+        self.governor = RateGovernor(workers, min_interval)
+        self._tls = threading.local()
         self.last_normalization_stats: dict = {}
+        self.last_fetch_stats: dict = {}
 
     # ---- helpers -----------------------------------------------------------------------------
     @staticmethod
@@ -55,51 +68,114 @@ class DukascopyProvider(MarketDataProvider):
             d += timedelta(days=1)
         return out
 
-    def _http_get(self, url: str) -> bytes:
-        last: Exception | None = None
-        for attempt in range(self.retries):
+    def _conn(self) -> http.client.HTTPSConnection:
+        c = getattr(self._tls, "conn", None)
+        if c is None:
+            c = self._tls.conn = http.client.HTTPSConnection("datafeed.dukascopy.com", timeout=self.timeout)
+        return c
+
+    def _http_get_once(self, url: str) -> bytes:
+        """One HTTP attempt over a per-thread keep-alive connection. 404 = day without data. 429/503 raise HttpFailure."""
+        path = url.split("datafeed.dukascopy.com", 1)[1]
+        try:
+            c = self._conn()
+            c.request("GET", path, headers={"User-Agent": "Mozilla/5.0", "Connection": "keep-alive"})
+            r = c.getresponse()
+            body = r.read()
+        except Exception:
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                    return r.read()
-            except urllib.error.HTTPError as exc:
-                if exc.code == 404:
-                    return b""
-                last = exc
-            except Exception as exc:  # network hiccup -> retry
-                last = exc
-            time.sleep(min(1.0 + 0.5 * attempt, 6))
-        raise RuntimeError(f"download failed after {self.retries} attempts: {url}: {last}")
+                self._tls.conn.close()
+            except Exception:
+                pass
+            self._tls.conn = None
+            raise
+        if r.status == 200:
+            return body
+        if r.status == 404:
+            return b""
+        ra = r.getheader("Retry-After")
+        raise HttpFailure(r.status, float(ra) if ra and ra.replace(".", "", 1).isdigit() else None)
 
     # ---- contract -------------------------------------------------------------------------------
     def estimate_download_bytes(self, instrument: str, start: datetime, end: datetime) -> int:
-        return len(self.days(start, end)) * 2 * AVG_FILE_BYTES
+        n = len(self.days(start, end))
+        if self.skip_closed_days:
+            n = sum(1 for d in self.days(start, end) if d.weekday() != 5)
+        return n * 2 * AVG_FILE_BYTES
 
-    def fetch(self, instrument: str, start: datetime, end: datetime, cache: RawCache) -> list[RawFile]:
+    def _download(self, url: str):
+        """Fetch + verify one file with governed retries. Returns (payload, rows, attempts). Raises after exhausting attempts."""
+        last: Exception | None = None
+        for attempt in range(self.retries):
+            self.governor.acquire()
+            outcome, retry_after, miss_wait = "error", None, None
+            try:
+                payload = self._open(url)
+                rows = verify_bi5(payload)
+                outcome = "ok"
+                return payload, rows, attempt + 1
+            except HttpFailure as exc:
+                last = exc
+                if exc.status == 503 and not exc.retry_after:
+                    outcome = "miss"
+                    miss_wait = 4.0 + random.random() * 4.0
+                else:
+                    outcome = "throttled" if exc.status in (429, 503) else "error"
+                    retry_after = exc.retry_after
+            except IntegrityError as exc:
+                last = exc            # truncated/corrupt body: refetch, never cache
+            except Exception as exc:  # timeouts, resets
+                last = exc
+                kinds = self.governor.stats.setdefault("error_kinds", {})
+                kinds[type(exc).__name__] = kinds.get(type(exc).__name__, 0) + 1
+            finally:
+                self.governor.release(outcome, retry_after)
+            self._sleep(retry_after if retry_after else (miss_wait if miss_wait else backoff_delay(attempt)))
+        raise RuntimeError(f"download failed after {self.retries} attempts: {url}: {last}")
+
+    def fetch(self, instrument: str, start: datetime, end: datetime, cache: RawCache, progress=None) -> list[RawFile]:
         code = self.code(instrument)
-        jobs = [(d, side) for d in self.days(start, end) for side in ("BID", "ASK")]
+        manifest = Manifest(cache.root / "manifest.sqlite")
+        days = [d for d in self.days(start, end) if not (self.skip_closed_days and d.weekday() == 5)]
+        jobs = [(d, side) for d in days for side in ("BID", "ASK")]
+        done = {"n": 0}
 
         def one(job):
             d, side = job
+            key = f"{self.name}/{code}/{d:%Y-%m-%d}/{side}"
             rel = (self.name, code, f"{d:%Y}", f"{d:%m}", f"{d:%d}_{side}.bi5")
             path = cache.path_for(*rel)
             url = self.url(code, d, side)
-            if path.exists():  # immutable cache hit: no network, no overwrite
-                import hashlib
-                b = path.read_bytes()
-                return RawFile(path, f"{d:%Y-%m-%d}/{side}", url, hashlib.sha256(b).hexdigest(), len(b), "cached")
-            payload = self._open(url)
-            p, digest = cache.put(rel, payload)
-            return RawFile(p, f"{d:%Y-%m-%d}/{side}", url, digest, len(payload), datetime.now(timezone.utc).isoformat())
+            rec = manifest.get(key)
+            if rec and path.exists() and path.stat().st_size == rec["size"]:   # verified earlier: no network, no re-hash needed
+                rf = RawFile(path, f"{d:%Y-%m-%d}/{side}", url, rec["sha256"], rec["size"], rec["retrieved_at"])
+            else:
+                if path.exists() and not rec:  # file from before the manifest existed: adopt it after verifying
+                    b = path.read_bytes()
+                    rows = verify_bi5(b)
+                    digest = hashlib.sha256(b).hexdigest()
+                    manifest.put(key, url, "/".join(rel), digest, len(b), rows, "OK" if b else "EMPTY", 0, "adopted")
+                    rf = RawFile(path, f"{d:%Y-%m-%d}/{side}", url, digest, len(b), "adopted")
+                else:
+                    payload, rows, attempts = self._download(url)
+                    p, digest = cache.put(rel, payload)
+                    now = datetime.now(timezone.utc).isoformat()
+                    manifest.put(key, url, "/".join(rel), digest, len(payload), rows, "OK" if payload else "EMPTY", attempts, now)
+                    rf = RawFile(p, f"{d:%Y-%m-%d}/{side}", url, digest, len(payload), now)
+            done["n"] += 1
+            if progress:
+                progress(done["n"], len(jobs), key)
+            return rf
 
         def safe(job):
             try:
                 return one(job)
-            except Exception as exc:  # keep going; completed files stay in the immutable cache for the next pass
+            except Exception as exc:  # keep going; completed files stay cached/manifested for the next pass
                 return exc
 
         with ThreadPoolExecutor(self.workers) as ex:
             results = list(ex.map(safe, jobs))
+        self.last_fetch_stats = {**self.governor.stats, "files": len(jobs)}
         failed = [r for r in results if isinstance(r, Exception)]
         if failed:
             raise PartialFetchError(f"{len(failed)}/{len(jobs)} files failed (cache keeps the rest; rerun to resume): {failed[0]}")
@@ -155,14 +231,22 @@ class DukascopyProvider(MarketDataProvider):
                (df["ask_open"] == df["ask_close"]).to_numpy() & (df["bid_open"] == df["bid_high"]).to_numpy() & \
                (df["ask_open"] == df["ask_high"]).to_numpy()
         zero = (df["volume"].fillna(0) == 0).to_numpy()
-        drop = closed & flat & zero
+        dead = flat & zero
+        drop_closed = closed & dead
+        # Holidays and other dead periods are padded too, but sit outside any weekly/daily closure window. A run of >= 30
+        # consecutive flat, zero-volume minutes is not a market (live gold quotes never freeze that long): drop it, count it.
+        run_id = np.cumsum(np.concatenate([[True], dead[1:] != dead[:-1]]))
+        run_len = pd.Series(run_id).map(pd.Series(run_id).value_counts()).to_numpy()
+        drop_long = dead & (run_len >= LONG_DEAD_RUN_MIN) & ~drop_closed
+        drop = drop_closed | drop_long
         self.last_normalization_stats = {
             "rule": "drop closed-market padding (in closure/break AND flat OHLC both sides AND volume==0)",
             "rows_in": int(len(df)), "rows_dropped": int(drop.sum()), "rows_out": int((~drop).sum()),
             "closed_nonflat_rows_kept": int((closed & ~(flat & zero)).sum()),
             "dropped_weekly_closure": int((drop & is_market_closed(ts, meta).to_numpy()).sum()),
-            "dropped_daily_break": int((drop & ~is_market_closed(ts, meta).to_numpy()).sum()),
-            "open_hours_flat_rows_kept": int((flat & ~closed).sum())}
+            "dropped_daily_break": int((drop_closed & ~is_market_closed(ts, meta).to_numpy()).sum()),
+            "dropped_long_dead_runs": int(drop_long.sum()), "long_dead_run_min_minutes": LONG_DEAD_RUN_MIN,
+            "open_hours_flat_rows_kept": int((dead & ~drop).sum())}
         return df.loc[~drop].reset_index(drop=True)
 
     def describe_source(self, instrument: str) -> dict:

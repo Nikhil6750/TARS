@@ -17,7 +17,7 @@ import duckdb
 import pandas as pd
 
 from .providers.base import MarketDataProvider, RawCache
-from .quality import DataQualityReport, gap_summary, validate_bars
+from .quality import QUALITY_VERSION, DataQualityReport, gap_summary, validate_bars
 from .storage import MarketStore
 
 
@@ -106,3 +106,75 @@ def register_duckdb(root: Path, provider: str, instrument: str) -> Path:
     finally:
         con.close()
     return cat
+
+
+def _month_windows(start: datetime, end: datetime):
+    cur = start.astimezone(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    while cur < end:
+        nxt = (cur.replace(day=28) + pd.Timedelta(days=4)).replace(day=1)
+        yield max(cur, start), min(nxt, end), cur.strftime("%Y-%m")
+        cur = nxt
+
+
+def ingest_months(provider: MarketDataProvider, instrument: str, start: datetime, end: datetime, root: Path, *,
+                  reserve_bytes: int | None = None, log=print, force: bool = False) -> dict:
+    """Month-by-month, resumable ingestion for multi-year pulls. A month whose raw checksum matches its provenance record
+    and whose Parquet partition exists is skipped (no re-normalising); fetches skip every manifest-verified file."""
+    root = Path(root)
+    cache = RawCache(root / "market" / "_raw")
+    store = MarketStore(root)
+    pdir = root / "market" / "_provenance"
+    pdir.mkdir(parents=True, exist_ok=True)
+    t_start = datetime.now(timezone.utc)
+    totals = {"months": 0, "skipped": 0, "rows": 0, "raw_bytes": 0, "dropped_padding": 0, "provider_gap_bars": 0, "blocked_months": []}
+    for m_start, m_end, label in _month_windows(start, end):
+        t0 = datetime.now(timezone.utc)
+        est = provider.estimate_download_bytes(instrument, m_start, m_end)
+        check_space(root, est * 4, reserve_bytes)
+        raw = provider.fetch(instrument, m_start, m_end, cache)
+        digest = hashlib.sha256("".join(sorted(f"{r.key}:{r.sha256}" for r in raw)).encode()).hexdigest()
+        ppath = pdir / f"{provider.name}_{instrument.upper()}_M1_{label}.json"
+        month_file = root / "market" / provider.name / instrument.upper() / "M1" / label[:4] / f"{label[5:]}.parquet"
+        if not force and ppath.exists() and month_file.exists():
+            try:
+                prev = json.loads(ppath.read_text(encoding="utf-8"))
+            except ValueError:
+                prev = {}
+            same = (prev.get("raw_checksum_sha256") == digest
+                    and prev.get("normalization_version") == provider.describe_source(instrument)["normalization_version"]
+                    and prev.get("quality_version") == QUALITY_VERSION)   # an older quality engine re-validates the month
+            if same:
+                totals["skipped"] += 1
+                totals["rows"] += prev["row_count"]
+                totals["raw_bytes"] += prev["raw_bytes"]
+                log(f"{label}: up to date ({prev['row_count']} rows)")
+                continue
+        bars = provider.normalize(instrument, raw)
+        rep = validate_bars(bars, timeframe="M1") if len(bars) else validate_bars(bars)
+        files = store.write_bars(bars, merge=True, replace_range=(m_start, m_end)) if len(bars) else []
+        gaps = gap_summary(rep)
+        norm = dict(getattr(provider, "last_normalization_stats", {}) or {})
+        prov = {"provider": provider.name, "instrument": instrument.upper(), "timeframe": "M1", "month": label,
+                "retrieved_at": t0.isoformat(), "requested_range": [m_start.isoformat(), m_end.isoformat()],
+                "actual_range": [str(bars["timestamp_utc"].min()), str(bars["timestamp_utc"].max())] if len(bars) else None,
+                "row_count": int(len(bars)), "raw_files": len(raw), "raw_bytes": int(sum(r.size for r in raw)),
+                "raw_checksum_sha256": digest, "parquet_bytes": _dir_size(files) if files else 0,
+                "canonical_data_version": MarketStore.data_version(bars) if len(bars) else None,
+                "normalization_version": provider.describe_source(instrument)["normalization_version"],
+                "quality_version": QUALITY_VERSION, "normalization": norm, "fetch_stats": dict(getattr(provider, "last_fetch_stats", {}) or {}),
+                "quality": {"passed": rep.passed, "gap_categories": gaps,
+                            "issues": [(i.code, i.severity, i.category, i.count) for i in rep.issues]}}
+        ppath.write_text(json.dumps(prov, indent=1, default=str), encoding="utf-8")
+        totals["months"] += 1
+        totals["rows"] += prov["row_count"]
+        totals["raw_bytes"] += prov["raw_bytes"]
+        totals["dropped_padding"] += norm.get("rows_dropped", 0)
+        totals["provider_gap_bars"] += sum(i.count for i in rep.issues if i.code == "MISSING_BARS")
+        if not rep.passed:
+            totals["blocked_months"].append(label)
+        log(f"{label}: rows={prov['row_count']} raw={prov['raw_bytes'] // 1024}KB padding_dropped={norm.get('rows_dropped', 0)} "
+            f"provider_gaps={gaps['PROVIDER_GAP']} quality={'OK' if rep.passed else 'BLOCK ' + ','.join(sorted(rep.codes('BLOCK')))} "
+            f"throttled={prov['fetch_stats'].get('throttled', 0)} {(datetime.now(timezone.utc) - t0).total_seconds():.0f}s")
+    register_duckdb(root, provider.name, instrument)
+    totals["seconds"] = round((datetime.now(timezone.utc) - t_start).total_seconds(), 1)
+    return totals

@@ -79,7 +79,7 @@ def benchmark(spec: ResearchSpec, root: Path) -> dict:
 def run(root: Path | None = None) -> dict:
     root = Path(root) if root else resolve_data_root()
     store = MarketStore(root)
-    bars = store.read_bars("dukascopy", "XAUUSD", "M1")
+    bars = store.read_bars("dukascopy", "XAUUSD", "M1", end=store.final_start("XAUUSD"))
     if bars.empty:
         raise SystemExit("no XAUUSD data ingested")
     spec = real_diagnostic_spec("XAUUSD", bars["timestamp_utc"].iloc[0], bars["timestamp_utc"].iloc[-1])
