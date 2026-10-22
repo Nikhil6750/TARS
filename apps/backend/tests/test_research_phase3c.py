@@ -363,7 +363,7 @@ def test_h0004_is_frozen_unexecuted_and_policy_compliant_if_present():
         pytest.skip("H0004 not registered on this machine")
     r = reg.get("H0004")
     spec = reg.spec("H0004")
-    assert r["status"] == "PROPOSED" and r["results"] is None and not r["diagnostic"] and r["final_first_accessed_at"] is None
+    assert r["status"] in {"PROPOSED", "REJECTED"} and not r["diagnostic"] and r["final_first_accessed_at"] is None   # PROPOSED until Phase 3D, REJECTED after its single frozen run
     assert spec.spec_hash() == r["spec_hash"] and spec.instruments == ["XAUUSD"] and spec.rejection.min_trades_per_period >= 100
     assert len(spec.sensitivity.parameter_variants) <= 4
     sp = load_split(resolve_data_root(), "XAUUSD")

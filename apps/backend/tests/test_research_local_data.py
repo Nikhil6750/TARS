@@ -350,15 +350,16 @@ def _real_registry():
     return reg
 
 
-def test_h0004_unexecuted_unchanged_and_final_untouched():
+def test_h0004_frozen_executed_once_and_final_untouched():
+    """Phase 3C: H0004 was unexecuted. Phase 3D ran it exactly once (development + validation only). Invariants that must always hold:"""
     from research.config import resolve_data_root
     reg = _real_registry()
     r = reg.get("H0004")
     spec = reg.spec("H0004")
-    assert r["status"] == "PROPOSED" and r["results"] is None and r["warnings"] is None and r["data_version"] is None
-    assert r["spec_hash"] == "49635134306f040a466c955b8c70fb9112414680033494cdfb1a2f124fcb3bdd" == spec.spec_hash()
-    assert r["test_consumed"] == 0 and r["final_first_accessed_at"] is None
-    assert not [h for h in reg.history("H0004") if h["event"] in ("TEST_CONSUMED", "FINAL_ACCESSED") or h["event"].startswith("STATUS")]
+    assert r["spec_hash"] == "49635134306f040a466c955b8c70fb9112414680033494cdfb1a2f124fcb3bdd" == spec.spec_hash()       # never mutated
+    assert r["status"] in {"PROPOSED", "REJECTED"} and r["test_consumed"] == 0 and r["final_first_accessed_at"] is None   # final data never touched
+    events = [h["event"] for h in reg.history("H0004")]
+    assert "TEST_CONSUMED" not in events and "FINAL_ACCESSED" not in events and events.count("STATUS:PROPOSED->RUNNING") <= 1
     assert not (resolve_data_root() / "experiments" / "final_access.jsonl").exists()
     assert spec.data.provider == "dukascopy"                                         # never rewritten
 
