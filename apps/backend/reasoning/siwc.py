@@ -44,6 +44,20 @@ class SiwcError(RuntimeError):
     pass
 
 
+class TokenEndpointError(SiwcError):
+    def __init__(self, status: int, error: str) -> None:
+        super().__init__(f"token endpoint HTTP {status}" + (f" ({error})" if error else ""))
+        self.status, self.error = status, error
+
+
+class SiwcLoginFailure(SiwcError):
+    """Sign-in failed; `.finding` names the stage and `.report` is a fully scrubbed diagnostic record."""
+
+    def __init__(self, finding, report) -> None:
+        super().__init__(finding.line())
+        self.finding, self.report = finding, report
+
+
 def default_store_path() -> Path:
     override = os.environ.get("TARS_SIWC_STORE")
     if override:
@@ -147,24 +161,33 @@ def new_attempt(client_id: str | None, port: int = LOOPBACK_PORT) -> AuthAttempt
                        f"http://{LOOPBACK_HOST}:{port}{CALLBACK_PATH}", client_id or "dynamic_agent_client", client_id is None)
 
 
-def authorize_url(a: AuthAttempt, host_id: str) -> str:
+def authorize_url(a: AuthAttempt, host_id: str, *, id_token_hint: str | None = None, login_hint: str | None = None) -> str:
     q = {"client_id": a.client_id, "ext_agent_host_id": host_id, "response_type": "code", "redirect_uri": a.redirect_uri, "scope": SCOPE,
          "resource": RESOURCE, "state": a.state, "nonce": a.nonce, "code_challenge_method": "S256", "code_challenge": a.challenge}
     if a.registering:
         q["agent_name_hint"] = AGENT_NAME     # only during initial dynamic registration
+    elif id_token_hint:                        # returning sign-in: skips the account selector; the hint may be expired
+        q["id_token_hint"] = id_token_hint
+        if login_hint:
+            q["login_hint"] = login_hint
     return AUTHORIZE_URL + "?" + urllib.parse.urlencode(q)
 
 
 class _Callback(BaseHTTPRequestHandler):
     result: dict = {}
+    hits: list = []
 
     def do_GET(self):  # noqa: N802
+        from .siwc_diag import SENSITIVE_PARAMS, scrub
         u = urllib.parse.urlparse(self.path)
+        params = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+        type(self).hits.append({"path": u.path, "t": time.time(), "param_names": sorted(params),
+                                "safe_params": {k: ("<present>" if k in SENSITIVE_PARAMS else scrub(v, 120)) for k, v in params.items()}})
         if u.path != CALLBACK_PATH:
             self.send_response(404)
             self.end_headers()
             return
-        type(self).result = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+        type(self).result = params
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
@@ -202,7 +225,7 @@ async def _post_form(url: str, data: dict, transport=None, timeout: float = 20.0
             err = r.json().get("error", "")
         except ValueError:
             err = ""
-        raise SiwcError(f"token endpoint HTTP {r.status_code}" + (f" ({err})" if isinstance(err, str) and err else ""))
+        raise TokenEndpointError(r.status_code, err if isinstance(err, str) else "")
     return r.json()
 
 
@@ -253,28 +276,99 @@ async def refresh_credentials(creds: SiwcCredentials, *, transport=None) -> Siwc
 
 
 # ---- interactive login (needs a human + browser) ---------------------------------------------------------------------------
-async def login(store: CredentialStore | None = None, *, open_browser: bool = True, timeout_s: float = 300.0, jwk_client=None) -> SiwcCredentials:
+def _preflight(log, port: int) -> tuple[bool, list]:
+    """Local, credential-free checks: reachability, clock skew, loopback listener self-test. Returns (ok, findings)."""
+    from .siwc_diag import Finding
+    findings, ok = [], True
+    try:
+        r = httpx.get(OIDC_DISCOVERY_URL, timeout=15)
+        disc = r.json()
+        good = disc.get("authorization_endpoint") == AUTHORIZE_URL and disc.get("token_endpoint") == TOKEN_URL
+        log.add("PREFLIGHT", good, f"OIDC discovery HTTP {r.status_code}; endpoints match documented URLs: {good}")
+        ok &= good
+        date = r.headers.get("date")
+        if date:
+            from email.utils import parsedate_to_datetime
+            skew = abs((parsedate_to_datetime(date).timestamp()) - time.time())
+            log.add("PREFLIGHT", skew < 120, f"clock skew vs OpenAI server: {skew:.0f}s")
+            if skew >= 120:
+                findings.append(Finding("PREFLIGHT", "FAILED", "clock_skew", f"local clock differs from OpenAI by {skew:.0f}s: fix system time", []))
+                ok = False
+    except Exception as exc:
+        log.add("PREFLIGHT", False, f"cannot reach auth.openai.com discovery: {type(exc).__name__}")
+        findings.append(Finding("PREFLIGHT", "FAILED", "unreachable", "auth.openai.com is not reachable from this machine", [type(exc).__name__]))
+        ok = False
+    return ok, findings
+
+
+async def login(store: CredentialStore | None = None, *, open_browser: bool = True, timeout_s: float = 300.0, jwk_client=None, show_url: bool = False,
+                port: int = LOOPBACK_PORT, log=None, opener=webbrowser.open) -> SiwcCredentials:
+    from .siwc_diag import DiagLog, Finding, classify_callback, classify_timeout, classify_token_error, redact_url
     store = store or CredentialStore()
+    log = log or DiagLog()
     host_id = store.host_id()
-    a = new_attempt(store.issued_client_id())
-    server = HTTPServer((LOOPBACK_HOST, LOOPBACK_PORT), _Callback)   # listener starts BEFORE the browser opens
-    _Callback.result = {}
+    prior = store.load()
+    a = new_attempt(store.issued_client_id() if prior else None, port)
+    pre_ok, pre_findings = _preflight(log, port)
+    try:
+        server = HTTPServer((LOOPBACK_HOST, port), _Callback)   # listener starts BEFORE the browser opens
+    except OSError as exc:
+        f = Finding("PREFLIGHT", "FAILED", "port_in_use", f"cannot bind {LOOPBACK_HOST}:{port} ({exc.__class__.__name__}); another sign-in or tool (e.g. Codex login) holds the port",
+                    [], "close the other process and retry; only the port may vary after the first registration")
+        log.add("PREFLIGHT", False, f.summary)
+        raise SiwcLoginFailure(f, log.report([f]))
+    _Callback.result, _Callback.hits = {}, []
     th = threading.Thread(target=server.serve_forever, daemon=True)
     th.start()
+    launched = False
     try:
-        url = authorize_url(a, host_id)
-        print("Open this URL to sign in with ChatGPT (consent required):\n" + url)
+        # listener self-test with a synthetic request proves the callback stage works on this machine
+        try:
+            r = httpx.get(f"http://{LOOPBACK_HOST}:{port}{CALLBACK_PATH}?error=selftest", timeout=5)
+            log.add("CALLBACK", r.status_code == 200, "loopback listener self-test " + ("passed" if r.status_code == 200 else f"failed HTTP {r.status_code}"))
+        except Exception as exc:
+            log.add("CALLBACK", False, f"loopback listener self-test failed: {type(exc).__name__}")
+        _Callback.result, _Callback.hits = {}, []
+        url = authorize_url(a, host_id, id_token_hint=prior.id_token if prior else None, login_hint=prior.email_hint if prior else None)
+        log.add("REQUEST", True, "authorize request built: " + redact_url(url))
+        print("Opening the system browser for Sign in with ChatGPT (sign in, then approve the permissions).")
+        print("Request:", redact_url(url))
+        if show_url:
+            print("Manual URL:", url if not prior else url.split("&id_token_hint=")[0])
         if open_browser:
-            webbrowser.open(url)
+            launched = bool(opener(url))
+            log.add("BROWSER_AUTH", launched, "system browser launched" if launched else "system browser could not be launched")
         t0 = time.time()
+        beat = 0
         while not _Callback.result and time.time() - t0 < timeout_s:
             await asyncio.sleep(0.25)
+            if int(time.time() - t0) // 30 > beat:
+                beat += 1
+                log.add("BROWSER_AUTH", None, f"waiting for the browser to reach the loopback callback ({int(time.time() - t0)}s, listener hits: {len(_Callback.hits)})")
         if not _Callback.result:
-            raise SiwcError("sign-in timed out")
+            f = classify_timeout(_Callback.hits, pre_ok, launched)
+            log.add(f.stage, False, f.summary)
+            raise SiwcLoginFailure(f, log.report([*pre_findings, f]))
+        f = classify_callback(_Callback.result, expected_state=a.state, registering=a.registering)
+        log.add(f.stage, f.verdict == "OK", f.summary)
+        if f.verdict != "OK":
+            raise SiwcLoginFailure(f, log.report([*pre_findings, f]))
         code, client_id = validate_callback(_Callback.result, a)
     finally:
         server.shutdown()
-    creds = await exchange_code(a, code, client_id, host_id, jwk_client=jwk_client)
+        server.server_close()
+    try:
+        creds = await exchange_code(a, code, client_id, host_id, jwk_client=jwk_client)
+    except TokenEndpointError as exc:
+        f = classify_token_error(exc.status, exc.error)
+        log.add(f.stage, False, f.summary)
+        raise SiwcLoginFailure(f, log.report([f])) from exc
+    except SiwcError as exc:
+        stage = "PLAN_SCOPE" if REQUIRED_SCOPE in str(exc) else "ID_TOKEN"
+        f = Finding(stage, "FAILED", "validation_failed", str(exc)[:200], [])
+        log.add(stage, False, f.summary)
+        raise SiwcLoginFailure(f, log.report([f])) from exc
+    log.add("TOKEN_EXCHANGE", True, "tokens received, ID token verified, plan-usage scope granted")
     store.save(creds)
     return creds
 
@@ -314,12 +408,52 @@ class SiwcAuth:
                 return False
 
 
-def sign_out(store: CredentialStore | None = None) -> None:
-    """Forget local credentials. NOTE: the docs reviewed do not describe a token-revocation endpoint, so revocation server-side
-    must be done by the user in their ChatGPT account settings."""
-    (store or CredentialStore()).clear_credentials()
+async def revoke_refresh_token(creds: SiwcCredentials, *, transport=None, discovery: dict | None = None) -> bool:
+    """Docs ('End the renewable session'): POST token, token_type_hint=refresh_token, client_id to the discovery document's revocation_endpoint.
+    An empty HTTP 200 is success (also for an already-invalid token). Returns True only when revocation was confirmed."""
+    if not creds.refresh_token:
+        return True
+    try:
+        if discovery is None:
+            async with httpx.AsyncClient(timeout=15, transport=transport) as c:
+                discovery = (await c.get(OIDC_DISCOVERY_URL)).json()
+        endpoint = discovery["revocation_endpoint"]
+        async with httpx.AsyncClient(timeout=15, transport=transport) as c:
+            r = await c.post(endpoint, data={"token": creds.refresh_token, "token_type_hint": "refresh_token", "client_id": creds.client_id})
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
-if __name__ == "__main__":   # python -m reasoning.siwc  -> interactive sign-in
-    c = asyncio.run(login())
-    print(CredentialStore().status())
+async def sign_out(store: CredentialStore | None = None, *, transport=None) -> dict:
+    """Stop using the tokens: attempt remote revocation first, then clear the local tokens either way (keeping the client/host mapping)."""
+    store = store or CredentialStore()
+    creds = store.load()
+    confirmed = await revoke_refresh_token(creds, transport=transport) if creds else True
+    store.clear_credentials()
+    return {"signed_out": True, "remote_revocation_confirmed": confirmed,
+            "note": None if confirmed else "remote revocation was NOT confirmed; disconnect the app in ChatGPT Settings to be certain"}
+
+
+if __name__ == "__main__":   # python -m reasoning.siwc [--show-url] [--timeout 120]  -> interactive sign-in with stage diagnostics
+    import argparse
+    from .siwc_diag import DiagLog
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--show-url", action="store_true", help="print the full authorize URL for manual opening")
+    ap.add_argument("--timeout", type=float, default=300.0)
+    args = ap.parse_args()
+    dl = DiagLog()
+    try:
+        asyncio.run(login(show_url=args.show_url, timeout_s=args.timeout, log=dl))
+        print("SIGNED IN:", CredentialStore().status())
+    except SiwcLoginFailure as exc:
+        print("SIGN-IN FAILED AT STAGE:", exc.finding.line())
+        for line in exc.finding.evidence:
+            print("  evidence:", line)
+        if exc.finding.next_step:
+            print("  next step:", exc.finding.next_step)
+        out = default_store_path().with_name("siwc_last_diagnostic.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(exc.report, indent=1), encoding="utf-8")
+        print("  scrubbed diagnostic written to", out)
+        raise SystemExit(2)

@@ -15,7 +15,8 @@ from typing import Awaitable, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .openai_client import OpenAIAuthError, OpenAICancelled, OpenAIError, OpenAIResponsesClient, OpenAIUnavailable, OpenAIUsageLimit
+from .openai_client import (OpenAIAuthError, OpenAICancelled, OpenAIError, OpenAINotEligible, OpenAIResponsesClient, OpenAIUnavailable, OpenAIUnsupported,
+                            OpenAIUsageLimit)
 
 MAX_PACKET_CHARS = 14000
 Freshness = Literal["CURRENT", "STALE", "UNAVAILABLE"]
@@ -151,6 +152,10 @@ class TradingReviewService:
             return _err("auth", exc)
         except OpenAIUsageLimit as exc:
             return _err("usage_limit", exc)
+        except OpenAINotEligible as exc:
+            return _err("not_eligible", exc)
+        except OpenAIUnsupported as exc:
+            return _err("unsupported", exc)
         except OpenAICancelled as exc:
             return _err("cancelled", exc)
         except (OpenAIUnavailable, asyncio.TimeoutError, OpenAIError) as exc:

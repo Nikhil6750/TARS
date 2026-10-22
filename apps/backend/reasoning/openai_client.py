@@ -46,6 +46,36 @@ class OpenAICancelled(OpenAIError):
     kind = "cancelled"
 
 
+class OpenAINotEligible(OpenAIError):
+    kind = "not_eligible"   # subscription_sharing_user_not_eligible (403): explain the restriction; do NOT repeat the request or loop through OAuth
+
+
+class OpenAIUnsupported(OpenAIError):
+    kind = "unsupported"    # subscription_sharing_unsupported_capability (400) / route not supported: fix the request, never retry the same body
+
+
+# Documented structured codes (SIWC 'Errors and recovery'). Everything not listed falls through to status-based handling.
+_CODE_MAP = {
+    "subscription_sharing_user_not_eligible": OpenAINotEligible,
+    "subscription_sharing_usage_limit_exceeded": OpenAIUsageLimit,
+    "subscription_sharing_usage_unavailable": OpenAIUnavailable,
+    "subscription_sharing_user_unavailable": OpenAIUnavailable,
+    "subscription_sharing_unsupported_capability": OpenAIUnsupported,
+    "subscription_sharing_route_not_supported": OpenAIUnsupported,
+    "subscription_sharing_invalid_user": OpenAIAuthError,
+    "chatpass_v2_scope_not_authorized": OpenAIAuthError,
+    "chatpass_v2_invalid_authorization_context": OpenAIAuthError,
+}
+
+
+def raise_for_code(code: str, detail: str = "") -> None:
+    exc = _CODE_MAP.get(code)
+    if exc is not None:
+        raise exc(f"{code}{': ' + scrub(detail) if detail else ''}")
+    if code in USAGE_LIMIT_CODES:
+        raise OpenAIUsageLimit(code)
+
+
 class AuthSource(Protocol):
     mode: str
 
@@ -121,7 +151,7 @@ class OpenAIResponsesClient:
                      cancel: asyncio.Event | None = None) -> AsyncIterator[tuple[str, str]]:
         """Yield ('delta', text) chunks, then a final ('completed', full_text). Raises typed OpenAIError on any other terminal state."""
         body = {"model": model, "input": [{"role": "developer", "content": system}, {"role": "user", "content": user}], "stream": True, "store": False}
-        if max_output_tokens:
+        if max_output_tokens and self.auth.mode != "siwc":     # the plan-usage route REJECTS max_output_tokens (preview limitations)
             body["max_output_tokens"] = max_output_tokens
         for attempt in (0, 1):
             parts: list[str] = []
@@ -139,8 +169,9 @@ class OpenAIResponsesClient:
                         if r.status_code >= 400:
                             raw = (await r.aread()).decode("utf-8", "replace")
                             code = _error_code(raw)
-                            if code in USAGE_LIMIT_CODES:
-                                raise OpenAIUsageLimit(code)
+                            raise_for_code(code, _error_detail(raw))
+                            if r.status_code == 403:
+                                raise OpenAINotEligible(f"HTTP 403 admission refused: {scrub(raw)}")     # policy/region/permission check
                             raise OpenAIUnavailable(f"HTTP {r.status_code}: {scrub(raw)}") if r.status_code >= 500 else OpenAIError(f"HTTP {r.status_code}: {scrub(raw)}")
                         event = None
                         async for line in r.aiter_lines():
@@ -170,15 +201,13 @@ class OpenAIResponsesClient:
                                 return
                             elif kind == "response.failed":
                                 code = (obj.get("response", {}).get("error") or obj.get("error") or {}).get("code", "")
-                                if code in USAGE_LIMIT_CODES:
-                                    raise OpenAIUsageLimit(code)
+                                raise_for_code(code)
                                 raise OpenAIUnavailable(f"response.failed: {scrub(str(code))}")
                             elif kind == "response.incomplete":
                                 raise OpenAIUnavailable("response.incomplete: " + scrub(str(obj.get("response", {}).get("incomplete_details", ""))))
                             elif kind == "error":
                                 code = (obj.get("error") or obj).get("code", "") if isinstance(obj.get("error") or obj, dict) else ""
-                                if code in USAGE_LIMIT_CODES:
-                                    raise OpenAIUsageLimit(code)
+                                raise_for_code(code)
                                 raise OpenAIUnavailable("stream error: " + scrub(str(code)))
                         raise OpenAIUnavailable("stream ended before response.completed")
             except httpx.TimeoutException as exc:
@@ -207,6 +236,14 @@ class OpenAIResponsesClient:
         except asyncio.TimeoutError as exc:
             raise OpenAIUnavailable(f"deadline of {deadline}s exceeded") from exc
         return Completion(text, model, time.perf_counter() - t0, first, usage)
+
+
+def _error_detail(raw: str) -> str:
+    try:
+        err = json.loads(raw).get("error", {})
+        return err.get("param") or err.get("message") or ""
+    except ValueError:
+        return ""
 
 
 def _error_code(raw: str) -> str:
