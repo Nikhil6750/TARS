@@ -59,6 +59,9 @@ REPORT_TOOLS = {"desktop_open_app", "desktop_focus_window", "desktop_close_app",
                 "system_control", "browser_open_url", "browser_search", "web_navigate", "web_new_tab",
                 "pause_market_watching", "resume_market_watching", "watch_market", "unwatch_market"}
 FORCE_END_SILENCE_S = 1.2  # local-VAD silence after which an unanswered turn is ended by us, not the server
+LEAD_IN_AFTER_S = 1.6  # a long tool (reviewed analysis) with no speech yet this long after it started -> TARS says a truthful lead-in itself
+LEAD_IN_TOOLS = {"trading_intelligence": "Let me check that properly. One moment.", "ask_claude": "Let me think that through. One moment.",
+                 "analyze_market": "Let me pull that up. One moment."}
 ACK_ECHO_TAIL_S = 0.6  # room/speaker tail after the local confirmation ends
 END_SILENCE_MS = 400  # user-silence before Gemini commits the turn
 MIC_SILENT_AFTER_S = 90.0
@@ -81,6 +84,11 @@ Style
   "strategy" or anything long, say a brief lead-in ("Let me dig into that") and call ask_claude, then explain the
   result in plain natural speech. Never read markdown, bullets, asterisks or lists aloud: turn long analysis into
   two to four flowing sentences with the key takeaway first.
+- Trading conclusions are ALWAYS independently reviewed before you speak them. For any trading opinion, market outlook, "is X bullish/breaking
+  out", strategy or experiment question ("did H0004 survive validation") call trading_intelligence (say a brief lead-in first: "Let me check that
+  properly"). It returns `answer` (already short, natural and reviewed), `status` (APPROVED, QUALIFIED, WITHHELD, REJECTED_CLAIM or UNREVIEWED) and
+  `independently_reviewed`. Say `answer` in your own natural voice but keep its meaning and every caveat; NEVER add your own trading conclusion,
+  price or confidence number; if status is UNREVIEWED make clear it is unverified; if WITHHELD say you are not calling it and why.
 - Simple, structured questions never need Claude: "what's EURUSD bid/ask", "do I have a position", "what's my
   floating P&L", "what's my equity", "when is CPI", "any major events today", "latest gold news" -- answer those
   directly from get_mt5_state/get_market_context/get_economic_calendar/get_news. Call ask_claude only when the
@@ -246,6 +254,10 @@ def _tool_declarations():
              parameters=obj(hours_ahead=("INTEGER", "Look-ahead window in hours, default 24"))),
         decl(name="get_news", description="Recent financial news headlines from TARS's live news monitor, optionally filtered to one symbol. Use for 'check the latest news about X' -- prefer this over browser_search for financial headlines.",
              parameters=obj(symbol=("STRING", "Optional symbol/asset to filter by, e.g. XAUUSD or gold"))),
+        decl(name="trading_intelligence", description="Independently REVIEWED trading/research answer: gathers current evidence, asks Claude, has ChatGPT independently review it, and applies TARS's deterministic decision rules. Use for ANY trading opinion, market question needing a view, strategy question or research/experiment question (e.g. 'did H0004 survive validation', 'is gold bullish', 'what is gold doing right now'). Takes roughly 15-40 seconds; say a brief lead-in first. Returns a short natural `answer`, a `status` and whether it was independently reviewed. Speak the answer faithfully with its caveats; never add your own conclusion.",
+             parameters=obj(question=("STRING", "The user's question, in full"),
+                            symbol=("STRING", "Instrument if one is named or implied, e.g. gold or XAUUSD"),
+                            timeframe=("STRING", "Timeframe if given, e.g. 15m or H1"))),
         decl(name="ask_claude", description="Delegate deep trading/chart analysis, strategy research or complex synthesis to Claude. Pass `symbol` for trading questions (e.g. 'analyze gold considering the chart, my position, upcoming events and news') -- this builds the full real MT5+TradingView+Calendar+News evidence package for Claude in the same single call, rather than a separate call per source. Takes a few seconds.",
              parameters=obj(question=("STRING", "The full question to analyse"),
                             context=("STRING", "Optional extra context from the conversation"),
@@ -346,7 +358,7 @@ def _tool_declarations():
     ])]
 
 
-BASE_TOOL_NAMES = {"get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
+BASE_TOOL_NAMES = {"trading_intelligence", "get_market_context", "get_recent_events", "get_mt5_state", "get_tradingview_state",
                    "get_economic_calendar", "get_news", "ask_claude",
                    "analyze_market", "get_today_market_news", "explain_move",
                    "watch_market", "unwatch_market", "list_watched_markets",
@@ -449,6 +461,89 @@ class TarsTools:
                           "source": r["source"]} for r in rows]}
 
     async def ask_claude(self, question: str = "", context: str = "", symbol: str = "") -> dict:
+        """Deep reasoning. Anything that is a trading or research question is routed through the REVIEWED path - ask_claude can never be used to
+        obtain an unreviewed trading conclusion. Other deep questions (code, general reasoning) go straight to Claude."""
+        from reasoning.routing import IntentRiskRouter, Route
+        if symbol.strip() or IntentRiskRouter().route(question).route in (Route.TRADING_QUESTION, Route.RESEARCH_REQUEST):
+            return await self.trading_intelligence(question=question, symbol=symbol)
+        return await self._ask_claude_raw(question=question, context=context, symbol=symbol)
+
+    # ---- reviewed trading intelligence (Phase 3E) ----------------------------------------------------------------------------------
+    async def _intelligence(self):
+        """The shared IntelligenceService, built lazily by the app-provided factory (stored ChatGPT credentials + Claude + registry).
+        None when no factory is registered or ChatGPT is not connected - callers then label the answer UNREVIEWED."""
+        svc = getattr(self.state, "intelligence_service", None)
+        if svc is not None:
+            return svc
+        factory = getattr(self.state, "intelligence_factory", None)
+        if factory is None:
+            return None
+        lock = getattr(self.state, "_intelligence_lock", None)
+        if lock is None:
+            lock = self.state._intelligence_lock = asyncio.Lock()
+        async with lock:
+            svc = getattr(self.state, "intelligence_service", None)
+            if svc is None:
+                try:
+                    from reasoning.collectors import tars_state_collector
+                    svc = await factory()
+                    monitors, tv = getattr(self.state, "monitors", None), getattr(self.state, "tradingview_adapter", None)
+                    if monitors is not None:
+                        svc.add_collector("tars_state", tars_state_collector(monitors, tv, lambda q: getattr(self.desktop, "current_symbol", None)))
+                    self.state.intelligence_service = svc
+                except Exception as exc:
+                    logger.warning("intelligence service unavailable: %s", type(exc).__name__)
+                    return None
+        return svc
+
+    async def trading_intelligence(self, question: str = "", symbol: str = "", timeframe: str = "") -> dict:
+        question = (question or "").strip()
+        if not question:
+            return {"error": "empty question"}
+        # Resolve a spoken instrument against what this TARS instance really supports BEFORE any analysis; never guess a ticker.
+        monitors = getattr(self.state, "monitors", None)
+        if symbol.strip() and monitors is not None:
+            from trading.asset_resolver import AssetResolver
+            desktop = getattr(self, "desktop", None)
+            resolved = AssetResolver(monitors).resolve(symbol, active_symbol=getattr(desktop, "current_symbol", None) if desktop else None)
+            if resolved.outcome == "AMBIGUOUS":
+                names = ", ".join(resolved.candidates) or "more than one instrument"
+                return {"error": f"'{symbol}' matches more than one instrument ({names}) -- ask which one."}
+            if resolved.outcome == "NOT_FOUND":
+                return {"error": f"'{symbol}' isn't a tradable instrument TARS recognizes."}
+            symbol = resolved.symbol or symbol
+        svc = await self._intelligence()
+        if svc is None:
+            # ChatGPT review is unavailable: still answer, but say so loudly. Never present an unreviewed conclusion as reviewed.
+            raw = await self._ask_claude_raw(question=question, symbol=symbol)
+            if "answer" not in raw:
+                if "error" in raw:       # nothing was concluded (e.g. Claude down): pass the honest error through
+                    return {**raw, "status": "UNREVIEWED", "independently_reviewed": False}
+                return {"status": "UNREVIEWED", "independently_reviewed": False, "answer": "I can't give you a reliable answer right now: my analysis and my independent check are both unavailable."}
+            first = raw["answer"].split(". ")[0].strip(". ")
+            return {"status": "UNREVIEWED", "independently_reviewed": False, "flags": ["UNREVIEWED"],
+                    "answer": f"I couldn't get an independent check on this, so treat it as unverified. {first}.", "detail": raw["answer"][:1500]}
+        final = None
+        async for ev in svc.stream(question, instrument=(symbol or None), timeframe=(timeframe or None)):
+            if ev.kind == "FINAL":
+                final = ev
+        if final is None:
+            return {"status": "WITHHELD", "independently_reviewed": False, "answer": "I wasn't able to finish that check."}
+        d = final.data
+        return {"status": d.get("status", "DONE"), "answer": final.text, "independently_reviewed": bool(d.get("independently_reviewed")),
+                "flags": d.get("flags", []), "detail": (d.get("detail") or "")[:1500], "cached": bool(d.get("cached")), "path": d.get("path")}
+
+    async def _review_gate(self, question: str, answer: str, evidence: list, symbol: str, timeframe: str | None) -> dict:
+        """Run an already-produced trading answer through the independent review + decision rules."""
+        svc = await self._intelligence()
+        if svc is None:
+            first = answer.split(". ")[0].strip(". ")
+            return {"status": "UNREVIEWED", "independently_reviewed": False, "answer": f"I couldn't get an independent check on this, so treat it as unverified. {first}.", "detail": answer[:1500]}
+        decision, _review = await svc.review_existing(question, answer, evidence, instrument=symbol, timeframe=timeframe)
+        return {"status": decision.status.value, "independently_reviewed": decision.independently_reviewed, "answer": decision.spoken, "flags": decision.flags,
+                "detail": decision.detail[:1500]}
+
+    async def _ask_claude_raw(self, question: str = "", context: str = "", symbol: str = "") -> dict:
         turns = getattr(self.state, "turn_controller", None)
         if turns is None or not question.strip():
             return {"error": "Claude backend unavailable or empty question"}
@@ -536,6 +631,16 @@ class TarsTools:
         if result.status == "NOT_FOUND":
             return {"status": "NOT_FOUND", "error": f"'{query}' isn't a tradable instrument TARS recognizes."}
         if result.status in ("CHART_UNAVAILABLE", "SYMBOL_NOT_VERIFIED"):
+            # No chart to read - but a current quote/calendar may still exist. Answer through the REVIEWED path (which will say plainly that
+            # there is no chart evidence) instead of a dead end; if even that fails the original error is returned unchanged.
+            try:
+                fallback = await self.trading_intelligence(question=question or f"What is {query} doing right now?", symbol=query)
+            except Exception:
+                fallback = None
+            if fallback and fallback.get("answer") and fallback.get("status") not in (None, "DONE"):
+                fallback["chart_status"] = result.status
+                fallback["chart_detail"] = result.detail or "no chart read"
+                return fallback
             return {"status": result.status, "error": result.detail or "Couldn't set up the chart for that instrument."}
 
         # RESOLVED: persist follow-up context so "what about 5 minutes?" /
@@ -550,9 +655,17 @@ class TarsTools:
         ]
         if result.market_context is not None:
             self.desktop.last_relevant_news = result.market_context.news
+        from reasoning.review import EvidenceItem
+        now_iso = datetime.now(UTC).isoformat()
+        evidence = [EvidenceItem(name=f"chart_{o.timeframe}", kind="chart", as_of=now_iso, freshness="CURRENT", provenance="fresh TradingView capture analysed just now",
+                                 summary=str(o.analysis.market_context)[:600]) for o in result.observations]
+        limits = [f"timeframes that failed: {', '.join(result.timeframes_failed)}"] if result.timeframes_failed else []
+        gated = await self._review_gate(question or f"What is happening with {result.symbol}?", result.answer, evidence, result.symbol,
+                                        result.timeframes_analyzed[-1] if result.timeframes_analyzed else None)
         return {
-            "status": "DONE", "answer": result.answer[:3000], "symbol": result.symbol,
-            "timeframes_analyzed": result.timeframes_analyzed, "timeframes_failed": result.timeframes_failed,
+            "status": gated["status"], "answer": gated["answer"], "full_analysis": result.answer[:3000], "symbol": result.symbol,
+            "independently_reviewed": gated["independently_reviewed"], "flags": gated.get("flags", []), "review_detail": gated.get("detail", ""),
+            "timeframes_analyzed": result.timeframes_analyzed, "timeframes_failed": result.timeframes_failed, "limitations": limits,
         }
 
     async def get_today_market_news(self, asset: str = "") -> dict:
@@ -1186,12 +1299,17 @@ class GeminiLiveVoiceSession:
         if self.state in (VoiceState.LISTENING, VoiceState.USER_SPEAKING):
             await self.transition(VoiceState.THINKING)
         started = time.perf_counter()
+        lead_in = None
+        if self.ack_tts is not None and name in LEAD_IN_TOOLS:
+            lead_in = asyncio.create_task(self._lead_in(name, self.generation))
         try:
             result = await self.tools.call(name, args)
         except asyncio.CancelledError:
             raise
         finally:
             self._tool_tasks.pop(call.id, None)
+            if lead_in is not None:
+                lead_in.cancel()
         self.metrics.latest[f"tool_{name}_ms"] = round((time.perf_counter() - started) * 1000, 1)
         # UI-only signals (orb state, confirmation card). They never influence Gemini or the tools.
         from voice.activity import describe_tool_result
@@ -1251,6 +1369,20 @@ class GeminiLiveVoiceSession:
             raise
         except Exception as exc:
             logger.warning("report watchdog failed: %s", type(exc).__name__)
+
+    async def _lead_in(self, name: str, generation: int):
+        """Honest acknowledgement while a long reviewed analysis runs: only if Gemini has not already started speaking, never claims a result."""
+        try:
+            await asyncio.sleep(LEAD_IN_AFTER_S)
+            if (generation != self.generation or self.closed or self._first_audio or self.state is VoiceState.ASSISTANT_SPEAKING
+                    or self.state is VoiceState.USER_SPEAKING):
+                return
+            self.metrics.latest["lead_in_spoken"] = self.metrics.latest.get("lead_in_spoken", 0) + 1
+            await self._speak_ack(LEAD_IN_TOOLS[name], generation)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("lead-in failed: %s", type(exc).__name__)
 
     async def _speak_ack(self, text: str, generation: int):
         try:

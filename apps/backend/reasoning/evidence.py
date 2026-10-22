@@ -28,5 +28,5 @@ def experiment_evidence(registry, agent, hid: str) -> tuple[EvidenceItem, dict]:
     item = EvidenceItem(name=f"quant_agent_{hid}", kind="quant", as_of=row["updated_at"], freshness="CURRENT",
                         provenance=f"Quant Agent; data {pk.get('data_version')}; provider {spec.data.provider}; spec {pk['spec_hash'][:12]}; "
                                    f"periods dev {spec.development.start:%Y-%m-%d}..{spec.development.end:%Y-%m-%d}, val ..{spec.validation.end:%Y-%m-%d}",
-                    summary=summary[:900])
+                    summary=summary[:900], immutable=pk["status"] in ("REJECTED", "VALIDATED", "FAILED"))
     return item, quant

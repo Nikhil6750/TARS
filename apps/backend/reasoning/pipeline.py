@@ -15,9 +15,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import AsyncIterator, Awaitable, Callable
 
+from .cache import ResearchAnswerCache, cache_key
 from .decision import Decision, DecisionEngine
 from .review import EvidenceItem, EvidencePacket, ReviewResult, TradingReviewService
 from .routing import IntentRiskRouter, Route, RouteDecision
+
+PATH_OF = {Route.SIMPLE_ACTION: "FAST", Route.CHAT: "CONVERSATION", Route.TRADING_QUESTION: "RESEARCH", Route.RESEARCH_REQUEST: "RESEARCH"}
 
 Collector = Callable[[str], Awaitable[EvidenceItem]]
 ClaudeFn = Callable[[EvidencePacket], Awaitable[dict]]            # -> {"text": str, "claims_edge": bool, "assumptions": [...], "limitations": [...]}
@@ -51,23 +54,31 @@ class LatencyBook:
 class IntelligencePipeline:
     def __init__(self, *, router: IntentRiskRouter | None = None, local_exec: LocalExec | None = None, chat: ChatStream | None = None,
                  collectors: dict[str, Collector] | None = None, claude: ClaudeFn | None = None, reviewer: TradingReviewService | None = None,
-                 engine: DecisionEngine | None = None, collector_timeout_s: float = 4.0, claude_timeout_s: float = 90.0, store_decision=None) -> None:
+                 engine: DecisionEngine | None = None, collector_timeout_s: float = 4.0, claude_timeout_s: float = 90.0, store_decision=None,
+                 cache: ResearchAnswerCache | None = None, cache_model: str | None = None) -> None:
         self.router = router or IntentRiskRouter()
         self.local_exec, self.chat, self.collectors = local_exec, chat, collectors or {}
         self.claude, self.reviewer, self.engine = claude, reviewer, engine or DecisionEngine()
         self.collector_timeout_s, self.claude_timeout_s = collector_timeout_s, claude_timeout_s
         self.latency = LatencyBook()
         self.store_decision = store_decision
+        self.cache, self.cache_model = cache, cache_model
         self.last_decision: Decision | None = None
-        self.calls = {"claude": 0, "review": 0, "gemini": 0, "local": 0}
+        self.calls = {"claude": 0, "review": 0, "gemini": 0, "local": 0, "cache_hit": 0}
 
     async def _collect(self, question: str) -> list[EvidenceItem]:
-        async def one(name: str, fn: Collector) -> EvidenceItem:
+        async def one(name: str, fn: Collector) -> EvidenceItem | None:
             try:
                 return await asyncio.wait_for(fn(question), timeout=self.collector_timeout_s)
             except Exception as exc:       # degrade, never block, never invent
                 return EvidenceItem(name=name, freshness="UNAVAILABLE", summary=f"collector failed: {type(exc).__name__}")
-        return list(await asyncio.gather(*(one(n, f) for n, f in self.collectors.items())))
+        results = await asyncio.gather(*(one(n, f) for n, f in self.collectors.items()))
+        flat: list[EvidenceItem] = []
+        for r in results:
+            if r is None:
+                continue
+            flat.extend(r if isinstance(r, list) else [r])
+        return flat
 
     async def stream(self, text: str, cancel: asyncio.Event | None = None, *, instrument: str | None = None, timeframe: str | None = None) -> AsyncIterator[Event]:
         t0 = time.perf_counter()
@@ -83,7 +94,7 @@ class IntelligencePipeline:
             self.latency.add("local_command", time.perf_counter() - t1)
             self.latency.add("first_safe_output", now())
             self.latency.add("end_to_end", now())
-            yield Event("FINAL", result or "Done.", now(), {"route": rd.route.value, "models": []})
+            yield Event("FINAL", result or "Done.", now(), {"route": rd.route.value, "path": "FAST", "models": []})
             return
 
         if rd.route is Route.CHAT:
@@ -98,7 +109,7 @@ class IntelligencePipeline:
                     self.latency.add("first_safe_output", first)
                 yield Event("DELTA", chunk, now())
             self.latency.add("end_to_end", now())
-            yield Event("FINAL", "", now(), {"route": rd.route.value, "models": ["gemini"]})
+            yield Event("FINAL", "", now(), {"route": rd.route.value, "path": "CONVERSATION", "models": ["conversation"]})
             return
 
         # ---- trading / research: honest acknowledgement first, conclusion only after the decision engine ----------------
@@ -111,6 +122,15 @@ class IntelligencePipeline:
             yield Event("CANCELLED", "", now())
             return
         yield Event("PROGRESS", f"Collected {sum(e.freshness == 'CURRENT' for e in evidence)}/{len(evidence)} current evidence sources.", now())
+        ckey = cache_key(text, evidence, self.cache_model or "") if self.cache is not None else None
+        hit = self.cache.get(ckey) if ckey else None
+        if hit is not None:         # identical immutable evidence, same model/prompt: the reviewed answer cannot have changed
+            self.calls["cache_hit"] += 1
+            self.latency.add("cache_hit", now())
+            self.latency.add("end_to_end", now())
+            yield Event("FINAL", hit["spoken"], now(), {"route": rd.route.value, "path": "RESEARCH", "status": hit["status"], "detail": hit["detail"], "flags": hit["flags"] + ["CACHED"],
+                                                        "independently_reviewed": True, "cached": True, "cached_at": hit["stored_at"], "review_model": hit["review_model"]})
+            return
 
         packet = EvidencePacket(question=text[:600], instrument=instrument, timeframe=timeframe, evidence=evidence, consequential=True)
         analysis = {"text": "", "claims_edge": False, "assumptions": [], "limitations": []}
@@ -142,8 +162,11 @@ class IntelligencePipeline:
         decision = self.engine.decide(packet, review)
         self.latency.add("decision", time.perf_counter() - t1)
         self.last_decision = decision
+        if self.cache is not None and ckey:
+            self.cache.put(ckey, packet, decision, review)
         if self.store_decision:
             self.store_decision(decision, packet, review)
         self.latency.add("end_to_end", now())
-        yield Event("FINAL", decision.spoken, now(), {"route": rd.route.value, "status": decision.status.value, "detail": decision.detail,
-                                                      "flags": decision.flags, "independently_reviewed": decision.independently_reviewed})
+        yield Event("FINAL", decision.spoken, now(), {"route": rd.route.value, "path": "RESEARCH", "status": decision.status.value, "detail": decision.detail,
+                                                      "flags": decision.flags, "independently_reviewed": decision.independently_reviewed,
+                                                      "review_model": getattr(review, "model", None), "review_fallback_from": getattr(review, "fallback_from", None)})

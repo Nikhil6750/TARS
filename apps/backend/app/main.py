@@ -397,6 +397,14 @@ async def lifespan(app: FastAPI):
         app.state.tradingview_adapter = None
 
     from trading.asset_resolver import AssetResolver
+    # Reviewed trading intelligence (Phase 3E): a LAZY factory only. Nothing is contacted at startup; the first consequential trading/research
+    # question builds the service from the stored ChatGPT sign-in + Claude + the research registry. Without it answers are labelled UNREVIEWED.
+    async def _build_intelligence():
+        from reasoning.service import IntelligenceService
+        return await IntelligenceService.from_environment()
+    app.state.intelligence_factory = _build_intelligence
+    app.state.intelligence_service = None
+
     from trading.market_explainer import MarketExplainerOrchestrator
 
     if app.state.tradingview_adapter is not None:

@@ -79,9 +79,15 @@ class SiwcCredentials:
     saved_at: float
     ext_agent_host_id: str
     email_hint: str = ""
+    earliest_refresh_at: float = 0.0     # token response field: do not refresh before this instant (0 = unknown)
 
     def expired(self, skew: float = REFRESH_SKEW_S) -> bool:
-        return time.time() >= self.expires_at - skew
+        """True when the access token should be renewed: near/after expiry AND not before earliest_refresh_at."""
+        now = time.time()
+        return now >= self.expires_at - skew and now >= self.earliest_refresh_at
+
+    def hard_expired(self) -> bool:
+        return time.time() >= self.expires_at
 
 
 class CredentialStore:
@@ -154,6 +160,26 @@ def _restrict_acl(path: Path) -> bool:
 
 
 # ---- PKCE / URLs -------------------------------------------------------------------------------------------------------
+# Documented terminal refresh failures (siwc 'Errors and recovery'): the refresh token is unusable, so OAuth must be repeated.
+TERMINAL_REFRESH_ERRORS = {"invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused"}
+
+
+def parse_instant(value) -> float:
+    """earliest_refresh_at may be epoch seconds or an ISO-8601 string; unknown/garbage -> 0 (no restriction)."""
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        from datetime import datetime, timezone
+        d = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+    except ValueError:
+        return 0.0
+
+
 def _b64url(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
@@ -265,7 +291,8 @@ def credentials_from_token_response(tok: dict, claims: dict, client_id: str, hos
         raise SiwcError(f"granted scopes lack {REQUIRED_SCOPE}: a valid ID token alone does not grant plan usage")
     now = time.time()
     return SiwcCredentials(client_id, claims["sub"], tok["id_token"], tok["access_token"], tok.get("refresh_token", ""), tok.get("token_type", "Bearer"),
-                           now + float(tok.get("expires_in", 3600)), scopes, now, host_id, email_hint=claims.get("email", ""))
+                           now + float(tok.get("expires_in", 3600)), scopes, now, host_id, email_hint=claims.get("email", ""),
+                           earliest_refresh_at=parse_instant(tok.get("earliest_refresh_at")))
 
 
 async def exchange_code(a: AuthAttempt, code: str, client_id: str, host_id: str, *, transport=None, jwk_client=None) -> SiwcCredentials:
@@ -286,7 +313,8 @@ async def refresh_credentials(creds: SiwcCredentials, *, transport=None) -> Siwc
         raise SiwcError("refreshed credentials lost the plan-usage scope")
     now = time.time()
     return SiwcCredentials(creds.client_id, creds.sub, tok.get("id_token", creds.id_token), tok["access_token"], tok.get("refresh_token", creds.refresh_token),
-                           tok.get("token_type", creds.token_type), now + float(tok.get("expires_in", 3600)), scopes, now, creds.ext_agent_host_id, creds.email_hint)
+                           tok.get("token_type", creds.token_type), now + float(tok.get("expires_in", 3600)), scopes, now, creds.ext_agent_host_id, creds.email_hint,
+                           earliest_refresh_at=parse_instant(tok.get("earliest_refresh_at")))
 
 
 # ---- interactive login (needs a human + browser) ---------------------------------------------------------------------------
@@ -388,37 +416,66 @@ async def login(store: CredentialStore | None = None, *, open_browser: bool = Tr
 
 
 class SiwcAuth:
-    """AuthSource backed by stored SIWC credentials with serialized, rotating refresh."""
+    """AuthSource backed by stored SIWC credentials with serialized, rotating refresh.
+
+    Credentials are deleted ONLY when the refresh token is proven unusable (documented terminal codes) AND the access token can no longer be
+    used. Network/5xx/early-refresh failures keep the session (docs: 'Don't delete credentials over temporary network or infrastructure failures')."""
     mode = "siwc"
 
     def __init__(self, store: CredentialStore | None = None, transport=None) -> None:
         self.store, self._transport, self._lock = store or CredentialStore(), transport, asyncio.Lock()
+        self.last_refresh: dict = {}      # non-secret telemetry for diagnostics/tests
+
+    async def _refresh_and_save(self, c: SiwcCredentials) -> SiwcCredentials:
+        new = await refresh_credentials(c, transport=self._transport)
+        self.store.save(new)              # persist the rotated refresh token BEFORE anything else uses it
+        self.last_refresh = {"ok": True, "at": time.time()}
+        return new
 
     async def bearer(self) -> str:
-        from .openai_client import OpenAIAuthError
+        from .openai_client import OpenAIAuthError, OpenAIUnavailable
         async with self._lock:
             c = self.store.load()
             if c is None:
                 raise OpenAIAuthError("not signed in with ChatGPT")
-            if c.expired():
-                try:
-                    c = await refresh_credentials(c, transport=self._transport)
-                except SiwcError as exc:
+            if not c.expired():
+                return c.access_token
+            try:
+                c = await self._refresh_and_save(c)
+            except TokenEndpointError as exc:
+                self.last_refresh = {"ok": False, "status": exc.status, "error": exc.error, "terminal": exc.error in TERMINAL_REFRESH_ERRORS}
+                if exc.error in TERMINAL_REFRESH_ERRORS and c.hard_expired():
                     self.store.clear_credentials()
-                    raise OpenAIAuthError(f"ChatGPT session expired and could not be refreshed: {exc}") from exc
-                self.store.save(c)
+                    raise OpenAIAuthError(f"ChatGPT session expired and cannot be renewed ({exc.error}); sign in again") from exc
+                if c.hard_expired():
+                    raise OpenAIUnavailable(f"could not renew the ChatGPT session right now ({exc.error or exc.status}); will retry") from exc
+                # still-valid access token: keep using it, keep the credentials, try the refresh again later
+            except SiwcError as exc:
+                self.last_refresh = {"ok": False, "error": type(exc).__name__}
+                if c.hard_expired():
+                    raise OpenAIUnavailable(f"could not renew the ChatGPT session right now: {type(exc).__name__}") from exc
+            except httpx.HTTPError as exc:
+                self.last_refresh = {"ok": False, "error": type(exc).__name__}
+                if c.hard_expired():
+                    raise OpenAIUnavailable(f"could not reach OpenAI to renew the session: {type(exc).__name__}") from exc
             return c.access_token
 
     async def on_unauthorized(self) -> bool:
+        """The server rejected the access token (401): renew once. True -> caller may retry the request."""
         async with self._lock:
             c = self.store.load()
             if c is None:
                 return False
             try:
-                self.store.save(await refresh_credentials(c, transport=self._transport))
+                await self._refresh_and_save(c)
                 return True
-            except SiwcError:
-                self.store.clear_credentials()    # revoked: forget it so status() tells the truth
+            except TokenEndpointError as exc:
+                self.last_refresh = {"ok": False, "status": exc.status, "error": exc.error, "terminal": exc.error in TERMINAL_REFRESH_ERRORS}
+                if exc.error in TERMINAL_REFRESH_ERRORS:
+                    self.store.clear_credentials()      # revoked/expired for real: forget it so status() tells the truth
+                return False
+            except (SiwcError, httpx.HTTPError) as exc:
+                self.last_refresh = {"ok": False, "error": type(exc).__name__}
                 return False
 
 

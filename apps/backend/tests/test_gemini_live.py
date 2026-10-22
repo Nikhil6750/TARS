@@ -224,7 +224,8 @@ def test_tools_are_bounded_and_none_can_trade():
             "analyze_market", "get_today_market_news", "explain_move",
             "watch_market", "unwatch_market", "list_watched_markets",
             "pause_market_watching", "resume_market_watching",
-            "get_watcher_status", "get_daily_market_brief"}
+            "get_watcher_status", "get_daily_market_brief",
+            "trading_intelligence"}          # Phase 3E: independently reviewed trading/research answers (read-only)
     assert TOOL_NAMES == base | DESKTOP_TOOL_NAMES
     assert not any(re.search(r"trade|order|buy|sell", n) for n in TOOL_NAMES)
     for name in ("voice/gemini_live.py", "voice/desktop_tools.py"):
@@ -250,7 +251,9 @@ async def test_tars_tools_report_missing_sources_truthfully_and_ask_claude_deleg
     tools = TarsTools(SimpleNamespace(monitors=Monitors(), turn_controller=Turns()), "s1")
     ctx = await tools.call("get_market_context", {"symbol": "eurusd"})
     assert ctx["quote"] is None and "MT5 DISCONNECTED" in ctx["quote_note"]
-    assert (await tools.call("ask_claude", {"question": "EURUSD outlook?"}))["answer"] == "Claude says range-bound."
+    out = await tools.call("ask_claude", {"question": "EURUSD outlook?"})      # a trading question: routed through mandatory review
+    assert out["status"] == "UNREVIEWED" and out["independently_reviewed"] is False and out["detail"] == "Claude says range-bound."
+    assert out["answer"] == "I couldn't get an independent check on this, so treat it as unverified. Claude says range-bound."
     assert "error" in await tools.call("place_trade", {})
 
 
@@ -280,7 +283,8 @@ async def test_ask_claude_with_symbol_builds_one_market_context_evidence_package
 
     tools = TarsTools(SimpleNamespace(monitors=Monitors(), tradingview_adapter=Adapter(), turn_controller=Turns()), "s1")
     out = await tools.call("ask_claude", {"question": "analyze gold", "symbol": "XAUUSD"})
-    assert out["answer"] == "Gold is holding near highs."
+    assert out["status"] == "UNREVIEWED" and out["independently_reviewed"] is False and out["detail"] == "Gold is holding near highs."
+    assert out["answer"].endswith("treat it as unverified. Gold is holding near highs.")
     # The real evidence landed in the single prompt sent to Claude -- not a separate call per source.
     assert "2650.0" in captured["text"] and "2650.5" in captured["text"]
     assert "CPI" in captured["text"]
@@ -316,7 +320,7 @@ async def test_ask_claude_resolves_a_spoken_asset_name_not_just_an_exact_ticker(
 
     tools = TarsTools(SimpleNamespace(monitors=Monitors(), tradingview_adapter=Adapter(), turn_controller=Turns()), "s1")
     out = await tools.call("ask_claude", {"question": "what's happening", "symbol": "gold"})
-    assert out["answer"] == "Gold is quiet."
+    assert out["status"] == "UNREVIEWED" and out["detail"] == "Gold is quiet." and out["answer"].endswith("unverified. Gold is quiet.")
     assert "2650.0" in captured["text"]  # the XAUUSD evidence package was actually built
 
 
@@ -382,8 +386,9 @@ async def test_analyze_market_delegates_to_the_orchestrator_and_persists_follow_
     tools = TarsTools(SimpleNamespace(market_explainer=orchestrator), "s1")
     out = await tools.call("analyze_market", {"asset": "gold", "timeframe": "15m"})
 
-    assert out["status"] == "DONE"
-    assert out["answer"] == "Gold is quiet today."
+    assert out["status"] == "UNREVIEWED"   # DONE before Phase 3E: the synthesis is now reviewed (or labelled unreviewed) before it is spoken
+    assert out["status"] == "UNREVIEWED" and out["independently_reviewed"] is False       # the chart synthesis is gated by the independent review
+    assert out["full_analysis"] == "Gold is quiet today." and out["answer"].endswith("unverified. Gold is quiet today.")
     assert tools.desktop.current_symbol == "XAUUSD"
     assert tools.desktop.current_trading_app == "TradingView"
     assert tools.desktop.current_timeframe == "15m"
@@ -415,7 +420,7 @@ async def test_analyze_market_follow_up_omits_asset_and_reuses_current_symbol():
 
     out = await tools.call("analyze_market", {"timeframe": "5m"})  # no asset named
 
-    assert out["status"] == "DONE"
+    assert out["status"] == "UNREVIEWED"   # DONE before Phase 3E: the synthesis is now reviewed (or labelled unreviewed) before it is spoken
     assert orchestrator.calls[0][0] == "EURUSD"  # reused, not asked to repeat
 
 

@@ -103,6 +103,8 @@ def describe_tool_call(name: str, args: dict) -> str:
         return "Watching this chart…"
     if name == "ask_claude":
         return "Thinking it through…"
+    if name == "trading_intelligence":
+        return "Checking the evidence and getting an independent review…"
     if name == "analyze_market":
         asset = str(args.get("asset") or "").strip()
         return f"Analyzing {asset}…" if asset else "Analyzing the market…"
@@ -131,8 +133,12 @@ def describe_tool_result(name: str, args: dict, status: str) -> str:
     (mission: "✓ Done" / "! Couldn't find Calculator"). Uses only the real
     target already present in this call's own arguments -- never a made-up
     reason."""
-    if status == "DONE":
-        return "Done"
+    if status in ("DONE", "APPROVED", "QUALIFIED"):
+        return "Done" if status == "DONE" else ("Reviewed" if status == "APPROVED" else "Reviewed, with caveats")
+    if status == "UNREVIEWED":
+        return "Answered, not independently reviewed"
+    if status in ("WITHHELD", "REJECTED_CLAIM"):
+        return "Not calling it" if status == "WITHHELD" else "Claim rejected by the numbers"
     target = str(args.get("target") or args.get("url") or args.get("query") or args.get("asset") or "").strip()
     if status == "NOT_FOUND":
         return f"Couldn't find {target}" if target else "Couldn't find that"

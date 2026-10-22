@@ -112,12 +112,40 @@ class Completion:
     usage: dict = field(default_factory=dict)
 
 
-class OpenAIResponsesClient:
-    def __init__(self, auth: AuthSource, *, base_url: str = BASE_URL, timeout: float = 60.0, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        self.auth, self.base_url, self.timeout, self._transport = auth, base_url.rstrip("/"), timeout, transport
+class _SharedCtx:
+    """Async-context wrapper that hands out a long-lived client WITHOUT closing it on exit."""
 
-    def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=10.0), transport=self._transport)
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self._c = client
+
+    async def __aenter__(self) -> httpx.AsyncClient:
+        return self._c
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+class OpenAIResponsesClient:
+    def __init__(self, auth: AuthSource, *, base_url: str = BASE_URL, timeout: float = 60.0, transport: httpx.AsyncBaseTransport | None = None,
+                 persistent: bool = True) -> None:
+        self.auth, self.base_url, self.timeout, self._transport = auth, base_url.rstrip("/"), timeout, transport
+        self.persistent = persistent and transport is None     # keep-alive saves a TLS handshake on every call; tests with mock transports stay per-call
+        self._shared: httpx.AsyncClient | None = None
+        self._shared_loop: asyncio.AbstractEventLoop | None = None
+
+    def _client(self):
+        timeout = httpx.Timeout(self.timeout, connect=10.0)
+        if not self.persistent:
+            return httpx.AsyncClient(timeout=timeout, transport=self._transport)
+        loop = asyncio.get_running_loop()
+        if self._shared is None or self._shared_loop is not loop or self._shared.is_closed:
+            self._shared, self._shared_loop = httpx.AsyncClient(timeout=timeout, limits=httpx.Limits(max_keepalive_connections=4, keepalive_expiry=120)), loop
+        return _SharedCtx(self._shared)
+
+    async def aclose(self) -> None:
+        if self._shared is not None and not self._shared.is_closed and self._shared_loop is asyncio.get_running_loop():
+            await self._shared.aclose()
+        self._shared = None
 
     async def _headers(self) -> dict:
         return {"Authorization": f"Bearer {await self.auth.bearer()}", "Content-Type": "application/json"}
@@ -148,9 +176,12 @@ class OpenAIResponsesClient:
 
     # ---- streaming inference ---------------------------------------------------------------------------------------
     async def stream(self, model: str, system: str, user: str, *, max_output_tokens: int | None = 1500,
-                     cancel: asyncio.Event | None = None) -> AsyncIterator[tuple[str, str]]:
+                     cancel: asyncio.Event | None = None, reasoning_effort: str | None = None, history: list[dict] | None = None) -> AsyncIterator[tuple[str, str]]:
         """Yield ('delta', text) chunks, then a final ('completed', full_text). Raises typed OpenAIError on any other terminal state."""
-        body = {"model": model, "input": [{"role": "developer", "content": system}, {"role": "user", "content": user}], "stream": True, "store": False}
+        turns = [{"role": t["role"], "content": t["content"]} for t in (history or []) if t.get("role") in ("user", "assistant")]
+        body = {"model": model, "input": [{"role": "developer", "content": system}, *turns, {"role": "user", "content": user}], "stream": True, "store": False}
+        if reasoning_effort:
+            body["reasoning"] = {"effort": reasoning_effort}
         if max_output_tokens and self.auth.mode != "siwc":     # the plan-usage route REJECTS max_output_tokens (preview limitations)
             body["max_output_tokens"] = max_output_tokens
         for attempt in (0, 1):
@@ -217,14 +248,14 @@ class OpenAIResponsesClient:
         raise OpenAIAuthError("unreachable")
 
     async def complete(self, model: str, system: str, user: str, *, max_output_tokens: int | None = 1500,
-                       cancel: asyncio.Event | None = None, deadline: float | None = None) -> Completion:
+                       cancel: asyncio.Event | None = None, deadline: float | None = None, reasoning_effort: str | None = None) -> Completion:
         t0 = time.perf_counter()
         first: float | None = None
         text, usage = "", {}
 
         async def run():
             nonlocal first, text, usage
-            async for kind, payload in self.stream(model, system, user, max_output_tokens=max_output_tokens, cancel=cancel):
+            async for kind, payload in self.stream(model, system, user, max_output_tokens=max_output_tokens, cancel=cancel, reasoning_effort=reasoning_effort):
                 if kind == "delta" and first is None:
                     first = time.perf_counter() - t0
                 elif kind == "completed":

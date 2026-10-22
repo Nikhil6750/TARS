@@ -348,3 +348,96 @@ async def test_reviewer_surfaces_new_error_kinds(exc, kind):
     from tests.test_reasoning_phase3d import packet
     r = await TradingReviewService(llm=llm).review(packet())
     assert r.verdict is Verdict.ERROR and r.error_kind == kind
+
+
+# ============================ refresh safety (Phase 3E) ===============================================================================
+def _creds(**kw):
+    base = dict(client_id="oaiapp_x", sub="u", id_token="id", access_token="OLD-ACCESS", refresh_token="OLD-REFRESH", token_type="Bearer", expires_at=time_now() - 10,
+                scopes=[siwc.REQUIRED_SCOPE], saved_at=time_now(), ext_agent_host_id="urn:uuid:h")
+    base.update(kw)
+    return siwc.SiwcCredentials(**base)
+
+
+def time_now():
+    import time
+    return time.time()
+
+
+def token_ok(**extra):
+    return lambda req: httpx.Response(200, json={"access_token": "NEW-ACCESS", "refresh_token": "NEW-REFRESH", "expires_in": 3600, "scope": siwc.REQUIRED_SCOPE, **extra})
+
+
+async def test_parse_instant_accepts_epoch_and_iso_and_ignores_garbage():
+    assert siwc.parse_instant(1790036132) == 1790036132.0 and siwc.parse_instant("1790036132") == 1790036132.0
+    assert siwc.parse_instant("2026-10-22T11:00:00Z") == pytest.approx(1792666800.0, abs=1) or siwc.parse_instant("2026-10-22T11:00:00Z") > 1.7e9
+    assert siwc.parse_instant(None) == siwc.parse_instant("") == siwc.parse_instant("not a time") == 0.0
+
+
+async def test_refresh_does_not_start_before_earliest_refresh_at(tmp_path):
+    st = siwc.CredentialStore(tmp_path / "c.json")
+    st.save(_creds(expires_at=time_now() + 30, earliest_refresh_at=time_now() + 600))        # inside the skew window but refresh not yet allowed
+    calls = []
+    auth = siwc.SiwcAuth(st, transport=httpx.MockTransport(lambda r: calls.append(1) or token_ok()(r)))
+    assert await auth.bearer() == "OLD-ACCESS" and calls == []                                   # keeps using the still-valid token
+    st.save(_creds(expires_at=time_now() + 30, earliest_refresh_at=time_now() - 1))
+    assert await auth.bearer() == "NEW-ACCESS" and calls == [1]
+
+
+async def test_successful_refresh_rotates_and_persists_all_fields_and_the_new_earliest(tmp_path):
+    st = siwc.CredentialStore(tmp_path / "c.json")
+    st.save(_creds())
+    auth = siwc.SiwcAuth(st, transport=httpx.MockTransport(token_ok(earliest_refresh_at=time_now() + 3000)))
+    assert await auth.bearer() == "NEW-ACCESS"
+    c = st.load()
+    assert c.access_token == "NEW-ACCESS" and c.refresh_token == "NEW-REFRESH" and c.earliest_refresh_at > time_now() + 2000 and not c.hard_expired()
+    assert auth.last_refresh["ok"] is True
+
+
+async def test_transient_refresh_failure_keeps_the_session_and_the_still_valid_token(tmp_path):
+    st = siwc.CredentialStore(tmp_path / "c.json")
+    st.save(_creds(expires_at=time_now() + 30))                                                  # near expiry but still valid
+    auth = siwc.SiwcAuth(st, transport=httpx.MockTransport(lambda r: httpx.Response(503, json={"error": "temporarily_unavailable"})))
+    assert await auth.bearer() == "OLD-ACCESS"
+    assert st.status()["signed_in"] is True and auth.last_refresh["ok"] is False and auth.last_refresh["terminal"] is False
+
+
+async def test_network_failure_on_hard_expiry_is_unavailable_not_signed_out(tmp_path):
+    st = siwc.CredentialStore(tmp_path / "c.json")
+    st.save(_creds())                                                                             # already hard-expired
+
+    def boom(req):
+        raise httpx.ConnectError("down")
+    auth = siwc.SiwcAuth(st, transport=httpx.MockTransport(boom))
+    with pytest.raises(OpenAIUnavailable, match="could not reach OpenAI"):
+        await auth.bearer()
+    assert st.status()["signed_in"] is True                                                       # credentials survive an outage
+
+
+@pytest.mark.parametrize("code", sorted(siwc.TERMINAL_REFRESH_ERRORS))
+async def test_every_documented_terminal_refresh_error_signs_out_only_when_the_token_is_dead(tmp_path, code):
+    st = siwc.CredentialStore(tmp_path / "c.json")
+    handler = lambda r: httpx.Response(400, json={"error": code})
+    st.save(_creds(expires_at=time_now() + 30))                                                   # token still valid: do NOT delete yet
+    assert await siwc.SiwcAuth(st, transport=httpx.MockTransport(handler)).bearer() == "OLD-ACCESS" and st.status()["signed_in"] is True
+    st.save(_creds())                                                                             # hard-expired: now it is truly dead
+    with pytest.raises(OpenAIAuthError):
+        await siwc.SiwcAuth(st, transport=httpx.MockTransport(handler)).bearer()
+    assert st.status()["signed_in"] is False
+
+
+async def test_401_then_transient_refresh_failure_keeps_credentials_but_does_not_retry(tmp_path):
+    st = siwc.CredentialStore(tmp_path / "c.json")
+    st.save(_creds(expires_at=time_now() + 3000))
+    auth = siwc.SiwcAuth(st, transport=httpx.MockTransport(lambda r: httpx.Response(500)))
+    assert await auth.on_unauthorized() is False and st.status()["signed_in"] is True
+    auth2 = siwc.SiwcAuth(st, transport=httpx.MockTransport(lambda r: httpx.Response(400, json={"error": "refresh_token_reused"})))
+    assert await auth2.on_unauthorized() is False and st.status()["signed_in"] is False
+
+
+async def test_old_credential_files_without_earliest_refresh_at_still_load(tmp_path):
+    st = siwc.CredentialStore(tmp_path / "c.json")
+    st.save(_creds())
+    doc = json.loads(st.path.read_text())
+    doc["credentials"].pop("earliest_refresh_at")
+    st.path.write_text(json.dumps(doc))
+    assert st.load().earliest_refresh_at == 0.0

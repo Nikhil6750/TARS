@@ -249,7 +249,7 @@ async def test_failed_refresh_means_signed_out_and_a_clear_auth_error(tmp_path):
     st = siwc.CredentialStore(tmp_path / "c.json")
     st.save(siwc.SiwcCredentials("oaiapp_x", "u", "id", "a", "r", "Bearer", time.time() - 10, [siwc.REQUIRED_SCOPE], time.time(), "urn:uuid:h"))
     auth = siwc.SiwcAuth(st, transport=httpx.MockTransport(lambda r: httpx.Response(400, json={"error": "invalid_grant"})))
-    with pytest.raises(OpenAIAuthError, match="could not be refreshed"):
+    with pytest.raises(OpenAIAuthError, match="cannot be renewed"):
         await auth.bearer()
     assert st.status()["signed_in"] is False                                     # revoked/expired credentials are forgotten
     with pytest.raises(OpenAIAuthError, match="not signed in"):
@@ -440,7 +440,7 @@ async def test_simple_action_never_touches_a_model():
     p, claude, reviewer, rc, local = make_pipeline()
     ev = await drain(p, "open calculator")
     assert [e.kind for e in ev] == ["FINAL"] and ev[0].text == "Done." and local.calls == 1
-    assert claude.calls == 0 and rc["n"] == 0 and p.calls == {"claude": 0, "review": 0, "gemini": 0, "local": 1}
+    assert claude.calls == 0 and rc["n"] == 0 and p.calls == {"claude": 0, "review": 0, "gemini": 0, "local": 1, "cache_hit": 0}
 
 
 async def test_chat_goes_to_gemini_only_and_streams():

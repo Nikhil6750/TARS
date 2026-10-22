@@ -38,6 +38,7 @@ class EvidenceItem(BaseModel):
     freshness: Freshness = "UNAVAILABLE"
     provenance: str = ""
     summary: str = Field("", max_length=900)
+    immutable: bool = False          # True only for results that can never change (e.g. a TERMINAL experiment); gates caching
 
 
 class EvidencePacket(BaseModel):
@@ -56,7 +57,9 @@ class EvidencePacket(BaseModel):
     experiment_id: str | None = None
 
     def compact_json(self) -> str:
-        text = self.model_dump_json(exclude_none=True)
+        # quant is for the decision engine; when a quant EVIDENCE item already carries the numbers the reviewer does not need them twice
+        exclude = {"quant"} if any(e.kind == "quant" for e in self.evidence) else set()
+        text = self.model_dump_json(exclude_none=True, exclude=exclude)
         if len(text) > MAX_PACKET_CHARS:
             raise ValueError(f"evidence packet is {len(text)} chars (> {MAX_PACKET_CHARS}); summarise instead of sending raw data")
         return text
@@ -76,6 +79,8 @@ class ReviewResult(BaseModel):
     confidence_limitations: list[str] = Field(default_factory=list)
     proposed_final_explanation: str = Field("", max_length=1200)
     error_kind: str | None = None            # set only when verdict == ERROR: auth | usage_limit | unavailable | invalid_output | cancelled
+    fallback_from: str | None = None         # primary model that failed transiently when a fallback model produced this review
+    cached: bool = False
     error_detail: str | None = None
     model: str | None = None
     seconds: float | None = None
@@ -124,18 +129,21 @@ class TradingReviewService:
     """`llm` is async (system, user, cancel) -> (text, meta). Default: the OpenAI Responses client."""
 
     def __init__(self, client: OpenAIResponsesClient | None = None, model: str | None = None, *, timeout_s: float = 25.0,
-                 llm: Callable[[str, str, asyncio.Event | None], Awaitable[tuple[str, dict]]] | None = None) -> None:
+                 llm: Callable[[str, str, asyncio.Event | None], Awaitable[tuple[str, dict]]] | None = None,
+                 fallback_models: tuple[str, ...] = (), reasoning_effort: str | None = None) -> None:
         if client is None and llm is None:
             raise ValueError("TradingReviewService needs an OpenAI client or an llm callable")
         self.client, self.model, self.timeout_s, self._llm = client, model, timeout_s, llm
+        self.fallback_models, self.reasoning_effort = tuple(fallback_models), reasoning_effort
         self.calls = 0
 
-    async def _call(self, system: str, user: str, cancel: asyncio.Event | None) -> tuple[str, dict]:
+    async def _call(self, system: str, user: str, cancel: asyncio.Event | None, model: str | None = None) -> tuple[str, dict]:
         if self._llm is not None:
             return await self._llm(system, user, cancel)
-        if not self.model:
+        model = model or self.model
+        if not model:
             raise OpenAIUnavailable("no OpenAI model selected (run model discovery)")
-        c = await self.client.complete(self.model, system, user, max_output_tokens=900, cancel=cancel, deadline=self.timeout_s)
+        c = await self.client.complete(model, system, user, max_output_tokens=900, cancel=cancel, deadline=self.timeout_s, reasoning_effort=self.reasoning_effort)
         return c.text, {"model": c.model, "seconds": c.seconds, "first_token_seconds": c.first_token_seconds, "usage": c.usage}
 
     async def review(self, packet: EvidencePacket, *, cancel: asyncio.Event | None = None) -> ReviewResult:
@@ -143,11 +151,25 @@ class TradingReviewService:
             body = packet.compact_json()
         except ValueError as exc:
             return ReviewResult(verdict=Verdict.ERROR, error_kind="invalid_output", error_detail=str(exc))
-        self.calls += 1
+        models = [self.model, *self.fallback_models] if self._llm is None else [self.model]
+        first_failed: str | None = None
+        last: ReviewResult | None = None
+        for model in models:
+            self.calls += 1
+            last = await self._review_once(body, cancel, model)
+            if last.verdict is not Verdict.ERROR:
+                return last.model_copy(update={"fallback_from": first_failed}) if first_failed else last
+            # only TRANSIENT provider trouble justifies trying another model; auth/usage/eligibility/cancel would just repeat
+            if last.error_kind not in ("unavailable", "invalid_output") or (cancel is not None and cancel.is_set()):
+                break
+            first_failed = first_failed or model
+        return last
+
+    async def _review_once(self, body: str, cancel, model: str | None) -> ReviewResult:
         try:
-            text, meta = await asyncio.wait_for(self._call(SYSTEM_PROMPT, "EVIDENCE PACKET:\n" + body, cancel), timeout=self.timeout_s + 2)
+            text, meta = await asyncio.wait_for(self._call(SYSTEM_PROMPT, "EVIDENCE PACKET:\n" + body, cancel, model), timeout=self.timeout_s + 2)
             res = parse_review(text)
-            return res.model_copy(update={"model": meta.get("model"), "seconds": meta.get("seconds")})
+            return res.model_copy(update={"model": meta.get("model") or model, "seconds": meta.get("seconds")})
         except OpenAIAuthError as exc:
             return _err("auth", exc)
         except OpenAIUsageLimit as exc:
