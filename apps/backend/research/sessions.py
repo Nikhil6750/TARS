@@ -111,6 +111,16 @@ def _nth_weekday(year: int, month: int, weekday: int, n: int) -> "pd.Timestamp":
     return last - pd.Timedelta(days=(last.weekday() - weekday) % 7)
 
 
+def _observed(d: "pd.Timestamp") -> list:
+    """Actual date plus the weekend-shifted observance (Saturday -> Friday, Sunday -> Monday)."""
+    out = [d.date()]
+    if d.weekday() == 5:
+        out.append((d - pd.Timedelta(days=1)).date())
+    elif d.weekday() == 6:
+        out.append((d + pd.Timedelta(days=1)).date())
+    return out
+
+
 def us_reduced_hours_dates(year_from: int, year_to: int) -> dict:
     """US holidays on which COMEX-linked spot metals show a reduced-hours halt in the New York afternoon (observed in the data as
     ~13:00-18:00 ET gaps on MLK Day and Presidents' Day). Fixed-date holidays use their calendar date (no weekend-observance shifts)."""
@@ -119,10 +129,28 @@ def us_reduced_hours_dates(year_from: int, year_to: int) -> dict:
         out[_nth_weekday(y, 1, 0, 3).date()] = "Martin Luther King Jr. Day"
         out[_nth_weekday(y, 2, 0, 3).date()] = "Presidents' Day"
         out[_nth_weekday(y, 5, 0, -1).date()] = "Memorial Day"
-        out[pd.Timestamp(y, 6, 19).date()] = "Juneteenth"
-        out[pd.Timestamp(y, 7, 4).date()] = "Independence Day"
+        for d in _observed(pd.Timestamp(y, 6, 19)):
+            out[d] = "Juneteenth"
+        for d in _observed(pd.Timestamp(y, 7, 4)):
+            out[d] = "Independence Day"
         out[_nth_weekday(y, 9, 0, 1).date()] = "Labor Day"
-        out[_nth_weekday(y, 11, 3, 4).date()] = "Thanksgiving Day"
+        out[_nth_weekday(y, 10, 0, 2).date()] = "Columbus Day"
+        tg = _nth_weekday(y, 11, 3, 4)
+        out[tg.date()] = "Thanksgiving Day"
+        out[(tg + pd.Timedelta(days=1)).date()] = "Day after Thanksgiving"
+    return out
+
+
+def full_holiday_trading_days(year_from: int, year_to: int) -> dict:
+    """FULL-closure holidays as CME-style TRADING DAYS: a trading day runs 18:00 New York (previous evening) -> 18:00 New York.
+    Includes weekend-observance shifts for Christmas Day and New Year's Day, and Good Friday (via Easter)."""
+    out: dict = {}
+    for y in range(year_from - 1, year_to + 2):
+        for d in _observed(pd.Timestamp(y, 12, 25)):
+            out[d] = "Christmas Day"
+        for d in _observed(pd.Timestamp(y, 1, 1)):
+            out[d] = "New Year's Day"
+        out[(easter_sunday(y) - pd.Timedelta(days=2)).date()] = "Good Friday"
     return out
 
 
@@ -148,23 +176,28 @@ def explain_gap(start: "pd.Timestamp", end_exclusive: "pd.Timestamp", meta: Inst
     mins = pd.Series(pd.date_range(start, periods=span_min, freq="1min"))
     closed = is_market_closed(mins, meta).to_numpy()
     brk = is_daily_break(mins, meta).to_numpy()
-    cal = holiday_calendar(int(mins.dt.year.min()), int(mins.dt.year.max()))
-    dates = mins.dt.date
-    full = dates.map(lambda d: cal.get(d, (None, None))[1] == "FULL").to_numpy()
-    short = dates.map(lambda d: cal.get(d, (None, None))[1] == "SHORT_CANDIDATE").to_numpy()
+    local = mins.dt.tz_convert(meta.timezone) if mins.dt.tz is not None else mins.dt.tz_localize("UTC").dt.tz_convert(meta.timezone)
+    y0, y1 = int(local.dt.year.min()), int(local.dt.year.max())
+    # FULL holiday = CME-style trading day (18:00 ET the evening before -> 18:00 ET)
+    trading_day = (local.dt.tz_localize(None) - pd.Timedelta(hours=18)).dt.floor("1D") + pd.Timedelta(days=1)
+    full_days = full_holiday_trading_days(y0, y1)
+    full = trading_day.dt.date.map(lambda d: d in full_days).to_numpy()
+    # commonly shortened local dates (Dec 24/26/31, Easter Monday): NOT assumed closed
+    cal = holiday_calendar(y0, y1)
+    ldates = local.dt.date
+    short = ldates.map(lambda d: cal.get(d, (None, None))[1] == "SHORT_CANDIDATE").to_numpy()
     # US holiday reduced hours: ONLY the 12:00-18:00 New York window on those dates is explained (pattern-matched, not assumed)
-    local = mins.dt.tz_localize("UTC").dt.tz_convert(meta.timezone) if mins.dt.tz is None else mins.dt.tz_convert(meta.timezone)
-    us_dates = us_reduced_hours_dates(int(local.dt.year.min()), int(local.dt.year.max()))
+    us_dates = us_reduced_hours_dates(y0, y1)
     lmin = (local.dt.hour * 60 + local.dt.minute).to_numpy()
-    us = local.dt.date.map(lambda d: d in us_dates).to_numpy() & (lmin >= 12 * 60) & (lmin < 18 * 60)
+    us = ldates.map(lambda d: d in us_dates).to_numpy() & (lmin >= 12 * 60) & (lmin < 18 * 60)
     explained = closed | brk | full | us
     unexplained = int((~explained).sum())
     short_only = int((~explained & short).sum())
-    names = sorted({cal[d][0] for d in set(dates[full]) if d in cal})
+    names = sorted({full_days[d] for d in set(trading_day.dt.date[full])})
     need_holiday = (~(closed | brk)) & full          # minutes that ONLY the holiday rule explains
     need_us = (~(closed | brk | full)) & us
     if need_us.any():
-        names = sorted(set(names) | {us_dates[d] for d in set(local.dt.date[need_us])})
+        names = sorted(set(names) | {us_dates[d] for d in set(ldates[need_us])})
     if unexplained == 0:
         if need_holiday.any() or need_us.any():
             cat = "HOLIDAY_WINDOW"

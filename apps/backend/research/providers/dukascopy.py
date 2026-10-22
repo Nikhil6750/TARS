@@ -32,6 +32,37 @@ LONG_DEAD_RUN_MIN = 30
 AVG_FILE_BYTES = 20_000  # observed ~15-17 KB/day/side for XAUUSD M1; padded
 
 
+def drop_dead_padding(df: pd.DataFrame, meta) -> tuple[pd.DataFrame, dict]:
+    """Dukascopy publishes a full 1440-row file for every UTC day and pads closed periods with FLAT, ZERO-VOLUME candles.
+    Those rows are not market data. Rule (deterministic, counted, reported in provenance, raw files untouched): drop a row only if
+    it is inside the instrument's weekly closure or daily break AND all eight prices are identical AND volume == 0.
+    Any NON-flat row inside a closure is kept and surfaces as a quality warning."""
+    ts = df["timestamp_utc"]
+    closed = (is_market_closed(ts, meta) | is_daily_break(ts, meta)).to_numpy()
+    flat = (df["bid_open"] == df["bid_close"]).to_numpy() & \
+           (df["bid_high"] == df["bid_low"]).to_numpy() & (df["ask_high"] == df["ask_low"]).to_numpy() & \
+           (df["ask_open"] == df["ask_close"]).to_numpy() & (df["bid_open"] == df["bid_high"]).to_numpy() & \
+           (df["ask_open"] == df["ask_high"]).to_numpy()
+    zero = (df["volume"].fillna(0) == 0).to_numpy()
+    dead = flat & zero
+    drop_closed = closed & dead
+    # Holidays and other dead periods are padded too, but sit outside any weekly/daily closure window. A run of >= 30
+    # consecutive flat, zero-volume minutes is not a market (live gold quotes never freeze that long): drop it, count it.
+    run_id = np.cumsum(np.concatenate([[True], dead[1:] != dead[:-1]]))
+    run_len = pd.Series(run_id).map(pd.Series(run_id).value_counts()).to_numpy()
+    drop_long = dead & (run_len >= LONG_DEAD_RUN_MIN) & ~drop_closed
+    drop = drop_closed | drop_long
+    stats = {
+        "rule": "drop closed-market padding (in closure/break AND flat OHLC both sides AND volume==0)",
+        "rows_in": int(len(df)), "rows_dropped": int(drop.sum()), "rows_out": int((~drop).sum()),
+        "closed_nonflat_rows_kept": int((closed & ~(flat & zero)).sum()),
+        "dropped_weekly_closure": int((drop & is_market_closed(ts, meta).to_numpy()).sum()),
+        "dropped_daily_break": int((drop_closed & ~is_market_closed(ts, meta).to_numpy()).sum()),
+        "dropped_long_dead_runs": int(drop_long.sum()), "long_dead_run_min_minutes": LONG_DEAD_RUN_MIN,
+        "open_hours_flat_rows_kept": int((dead & ~drop).sum())}
+    return df.loc[~drop].reset_index(drop=True), stats
+
+
 class PartialFetchError(RuntimeError):
     pass
 
@@ -219,35 +250,8 @@ class DukascopyProvider(MarketDataProvider):
         return self._drop_closed_market_padding(out, meta)
 
     def _drop_closed_market_padding(self, df: pd.DataFrame, meta) -> pd.DataFrame:
-        """Dukascopy publishes a full 1440-row file for every UTC day and pads closed periods with FLAT, ZERO-VOLUME candles.
-        Those rows are not market data. Rule (deterministic, counted, reported in provenance, raw files untouched): drop a row only if
-        it is inside the instrument's weekly closure or daily break AND all eight prices are identical AND volume == 0.
-        Any NON-flat row inside a closure is kept and surfaces as a quality warning."""
-        ts = df["timestamp_utc"]
-        closed = (is_market_closed(ts, meta) | is_daily_break(ts, meta)).to_numpy()
-        p = df[["bid_open", "bid_high", "bid_low", "bid_close", "ask_open", "ask_high", "ask_low", "ask_close"]]
-        flat = (p.nunique(axis=1, dropna=False) <= 2).to_numpy() & (df["bid_open"] == df["bid_close"]).to_numpy() & \
-               (df["bid_high"] == df["bid_low"]).to_numpy() & (df["ask_high"] == df["ask_low"]).to_numpy() & \
-               (df["ask_open"] == df["ask_close"]).to_numpy() & (df["bid_open"] == df["bid_high"]).to_numpy() & \
-               (df["ask_open"] == df["ask_high"]).to_numpy()
-        zero = (df["volume"].fillna(0) == 0).to_numpy()
-        dead = flat & zero
-        drop_closed = closed & dead
-        # Holidays and other dead periods are padded too, but sit outside any weekly/daily closure window. A run of >= 30
-        # consecutive flat, zero-volume minutes is not a market (live gold quotes never freeze that long): drop it, count it.
-        run_id = np.cumsum(np.concatenate([[True], dead[1:] != dead[:-1]]))
-        run_len = pd.Series(run_id).map(pd.Series(run_id).value_counts()).to_numpy()
-        drop_long = dead & (run_len >= LONG_DEAD_RUN_MIN) & ~drop_closed
-        drop = drop_closed | drop_long
-        self.last_normalization_stats = {
-            "rule": "drop closed-market padding (in closure/break AND flat OHLC both sides AND volume==0)",
-            "rows_in": int(len(df)), "rows_dropped": int(drop.sum()), "rows_out": int((~drop).sum()),
-            "closed_nonflat_rows_kept": int((closed & ~(flat & zero)).sum()),
-            "dropped_weekly_closure": int((drop & is_market_closed(ts, meta).to_numpy()).sum()),
-            "dropped_daily_break": int((drop_closed & ~is_market_closed(ts, meta).to_numpy()).sum()),
-            "dropped_long_dead_runs": int(drop_long.sum()), "long_dead_run_min_minutes": LONG_DEAD_RUN_MIN,
-            "open_hours_flat_rows_kept": int((dead & ~drop).sum())}
-        return df.loc[~drop].reset_index(drop=True)
+        out, self.last_normalization_stats = drop_dead_padding(df, meta)
+        return out
 
     def describe_source(self, instrument: str) -> dict:
         meta = get_meta(instrument)

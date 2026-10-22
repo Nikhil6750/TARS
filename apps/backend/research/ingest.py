@@ -93,7 +93,9 @@ def ingest(provider: MarketDataProvider, instrument: str, start: datetime, end: 
 
 
 def register_duckdb(root: Path, provider: str, instrument: str) -> Path:
-    """Persistent DuckDB catalog with one view per dataset over the Parquet files (data stays in Parquet)."""
+    """Persistent DuckDB catalog over the Parquet files (data stays in Parquet). Two views per dataset:
+    <name>            full dataset (operator level)
+    <name>_research   excludes the protected FINAL_UNTOUCHED window when a split is frozen - the one research SQL should use."""
     store = MarketStore(root)
     files = store.files(provider, instrument, "M1")
     cat = Path(root) / "derived" / "catalog.duckdb"
@@ -103,6 +105,9 @@ def register_duckdb(root: Path, provider: str, instrument: str) -> Path:
     try:
         listing = ", ".join("'" + str(f).replace("\\", "/") + "'" for f in files)
         con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM read_parquet([{listing}])")
+        fs = store.final_start(instrument)
+        cond = f" WHERE timestamp_utc < TIMESTAMPTZ '{fs.isoformat()}'" if fs is not None else ""
+        con.execute(f"CREATE OR REPLACE VIEW {view}_research AS SELECT * FROM {view}{cond}")
     finally:
         con.close()
     return cat

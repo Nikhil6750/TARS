@@ -35,6 +35,22 @@ class MarketStore:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
 
+    # ---- provider aliases (READ side only) -----------------------------------------------------------------
+    def provider_alias_info(self, provider: str, instrument: str) -> dict | None:
+        """experiments/provider_aliases.json lets a frozen ResearchSpec that names one provider resolve to another dataset WITHOUT
+        mutating the spec. Each alias carries its justification/verification and is surfaced in evidence packets."""
+        p = self.root / "experiments" / "provider_aliases.json"
+        if not p.exists():
+            return None
+        try:
+            return json.loads(p.read_text(encoding="utf-8")).get("aliases", {}).get(instrument.upper(), {}).get(provider)
+        except ValueError:
+            return None
+
+    def resolve_provider(self, provider: str, instrument: str) -> str:
+        info = self.provider_alias_info(provider, instrument)
+        return info["to"] if info else provider
+
     # ---- layout ---------------------------------------------------------------------------------------
     def _dir(self, provider: str, instrument: str, timeframe: str) -> Path:
         return self.root / "market" / provider / instrument.upper() / timeframe
@@ -42,7 +58,7 @@ class MarketStore:
     def files(self, provider: str, instrument: str, timeframe: str,
               start: pd.Timestamp | None = None, end: pd.Timestamp | None = None) -> list[Path]:
         """Parquet files, optionally pruned to those whose month/year can overlap [start, end)."""
-        d = self._dir(provider, instrument, timeframe)
+        d = self._dir(self.resolve_provider(provider, instrument), instrument, timeframe)
         out = []
         for p in sorted(d.rglob("*.parquet")):
             if start is not None or end is not None:

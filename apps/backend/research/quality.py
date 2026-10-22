@@ -11,7 +11,7 @@ from .schema import CANONICAL_COLUMNS, PRICE_COLUMNS, TIMEFRAME_MINUTES
 from .sessions import explain_gap, is_daily_break, is_known_holiday, is_market_closed
 
 BLOCK, WARN, INFO = "BLOCK", "WARN", "INFO"
-QUALITY_VERSION = 3   # 3: US-holiday reduced-hours pattern + holiday-vs-break label precedence
+QUALITY_VERSION = 4   # 4: holiday trading-days (18:00 ET), weekend observance, extra US reduced-hours days
 
 
 @dataclass

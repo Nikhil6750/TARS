@@ -297,6 +297,8 @@ class QuantResearchAgent:
             "warnings": r["warnings"], "failure_reason": r["failure_reason"],
             "final_data": {"first_accessed_at": r.get("final_first_accessed_at"), "untouched": not r.get("final_first_accessed_at")},
             "diagnostic_kind": spec.diagnostic_kind, "cost_notes": _cost_notes(spec),
+            "data_provider": {"requested": spec.data.provider, "resolved": self.store.resolve_provider(spec.data.provider, spec.instruments[0]),
+                              "alias": self.store.provider_alias_info(spec.data.provider, spec.instruments[0])},
             "allowed_conclusions": "Only a status of VALIDATED permits VALIDATED_FINDING; a profitable backtest alone never does.",
         }
         text = json.dumps(pkt, default=str)
