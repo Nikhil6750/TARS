@@ -137,6 +137,20 @@ class CredentialStore:
         except OSError:
             pass
         os.replace(tmp, self.path)   # atomic
+        _restrict_acl(self.path)
+
+
+def _restrict_acl(path: Path) -> bool:
+    """Windows ignores Unix modes: drop inherited ACL entries (e.g. other local groups) and grant only the current user. Best effort; returns success."""
+    if os.name != "nt":
+        return True
+    import getpass
+    import subprocess
+    try:
+        r = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{getpass.getuser()}:(F)"], capture_output=True, text=True, timeout=15)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 # ---- PKCE / URLs -------------------------------------------------------------------------------------------------------

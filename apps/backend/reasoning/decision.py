@@ -69,6 +69,25 @@ def quant_sentence(q: dict | None) -> str | None:
     return f"{eid} is {str(q['status']).lower()}."
 
 
+SPOKEN_MAX_WORDS = 42
+
+
+def cap_spoken(text: str, max_words: int = SPOKEN_MAX_WORDS) -> tuple[str, bool]:
+    """Short by default. If longer than the cap, keep whole leading sentences that fit and say the rest is on screen (uncertainty is never dropped
+    silently: the full text always remains in the decision detail)."""
+    words = (text or "").split()
+    if len(words) <= max_words:
+        return text, False
+    out = ""
+    for sent in re.split(r"(?<=[.!?])\s+", text.strip()):
+        if len((out + " " + sent).split()) > max_words:
+            break
+        out = (out + " " + sent).strip()
+    if not out:
+        out = " ".join(words[:max_words]).rstrip(",;:") + "…"
+    return out + " The caveats are in the details.", True
+
+
 def _quant_contradicts(q: dict | None) -> str | None:
     if not q:
         return None
@@ -99,7 +118,10 @@ class DecisionEngine:
         newest_as_of = max((e.as_of for e in packet.evidence if e.as_of), default=None)
 
         def finish(status: Status, spoken: str, detail: str, reviewed: bool) -> Decision:
-            spoken = sanitize_spoken(spoken)
+            full = sanitize_spoken(spoken)
+            spoken, was_capped = cap_spoken(full)
+            if was_capped:      # the complete wording (with every caveat) is never lost: it leads the expandable detail
+                detail = "Full explanation: " + full + chr(10) * 2 + detail
             rec = {"status": status.value, "decided_at": self._now().isoformat(), "packet_digest": packet.digest(), "experiment_id": packet.experiment_id,
                    "question": packet.question, "instrument": packet.instrument, "timeframe": packet.timeframe, "evidence_as_of": newest_as_of,
                    "evidence_freshness": {e.name: e.freshness for e in packet.evidence}, "reasons": reasons, "flags": flags,

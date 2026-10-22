@@ -88,8 +88,8 @@ SYSTEM_PROMPT = (
     "are represented accurately; (6) the answer is internally consistent; (7) uncertainty is not understated; (8) the trading conclusion is defensible. "
     "Never invent prices, news, or performance numbers, and never agree just to agree. Reply with ONE JSON object, no markdown: "
     '{"verdict":"APPROVE|QUALIFY|DISAGREE|INSUFFICIENT_EVIDENCE","supported_facts":[],"unsupported_claims":[],"material_disagreements":[],'
-    '"missing_evidence":[],"risk_observations":[],"confidence_limitations":[],"proposed_final_explanation":"<=2 short natural spoken sentences, '
-    'plain language, no numeric confidence percentages, all material uncertainty kept"}. Use APPROVE only if there are no unsupported claims.'
+    '"missing_evidence":[],"risk_observations":[],"confidence_limitations":[],"proposed_final_explanation":"MAX 35 words, 1-2 short natural spoken sentences, '
+    'plain language, lead with the answer, keep the single most important uncertainty, no numeric confidence percentages"}. Use APPROVE only if there are no unsupported claims.'
 )
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
@@ -166,3 +166,21 @@ class TradingReviewService:
 
 def _err(kind: str, exc: BaseException) -> ReviewResult:
     return ReviewResult(verdict=Verdict.ERROR, error_kind=kind, error_detail=(str(exc) or type(exc).__name__)[:200])
+
+
+REVIEW_MODEL_PREFERENCE = ("gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol")   # depth first; override with TARS_REVIEW_MODEL (e.g. gpt-6-luna for speed)
+
+
+async def select_review_model(client: OpenAIResponsesClient, override: str | None = None) -> str:
+    """Pick the reviewer model from what the ACCOUNT can actually use (live model discovery): explicit override if entitled, else the first
+    preferred model that is entitled, else the server's first listed model. Raises OpenAIUnavailable if the account lists none."""
+    import os
+    wanted = override or os.environ.get("TARS_REVIEW_MODEL")
+    models = [m.id for m in await client.list_models()]
+    if not models:
+        raise OpenAIUnavailable("the signed-in account lists no usable models")
+    if wanted:
+        if wanted not in models:
+            raise OpenAIUnavailable(f"requested review model {wanted!r} is not available to this account (available: {', '.join(models)})")
+        return wanted
+    return next((m for m in REVIEW_MODEL_PREFERENCE if m in models), models[0])

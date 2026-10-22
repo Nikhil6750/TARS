@@ -521,3 +521,47 @@ def test_live_trading_remains_disabled_by_default(monkeypatch):
     from trading.execution_guard import live_trading_enabled
     monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
     assert live_trading_enabled() is False
+
+
+# ============================ spoken brevity, experiment evidence, credential ACL ======================================================
+def test_spoken_answers_are_short_but_the_full_caveats_stay_in_the_detail():
+    from reasoning.decision import SPOKEN_MAX_WORDS, cap_spoken
+    short, capped = cap_spoken("Gold is edging up. One hour isn't enough to call it.")
+    assert not capped and short.startswith("Gold")
+    long_text = ("H0004 was rejected because validation expectancy was negative after costs. " + "It also got worse under doubled spreads and every neighbour was negative. " * 3
+                 + "Financing was not modelled and the tests were not independently replicated.")
+    spoken, capped = cap_spoken(long_text)
+    assert capped and len(spoken.split()) <= SPOKEN_MAX_WORDS + 6 and spoken.startswith("H0004 was rejected") and spoken.endswith("The caveats are in the details.")
+    d = DecisionEngine().decide(packet(), review(Verdict.QUALIFY, explain=long_text, confidence_limitations=["not replicated"]))
+    assert len(d.spoken.split()) <= SPOKEN_MAX_WORDS + 6 and "Financing was not modelled and the tests" in d.detail and d.detail.startswith("Full explanation:")
+
+
+def test_experiment_evidence_carries_thresholds_and_stays_inside_the_registry(tmp_path):
+    from reasoning.evidence import experiment_evidence
+    from research.agent import QuantResearchAgent
+    from research.demo import run_demo
+    from research.registry import ExperimentRegistry
+    from research.storage import MarketStore
+    root = tmp_path / "lake"
+    run_demo(root)
+    reg = ExperimentRegistry(root / "experiments" / "registry.sqlite")
+    item, quant = experiment_evidence(reg, QuantResearchAgent(reg, MarketStore(root), root / "reports"), "H0001")
+    assert item.kind == "quant" and item.freshness == "CURRENT" and len(item.summary) <= 900
+    for needle in ("max drawdown", "limit", "required val net expectancy", "2x spread", "criteria failed"):
+        assert needle in item.summary
+    assert quant["experiment_id"] == "H0001" and quant["status"] in {"REJECTED", "PRELIMINARY"} and "validation_net_expectancy_r" in quant
+    with pytest.raises(ValueError, match="no stored"):
+        from research.demo import demo_spec_dict
+        from research.spec import parse_spec
+        hid = reg.register(parse_spec({**demo_spec_dict(), "title": "A second unrun diagnostic title", "features": [{"name": "fast", "kind": "ema", "n": 11}, {"name": "slow", "kind": "ema", "n": 41}, {"name": "atr14", "kind": "atr", "n": 14}]}))
+        experiment_evidence(reg, QuantResearchAgent(reg, MarketStore(root), root / "reports"), hid)
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows ACL hardening")
+def test_credential_file_acl_is_restricted_to_the_current_user(tmp_path):
+    import subprocess
+    st = siwc.CredentialStore(tmp_path / "creds.json")
+    st.save(siwc.SiwcCredentials("oaiapp_x", "u", "id", "a", "r", "Bearer", time.time() + 3600, [siwc.REQUIRED_SCOPE], time.time(), st.host_id()))
+    out = subprocess.run(["icacls", str(st.path)], capture_output=True, text=True).stdout
+    entries = [ln for ln in out.splitlines() if ":(" in ln]
+    assert len(entries) == 1 and "(I)" not in entries[0]                      # one explicit entry, nothing inherited (no other groups)
