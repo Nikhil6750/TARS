@@ -26,6 +26,7 @@ Other ways in and out, once TARS is running:
 
 ```
 tars-companion.exe --market                 # open (or focus) Market Intelligence
+                                            #   -- only while TARS is already running
 tars-companion.exe --quit                   # cooperative stop, backend included
 scripts\start-market-desktop.cmd -Dev       # Vite dev server + debug binary
 scripts\start-market-desktop.cmd -Rebuild   # force a fresh release build
@@ -34,6 +35,13 @@ scripts\start-market-desktop.cmd -Rebuild   # force a fresh release build
 The window is also in the tray menu as **Market Intelligence**. A second
 launch never starts a second copy: the single-instance plugin routes it to the
 running app.
+
+`--market` needs TARS to be running already. It is handled by the
+single-instance plugin, which only fires on a *second* launch, so passing it
+to a cold start gives you the companion and no Market window. Verified by
+doing exactly that. Use the launcher for a cold start (it sets
+`TARS_OPEN_MARKET=1`, which the startup hook does read), and `--market`
+afterwards.
 
 An installer is produced alongside the binary at
 `apps/web/src-tauri/target/release/bundle/nsis/TARS_1.0.0_x64-setup.exe`.
@@ -63,10 +71,20 @@ python -m market.ingest --symbols EURUSD XAUUSD
 python -m market.ingest --start 2022-01-01    # a longer window
 ```
 
-Source CSVs are read from `C:\Trade Data`; Parquet output goes to
-`D:\TARS_DATA\market\xray_store`. The ingester only ever writes under that
-store root — quant_brain's frozen research partitions
-(`D:\TARS_DATA\market\local_xauusd`, `...\dukascopy`) are never modified.
+Neither location is hardcoded. The store goes under the repo's shared data
+root, resolved by `research/config.py` — `TARS_DATA_ROOT` if set, else a
+non-system drive with room to spare, else a repo-local fallback. On this
+machine that is `D:\TARS_DATA\market\xray_store`. Source CSVs are read from
+`C:\Trade Data` unless `TARS_MARKET_CSV_ROOT` says otherwise.
+
+| Variable | Effect |
+|---|---|
+| `TARS_DATA_ROOT` | Moves the candle store, and every other TARS dataset. |
+| `TARS_MARKET_CSV_ROOT` | Where the source bid/ask CSVs are read from. |
+
+The ingester only ever writes under the store root — quant_brain's frozen
+research partitions (`<data root>\market\local_xauusd`, `...\dukascopy`) are
+never modified.
 
 ## What the numbers mean
 
@@ -147,6 +165,14 @@ POST /api/v1/market/replay/reset
 | `GET /api/v1/market/order-blocks/{symbol}` | Zones, lifecycle and events |
 | `GET /api/v1/market/events` | Persisted zone-interaction history |
 | `WS /api/v1/market/ws` | `market.frame` every 5s |
+
+Separately, `GET /api/v1/health` carries an `identity` block: `instance_id`
+(this process), `build_id` and `build_source` (this code — the commit SHA
+where the repository is readable, else the release version), `app_version`
+and `started_at`. The desktop shell adopts whatever answers that endpoint, so
+these are what let it tell the backend it expects from an orphan left behind
+by an older build. `TARS_BUILD_ID` overrides the build id, for packaging to
+stamp what it produced.
 
 ## Coverage
 

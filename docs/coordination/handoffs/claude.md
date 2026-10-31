@@ -11,7 +11,252 @@ for that).
 
 ---
 
-## Latest handoff — Market X-Ray market-intelligence feature (2026-10-31)
+## Latest handoff — Phase 1 & 2, Claude-lane READY tasks (2026-10-31)
+
+Four tasks from `docs/coordination/TASKS.md`, all in `apps/backend/`. The
+coordinator authorized implementation and asked for the priority order
+"backend ownership safety and replay/live isolation", which is why P1-C1 and
+P2-C3 were done first and P1-C2 last.
+
+**This entry covers two branches**, because the task board assigns the P1 and
+P2 work to separate ones. Both are branched from `feature/market-xray-dashboard`
+(`f7022f8`) rather than `integration/v1`, since every task needs the Market
+X-Ray code the coordinator asked these branches to include. Neither is
+merged.
+
+| Branch | Tasks | Commits |
+|---|---|---|
+| `feature/backend-build-identity` | P1-C1, P1-C2 | `5fd0921`, `333c609` |
+| `feature/market-live-feed` | P2-C3, P2-C5 | `75e3ff5`, `4fee2d0` |
+
+Note for whoever merges: both branches add an entry to this file, so expect a
+conflict here and keep this combined version.
+
+### P1-C1 — backend build identity — IMPLEMENTED, tests pass
+
+**Commit**: `5fd0921`
+
+`/api/v1/health` now carries an `identity` block: `instance_id` (uuid4 prefix
+generated once at import, so it is stable within a process and unique across
+processes), `build_id`, `build_source`, `app_version`, `started_at`.
+`build_id` is the commit SHA where the repository is readable, since that is
+the only value that changes whenever the code does, falling back to the
+release version in an installed build; `build_source` says which of the two
+it is, so a version can never be read as a commit. `TARS_BUILD_ID` overrides
+both, for packaging to stamp what it produced.
+
+New file `apps/backend/app/identity.py`. `HealthResponse.identity` defaults to
+`{}`, so every existing construction keeps working. The git call is cached
+for the process lifetime: re-reading HEAD after a checkout would report code
+this process is not running.
+
+Identity never raises. The supervisor polls health every 5 seconds, and
+failing that poll over a missing `git` would be worse than an unknown build
+id.
+
+**Tests**: 13 new in `tests/test_identity.py` — instance ids that genuinely
+differ across two spawned interpreters, build ids that differ across
+commits, the version fallback, the env override, a broken-`git` case, and a
+drift test that fails if `APP_VERSION` and `tauri.conf.json` disagree. All
+pass. Observed on this machine: `build_id` `f7022f80e524`, `build_source`
+`git`.
+
+**Limitations — not verified**:
+
+1. **No consumer exists yet.** This serves an identity; nothing checks it.
+   "A supervisor refuses a mismatched backend" is P1-A1's claim to make, not
+   one this task has demonstrated.
+2. **The `version` fallback has never run in a real installed build.** It is
+   proven by substituting the git lookup, not by an install without a
+   repository — that is P1-X1, blocked on B4.
+
+**Dependency status**: **P1-A1 is unblocked.** Field names are
+`identity.instance_id`, `identity.build_id`, `identity.build_source`,
+`identity.app_version`, `identity.started_at`, all strings, all at the top
+level of the health payload under `identity`.
+
+### P1-C2 — resolved data roots — IMPLEMENTED, tests pass
+
+**Commit**: `333c609`
+
+`market/ingest.py` no longer hardcodes its roots. The store is
+`research.config.resolve_data_root() / "market" / "xray_store"`, reusing this
+repo's existing `TARS_DATA_ROOT` convention instead of restating it, so the
+market store follows the same rule as every other dataset including its
+refusal to fill the system drive. The CSV source root is overridable with
+`TARS_MARKET_CSV_ROOT` and otherwise falls back to `C:\Trade Data`. Both
+launchers now ask the backend where the store is rather than naming the path
+themselves.
+
+**Tests**: 9 new in `tests/test_market_roots.py`, all pass. Verified
+behaviour-preserving on this machine by direct comparison: the resolver
+returns `D:\TARS_DATA\market\xray_store`, identical to the replaced
+literal, with the existing `manifest.json` present — so the ingested 5.2M
+bars were not orphaned. Overrides exercised: `TARS_DATA_ROOT` and
+`TARS_MARKET_CSV_ROOT` both redirect. The launchers' new resolution step was
+executed in PowerShell and returns the same path with the manifest found.
+
+**Limitations — not verified**:
+
+1. **Only verified where the resolver returns `D:`.** On a machine without a
+   suitable non-system drive, `resolve_data_root()` falls back inside the
+   repo and the store would land somewhere else. Correct by design, but no
+   such machine was available; the test for it skips rather than pretends.
+2. **The launchers were not re-run end to end.** Only the line that changed
+   was executed. A full run rebuilds or launches the desktop app.
+
+**Dependency status**: none. Does not block or depend on another task.
+
+### P2-C3 — replay is never live — IMPLEMENTED, tests pass
+
+**Commit**: `75e3ff5`
+
+Done deliberately **before** P2-C1, so the guard exists before the thing it
+guards against. Until now the rule held partly by accident: there was no
+feed to attach, so nothing could compete with the replay cursor. With a feed
+attached and the cursor rewound, the old precedence in `market_status()`
+would have reported LIVE while every panel was still computed at
+`ts <= cursor` — replayed data labelled live.
+
+`clock.resolve_status` is now the single gate, and the only caller of
+`live_status`. Precedence: a pinned replay cursor beats any attached feed; no
+feed means recorded history; only then may a real feed be judged LIVE or
+STALE. `MarketXRayService` gains an explicit `_replay_pinned` flag (set by
+moving the cursor, cleared by `reset_cursor`, because returning to the live
+edge is the request to stop replaying) and `attach_feed`/`detach_feed` as the
+seam a real adapter uses. It also fails closed: a status that somehow
+resolved LIVE while pinned is downgraded and logged as a bug rather than
+shown.
+
+Every payload now carries `provenance` — `source` (`RECORDED_STORE` or
+`LIVE_FEED`), `provider`, `observed_at`, `replay`, `is_live` — so a client
+or a test can check what it is looking at instead of trusting a label.
+`_resolve_status` splits the decision from the write, so stamping eight
+panels does not persist eight feed-health rows.
+
+**Tests**: 28 new in `tests/test_market_live_isolation.py`, all pass — the
+pure gate swept across the freshness boundary (the pin wins at every tick
+age from 0s to 24h), a guard that `live_status` keeps exactly one call site
+so nobody can route around the gate, and the headline case through the real
+service and the real candle store: attach a healthy feed, rewind, and
+nothing reports LIVE. Verified end to end over HTTP as well: the dashboard
+returns `REPLAY`/`RECORDED_STORE` with `replay_pinned` true and every nested
+panel declaring `is_live: false`.
+
+**Limitations — not verified**:
+
+1. **No real feed has ever been attached.** `attach_feed` is exercised with
+   a synthetic provider name and timestamp. The invariant is proven against
+   that, not against MT5 — P2-C1, blocked on B1.
+2. **LIVE and STALE remain unobserved in reality.** The gate's LIVE branch is
+   covered by unit test only; B1 and B2 still stand (P2-C2).
+3. The frontend does not read `provenance` yet — that is P2-A1, in
+   Antigravity's lane.
+
+**Dependency status**: **P2-X1 and P2-A1 are unblocked** — the provenance
+field they both need now exists and is served on every market endpoint.
+P2-C1 now has `attach_feed` as its seam.
+
+### P2-C5 — coverage warnings survive expansion — IMPLEMENTED, tests pass
+
+**Commit**: `4fee2d0`
+
+`Instrument.backing` is now required with no default, so an instrument
+cannot enter the universe without declaring what its numbers rest on
+(`RECORDED_CSV` or `LIVE_ACCRUED`). The distinction bites the moment P2-C4
+grows coverage from a live feed: a pair accrued tick by tick is short by
+construction, and a strength window over it is not comparable to one over
+years of recorded bars. `UNAVAILABLE_PAIRS` declares the nine pairs with no
+source data here rather than leaving them in prose, and the strength payload
+reports `pairs_unavailable` (absent from this machine) separately from
+`pairs_missing` (absent from this window), because conflating them would
+hide a permanent gap behind a transient one.
+
+**Tests**: 15 new in `tests/test_market_coverage.py`, all pass — over
+today's universe and a simulated 26-pair one. The flag clears only where
+pairs were genuinely added, still fires for a currency that is thin inside a
+large universe, and the leave-one-out diagnostic still singles out a
+dominating pair. Two of my expectations were wrong first time and the code
+was right: NZD gains six pairs rather than four, and the stub's volatility
+had to be made comparable to its drift, because otherwise every pair
+saturated the ±6 clamp in `normalized_return` and no pair could dominate.
+
+**Limitations — not verified**: the expanded universe is simulated by
+monkeypatching, with a stub store. Real coverage expansion is P2-C4, blocked
+on B3 — nine pairs have no source CSVs. Nothing here obtains data.
+
+### Regression
+
+| Suite | Result |
+|---|---|
+| Backend, `feature/backend-build-identity` | **1703 passed, 8 skipped, 0 failed** (1681 baseline + 13 + 9) |
+| Backend, `feature/market-live-feed` | **1724 passed, 8 skipped, 0 failed** (1681 baseline + 28 + 15) |
+| ruff / mypy on all changed files | clean |
+| Native desktop verification | **17/18** (see below) |
+
+Trading execution remains disabled; no task touched it, and the existing
+health assertion that `live_trading_enabled` is false still passes.
+
+The desktop app was launched and verified against the modified backend, to
+check the coordinator's requirement that existing companion and dashboard
+behaviour is preserved. It is: the launcher resolved the store root through
+the new P1-C2 path and found 18 instruments, the backend came up healthy
+reporting REPLAY, exactly one supervised backend ran as a child of the
+shell, closing the Market window left the companion running, `--market`
+reopened it without a second instance, and a cooperative quit left no orphan
+on port 8000.
+
+Three things came out of that run which are worth recording precisely,
+because two of them are about the harness and one is a real gap:
+
+1. **F11 fullscreen is unverified today, not broken.** The check failed in
+   both runs. Diagnosed rather than guessed: `SetForegroundWindow` on the
+   Market window returns false, so Windows refuses to give the test process
+   the foreground and the synthetic F11 never reaches the window. The same
+   check passed in the previous session, and `set_fullscreen` is untouched
+   on these branches, so there is no evidence of a regression -- but equally
+   no evidence it works today, and it is reported as neither.
+   Also surfaced: `GetSystemMetrics` reported the monitor as 1536x864 in one
+   run and 1920x1080 in another, which is DPI scaling, and it makes the
+   verifier's window-versus-monitor comparison unreliable. That is in
+   Codex's lane (`tools/`).
+2. **`tars-companion.exe --market` does nothing on a cold start.** A real
+   gap, found by trying it: `--market` is handled only in the
+   single-instance plugin's callback, which fires on a *second* launch, so
+   passing it to a cold start gives the companion and no Market window. The
+   startup hook reads `TARS_OPEN_MARKET=1` instead, which is what the
+   launcher sets, so the launcher is unaffected. `docs/runtime/market-xray.md`
+   advertised `--market` without that condition and is corrected here. The
+   code gap is in `apps/web/src-tauri/src/lib.rs`, i.e. **Antigravity's
+   lane** -- handling the argv on a cold start as well would close it.
+3. **The Market window came up minimized once**, at `-32000,-32000` sized
+   199x34, which invalidated three checks in that run: a minimized window
+   cannot be captured (a blank 515-colour sample), is not desktop-sized, and
+   ignores a keystroke. It did not reproduce on relaunch, where the window
+   opened normal and visible, and the re-run passed those checks. Recorded
+   as intermittent rather than dismissed, since an app that occasionally
+   starts minimized would be a genuine annoyance; nobody has established a
+   cause.
+
+### What no task here verified
+
+The honest summary: all four tasks are **implemented with passing tests**,
+and **none** is verified against the real-world condition that motivated it.
+Nothing checks the identity yet (P1-A1), no real feed has been attached
+(B1), LIVE and STALE have still never been observed during an open market
+(B2), no pair has actually been added (B3), and no clean install has been
+tried (B4). Those five remain exactly as open as the task board says.
+
+### Next recommended action
+
+Antigravity can start **P1-A1** now; the field names are listed above. In
+this lane the next unblocked work is nothing — every remaining Claude-lane
+task (P2-C1, P2-C2, P2-C4) is blocked on B1, B2 or B3, which are
+credential, calendar and data-acquisition problems rather than code. The
+most useful thing a coordinator can do to unblock this lane is authenticate
+an MT5 account (B1).
+
+## Previous handoff — Market X-Ray market-intelligence feature (2026-10-31)
 
 **Branch**: `feature/market-xray-dashboard`
 **Base SHA**: `db49310` (Phase 3E, `feature/tars-desktop-demo-20260920`)
