@@ -194,7 +194,7 @@ POST /api/v1/market/replay/reset
 | `GET /api/v1/market/events` | Persisted zone-interaction history |
 | `GET /api/v1/market/setup` | What exists, for the first-run screen. Answers with an empty store |
 | `POST /api/v1/market/import` | Build the store from a local folder, in the background |
-| `WS /api/v1/market/ws` | `market.frame` every 10s |
+| `WS /api/v1/market/ws` | `market.frame` every 10s. Closes 1008 on a message it cannot read, 1011 on an internal error |
 
 Separately, `GET /api/v1/health` carries an `identity` block: `instance_id`
 (this process), `build_id` and `build_source` (this code — the commit SHA

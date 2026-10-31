@@ -11,7 +11,70 @@ for that).
 
 ---
 
-## Latest handoff — Market Intelligence final implementation directive (2026-10-31)
+## Latest handoff — WebSocket send-after-close (2026-10-31)
+
+**Branch**: `fix/market-ws-send-after-close`, from `7fe5875`
+**Fix SHA**: `6c1feb6`
+**Status**: fixed and tested. Not merged. Depends on nothing else.
+
+Reported by Codex's independent verification of `7fe5875`, reproduced by
+`tests/integration/test_market_ws_disconnect.py` on
+`feature/market-xray-final-verification`.
+
+**Root cause.** The sender awaited a multi-second frame build in a thread, then wrote
+without checking anything. A client dropping during that await closed uvicorn's side and
+set the stop event, but the sender was suspended and never looked. Starlette still
+considered its side open, so the write reached uvicorn, which raised a plain
+`RuntimeError`. The sender only caught `WebSocketDisconnect`, so it escaped as an ASGI
+exception.
+
+**Fix.** `apps/backend/app/routers/market_xray.py` only, plus tests:
+
+* `_MarketSocket` owns every write and close: serialised under a lock, checked inside it,
+  closes once, and turns only a confirmed closed-socket failure into a normal end.
+* The sender waits on the build and the stop signal together. `to_thread` cannot be
+  cancelled, so a build in progress is waited for, bounded by `FRAME_DRAIN_SECONDS`.
+* The receiver no longer swallows `RuntimeError` and `Exception`. Disconnect ends it,
+  an unreadable message or invalid command closes 1008, a bug closes 1011 and re-raises.
+
+**Behaviour changes, all at the edges.** A bad client message now gets an explicit 1008
+where the connection used to end with no close frame. `replay.step` and `replay.reset` on
+an empty store are ignored and no longer end the connection. Frames are unchanged.
+
+**Evidence.**
+
+| Check | Result |
+|---|---|
+| Codex reproduction, marker disabled | failed before, passes after |
+| `tests/test_market_ws_lifecycle.py` | 21 of 27 failed before; 27 pass after; 10 repeat runs clean |
+| Real backend, 120 mid-stream disconnects (4 in 5 aborted) | before: 120 send-after-close errors. After: 0, and 0 tracebacks |
+| After that stress | correct REPLAY/RECORDED_STORE frame, `is_live` false, 0 connections left, DISABLED |
+| Backend suite | 1846 passed, 8 skipped, 0 failed |
+| Integration | 15/15 |
+| API and Chromium | 27/27 on 3 of 4 runs. The first exited 1 straight after the backend suite, cause not captured; the same suite timed out under load once on `7fe5875` |
+
+**For Codex.** The reproduction now reports XPASS. Remove its `xfail` marker. It is not on
+this branch: its file is yours, so I ran an unmodified copy and removed it again.
+
+**Known limitations.**
+
+* Closed-socket detection matches message text, because neither uvicorn nor Starlette has a
+  type for it. An upgrade that rewords it would turn a quiet end into a logged error, which
+  the real-server tests would catch. Nothing would go unreported.
+* Builds still run after their client has gone, because a thread cannot be stopped. After
+  this stress a new client waited 97s for its first frame while 120 abandoned builds
+  finished. It needs a reconnect storm to matter, and it was already true. Sharing one
+  in-flight build between clients would remove it, and is a separate change.
+* A second cancellation during shutdown can abandon the wait for a build.
+* A build that runs past `FRAME_DRAIN_SECONDS` is logged and left, since it cannot be killed.
+
+### Next recommended action
+
+Merge this into the integrated branch with `feature/market-xray-final-verification`, then
+Codex removes the marker and reruns final verification. The release checks listed in the
+previous entry remain open.
+
+## Previous handoff — Market Intelligence final implementation directive (2026-10-31)
 
 **Branch**: `feature/market-xray-phase12-integration`
 **Final SHA**: `9926aa8`
