@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 # The Windows console defaults to cp1252, which cannot encode the sigma and
@@ -211,7 +212,11 @@ def verify_api(base: str, report: Report) -> dict:
     )
     api_post(root, "/replay/reset")
 
-    # Event history persistence without duplication.
+    # Event history persistence without duplication. Prime both scans before
+    # taking the baseline: the first-ever scan for a symbol is expected to add
+    # its legitimate events and is not evidence of duplication.
+    api_get(root, "/order-blocks/XAUUSD?timeframe=H1")
+    api_get(root, "/order-blocks/EURUSD?timeframe=H1")
     first = api_get(root, "/events?limit=500")
     api_get(root, "/order-blocks/XAUUSD?timeframe=H1")
     api_get(root, "/order-blocks/EURUSD?timeframe=H1")
@@ -379,7 +384,20 @@ def verify_browser(web: str, report: Report) -> None:
         page.wait_for_timeout(2000)
         cursor_before = page.inner_text(".mx-replay + p")
         page.get_by_role("button", name="⏴⏴ 12").click()
-        page.wait_for_timeout(3200)
+        try:
+            page.wait_for_function(
+                """before => {
+                  const node = document.querySelector('.mx-replay + p');
+                  return node && node.textContent !== before;
+                }""",
+                arg=cursor_before,
+                timeout=30_000,
+            )
+        except PlaywrightTimeoutError:
+            # The evidence below reports the unchanged text. A bounded wait
+            # can distinguish a slow cold aggregate request from a real UI
+            # failure; the old fixed 3.2-second sleep could not.
+            pass
         cursor_after = page.inner_text(".mx-replay + p")
         report.check(
             "Replay controls move the cursor from the UI",
@@ -426,9 +444,18 @@ def main() -> int:
 
     report = Report()
     print("==== TARS Market X-Ray verification ====")
-    verify_api(args.api.rstrip("/"), report)
-    if not args.skip_browser:
-        verify_browser(args.web, report)
+    api_root = args.api.rstrip("/") + "/api/v1/market"
+    try:
+        verify_api(args.api.rstrip("/"), report)
+        if not args.skip_browser:
+            verify_browser(args.web, report)
+    finally:
+        # Replay is shared backend state. A verifier must not leave the next
+        # desktop session pinned merely because a browser assertion failed.
+        try:
+            api_post(api_root, "/replay/reset")
+        except Exception as exc:  # noqa: BLE001 - cleanup failure is reported, not hidden
+            print(f"\n  [WARN] could not reset replay after verification: {exc}")
 
     print("\n==== " + report.summary() + " ====")
     if report.failed:

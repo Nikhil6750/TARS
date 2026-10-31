@@ -23,7 +23,7 @@ import sys
 import time
 import urllib.request
 from ctypes import wintypes
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -43,34 +43,93 @@ PROCESS_NAME = "tars-companion.exe"
 MARKET_TITLE_FRAGMENT = "Market Intelligence"
 BACKEND_PORT = 8000
 HEALTH_URL = f"http://127.0.0.1:{BACKEND_PORT}/api/v1/market/health"
+CORE_HEALTH_URL = f"http://127.0.0.1:{BACKEND_PORT}/api/v1/health"
 # Distinct colours separating a painted dashboard from the error panel.
 # Observed: ~450 for "cannot reach the backend", ~3000 once painted.
 DASHBOARD_MIN_COLOURS = 1500
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 VK_F11 = 0x7A
 KEYEVENTF_KEYUP = 0x0002
 WM_CLOSE = 0x0010
 SW_RESTORE = 9
+MONITOR_DEFAULTTONEAREST = 2
+
+PASS = "PASS"
+FAIL = "FAIL"
+NOT_VERIFIED = "NOT VERIFIED"
+
+
+def enable_per_monitor_dpi_awareness() -> str:
+    """Opt this verifier into physical, per-monitor coordinates.
+
+    Without this, Windows may virtualize ``GetWindowRect`` and
+    ``GetMonitorInfo`` differently as the process moves between displays.
+    ``ERROR_ACCESS_DENIED`` means another imported module already selected a
+    DPI mode; it is diagnostic rather than fatal.
+    """
+    setter = getattr(user32, "SetProcessDpiAwarenessContext", None)
+    if setter is None:
+        user32.SetProcessDPIAware()
+        return "legacy system-DPI awareness (per-monitor v2 API unavailable)"
+    ctypes.set_last_error(0)
+    if setter(ctypes.c_void_p(-4)):  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        return "per-monitor DPI awareness v2 enabled"
+    error = ctypes.get_last_error()
+    return f"DPI context was already fixed by the process (Win32 error {error})"
+
+
+DPI_EVIDENCE = enable_per_monitor_dpi_awareness()
+
+
+@dataclass(frozen=True)
+class MonitorRect:
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+    @property
+    def width(self) -> int:
+        return self.right - self.left
+
+    @property
+    def height(self) -> int:
+        return self.bottom - self.top
 
 
 class Report:
     def __init__(self) -> None:
-        self.results: list[tuple[str, bool, str]] = []
+        self.results: list[tuple[str, str, str]] = []
 
     def check(self, name: str, ok: bool, evidence: str) -> bool:
-        self.results.append((name, ok, evidence))
-        print(f"  [{'PASS' if ok else 'FAIL'}] {name}\n         {evidence}")
+        status = PASS if ok else FAIL
+        self.results.append((name, status, evidence))
+        print(f"  [{status}] {name}\n         {evidence}")
         return ok
+
+    def could_not_verify(self, name: str, evidence: str) -> None:
+        self.results.append((name, NOT_VERIFIED, evidence))
+        print(f"  [{NOT_VERIFIED}] {name}\n         {evidence}")
 
     @property
     def failed(self) -> list[str]:
-        return [n for n, ok, _ in self.results if not ok]
+        return [n for n, status, _ in self.results if status == FAIL]
+
+    @property
+    def unverified(self) -> list[str]:
+        return [n for n, status, _ in self.results if status == NOT_VERIFIED]
 
     def summary(self) -> str:
-        passed = sum(1 for _, ok, _ in self.results if ok)
-        return f"{passed}/{len(self.results)} desktop checks passed"
+        passed = sum(1 for _, status, _ in self.results if status == PASS)
+        failed = len(self.failed)
+        unverified = len(self.unverified)
+        return (
+            f"{passed}/{len(self.results)} desktop checks passed; "
+            f"{failed} failed; {unverified} not verified"
+        )
 
 
 # ---- native helpers ------------------------------------------------------
@@ -143,10 +202,61 @@ def refresh(pid: int, hwnd: int) -> NativeWindow | None:
     return None
 
 
-def focus(hwnd: int) -> None:
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.6)
+def has_minimized_signature(win: NativeWindow) -> bool:
+    """Recognize both the Win32 state and its iconic off-screen rectangle."""
+    return bool(user32.IsIconic(win.hwnd)) or (
+        win.left <= -30_000
+        and win.top <= -30_000
+        and win.width <= 300
+        and win.height <= 100
+    )
+
+
+def restore_minimized_window(pid: int, win: NativeWindow, timeout: float = 8.0) -> NativeWindow | None:
+    user32.ShowWindow(win.hwnd, SW_RESTORE)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        current = refresh(pid, win.hwnd)
+        if current is not None and not has_minimized_signature(current):
+            return current
+        time.sleep(0.2)
+    return None
+
+
+def acquire_foreground(hwnd: int, timeout: float = 3.0) -> tuple[bool, str]:
+    """Acquire and prove foreground ownership before injecting F11.
+
+    Windows is allowed to reject ``SetForegroundWindow``. Attaching the
+    input queues is a bounded recovery attempt, not an assumption that the
+    first call succeeded.
+    """
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+    attempts: list[str] = []
+    direct = bool(user32.SetForegroundWindow(hwnd))
+    attempts.append(f"direct SetForegroundWindow={direct}")
+
+    if user32.GetForegroundWindow() != hwnd:
+        current_thread = int(kernel32.GetCurrentThreadId())
+        target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
+        attached = bool(user32.AttachThreadInput(current_thread, target_thread, True))
+        attempts.append(f"AttachThreadInput={attached}")
+        try:
+            user32.BringWindowToTop(hwnd)
+            retry = bool(user32.SetForegroundWindow(hwnd))
+            attempts.append(f"attached SetForegroundWindow={retry}")
+        finally:
+            if attached:
+                user32.AttachThreadInput(current_thread, target_thread, False)
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        foreground = int(user32.GetForegroundWindow() or 0)
+        if foreground == hwnd:
+            return True, "; ".join(attempts) + f"; foreground=0x{foreground:x}"
+        time.sleep(0.1)
+    foreground = int(user32.GetForegroundWindow() or 0)
+    return False, "; ".join(attempts) + f"; foreground remained 0x{foreground:x}"
 
 
 def press_f11() -> None:
@@ -155,11 +265,8 @@ def press_f11() -> None:
     user32.keybd_event(VK_F11, 0, KEYEVENTF_KEYUP, 0)
 
 
-def monitor_size_for(hwnd: int) -> tuple[int, int]:
-    """Size of the monitor the window is on, so a fullscreen check compares
-    against the right display on a multi-monitor desktop."""
-    MONITOR_DEFAULTTONEAREST = 2
-
+def monitor_rect_for(hwnd: int) -> MonitorRect:
+    """Physical rectangle of the monitor containing the target window."""
     class RECT(ctypes.Structure):
         _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
                     ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
@@ -169,11 +276,46 @@ def monitor_size_for(hwnd: int) -> tuple[int, int]:
                     ("rcWork", RECT), ("dwFlags", wintypes.DWORD)]
 
     handle = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
     info = MONITORINFO()
     info.cbSize = ctypes.sizeof(MONITORINFO)
-    user32.GetMonitorInfoW(handle, ctypes.byref(info))
+    if not user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+        raise ctypes.WinError(ctypes.get_last_error())
     rect = info.rcMonitor
-    return rect.right - rect.left, rect.bottom - rect.top
+    return MonitorRect(rect.left, rect.top, rect.right, rect.bottom)
+
+
+def window_matches_monitor(win: NativeWindow | None, monitor: MonitorRect) -> bool:
+    return bool(
+        win
+        and win.left == monitor.left
+        and win.top == monitor.top
+        and win.right == monitor.right
+        and win.bottom == monitor.bottom
+    )
+
+
+def rect_evidence(win: NativeWindow | None, monitor: MonitorRect) -> str:
+    if win is None:
+        return "window vanished"
+    return (
+        f"window rect=({win.left},{win.top})-({win.right},{win.bottom}) "
+        f"{win.width}x{win.height}; monitor rect=({monitor.left},{monitor.top})-"
+        f"({monitor.right},{monitor.bottom}) {monitor.width}x{monitor.height}; "
+        f"{DPI_EVIDENCE}"
+    )
+
+
+def wait_for_window(pid: int, hwnd: int, predicate, timeout: float = 6.0) -> NativeWindow | None:
+    deadline = time.time() + timeout
+    latest = refresh(pid, hwnd)
+    while time.time() < deadline:
+        latest = refresh(pid, hwnd)
+        if latest is None or predicate(latest):
+            return latest
+        time.sleep(0.15)
+    return latest
 
 
 def image_content_level(path: Path) -> tuple[bool, str, int]:
@@ -242,8 +384,11 @@ def main() -> int:
     win = None
     deadline = time.time() + args.timeout
     while time.time() < deadline:
-        win = market_window(shell_pid)
-        if win and win.visible and win.width > 200:
+        candidate = market_window(shell_pid)
+        if candidate and candidate.visible and (
+            candidate.width > 200 or has_minimized_signature(candidate)
+        ):
+            win = candidate
             break
         time.sleep(2)
 
@@ -253,6 +398,32 @@ def main() -> int:
                      f"no window titled '{MARKET_TITLE_FRAGMENT}'; saw {titles}")
         print("\n==== " + report.summary() + " ====")
         return 1
+
+    if has_minimized_signature(win):
+        minimized_evidence = (
+            f"IsIconic={bool(user32.IsIconic(win.hwnd))}; rect=({win.left},{win.top})-"
+            f"({win.right},{win.bottom}) {win.width}x{win.height}; "
+            "this is the Win32 minimized-window signature"
+        )
+        report.check(
+            "Market Intelligence did not start minimized",
+            False,
+            minimized_evidence,
+        )
+        restored_from_minimized = restore_minimized_window(shell_pid, win)
+        if restored_from_minimized is None:
+            report.could_not_verify(
+                "Remaining window-dependent checks",
+                "the application window was detected as minimized and SW_RESTORE did not restore it; "
+                "downstream capture, fullscreen, and resize checks were not run",
+            )
+            print("\n==== " + report.summary() + " ====")
+            return 1
+        win = restored_from_minimized
+        print(
+            "         verifier restored the minimized window for downstream diagnostics: "
+            f"{win.width}x{win.height} at {win.left},{win.top}"
+        )
 
     all_windows = enumerate_windows(shell_pid)
     report.check(
@@ -292,14 +463,16 @@ def main() -> int:
         f"{shot} — {detail}",
     )
 
-    # 4. backend supervision: one supervised backend, owned by the shell
+    # 4. backend supervision: exactly one compatible backend. It may be an
+    # owned child or a compatible process attached by the shell; those have
+    # different shutdown expectations and must never be conflated.
     backends = supervised_backends(shell_pid)
     listeners = listener_pids(BACKEND_PORT)
     others = [p.pid for p in backend_processes() if p not in backends]
     report.check(
-        "Exactly one supervised Python backend, with no duplicates",
+        "Exactly one Python backend serves the desktop address, with no duplicates",
         len(backends) == 1,
-        f"{len(backends)} supervised backend(s): {[p.pid for p in backends]}"
+        f"{len(backends)} backend(s) for the desktop address: {[p.pid for p in backends]}"
         + (f"; unrelated backends on other ports: {others}" if others else ""),
     )
     report.check(
@@ -307,14 +480,36 @@ def main() -> int:
         len(listeners) == 1,
         f"pids listening on {BACKEND_PORT}: {sorted(listeners)}",
     )
+    backend_owned = False
+    core_identity: dict = {}
+    try:
+        core_health = api(CORE_HEALTH_URL)
+        core_identity = core_health.get("identity", {})
+        compatible = (
+            core_identity.get("service") == "tars-backend"
+            and core_identity.get("contract_version") == 1
+        )
+        report.check(
+            "The process on the backend port declares a compatible TARS identity",
+            compatible,
+            f"identity={core_identity}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        report.check(
+            "The process on the backend port declares a compatible TARS identity",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
     if backends:
         parent = backends[0].parent()
+        backend_owned = parent is not None and parent.pid == shell_pid
         report.check(
-            "The backend is a child of the desktop shell (supervised lifecycle)",
-            parent is not None and parent.pid == shell_pid,
+            "Backend ownership relationship is observable",
+            backend_owned or bool(core_identity),
             f"backend pid {backends[0].pid} parent = "
             f"{parent.pid if parent else None} ({parent.name() if parent else 'n/a'}), "
-            f"shell pid = {shell_pid}",
+            f"shell pid = {shell_pid}; relationship="
+            f"{'OWNED_CHILD' if backend_owned else 'ATTACHED_EXTERNAL'}",
         )
 
     # 5. the dashboard must never present recorded history as live
@@ -340,39 +535,81 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         report.check("Backend reachable from the desktop app", False, f"{type(exc).__name__}: {exc}")
 
-    # 6. fullscreen, via a real keystroke
-    focus(win.hwnd)
-    mon_w, mon_h = monitor_size_for(win.hwnd)
+    # 6. fullscreen, via a real keystroke. Never send input unless the
+    # harness has proved that this exact HWND owns the foreground.
     before = refresh(shell_pid, win.hwnd) or win
-    press_f11()
-    time.sleep(2.0)
-    full = refresh(shell_pid, win.hwnd)
-    # In fullscreen the window rect is exactly the monitor. A *windowed* rect
-    # is normally larger than its client area -- Windows includes the
-    # invisible resize border -- so "bigger than the monitor" is not a
-    # fullscreen signal; being exactly the monitor is.
-    is_full = bool(full and full.width == mon_w and full.height == mon_h)
-    report.check(
-        "F11 puts the window into native fullscreen",
-        is_full,
-        f"{full.width}x{full.height} exactly matches monitor {mon_w}x{mon_h}"
-        if full else "window vanished",
-    )
-    if is_full:
-        capture_window(win.hwnd, OUT_DIR / "02-market-fullscreen.png")
+    monitor = monitor_rect_for(win.hwnd)
+    foreground_ok, focus_evidence = acquire_foreground(win.hwnd)
+    if not foreground_ok:
+        report.could_not_verify(
+            "F11 puts the window into native fullscreen",
+            "automation could not prove foreground ownership, so F11 was not sent; "
+            + focus_evidence,
+        )
+        report.could_not_verify(
+            "F11 again restores the window to its previous size",
+            "fullscreen was not entered because the harness could not acquire the foreground",
+        )
+        restored = before
+    else:
+        press_f11()
+        full = wait_for_window(
+            shell_pid,
+            win.hwnd,
+            lambda current: window_matches_monitor(current, monitor),
+        )
+        is_full = window_matches_monitor(full, monitor)
+        report.check(
+            "F11 puts the window into native fullscreen",
+            is_full,
+            rect_evidence(full, monitor) + "; " + focus_evidence,
+        )
+        if is_full:
+            capture_window(win.hwnd, OUT_DIR / "02-market-fullscreen.png")
 
-    press_f11()
-    time.sleep(2.0)
-    restored = refresh(shell_pid, win.hwnd)
-    report.check(
-        "F11 again restores the window to its previous size",
-        bool(restored and restored.width == before.width and restored.height == before.height),
-        f"{restored.width}x{restored.height} after restore, was {before.width}x{before.height} "
-        f"before fullscreen" if restored else "window vanished",
-    )
+        if is_full:
+            restore_focus_ok, restore_focus_evidence = acquire_foreground(win.hwnd)
+            if not restore_focus_ok:
+                report.could_not_verify(
+                    "F11 again restores the window to its previous size",
+                    "fullscreen was verified, but automation could not reacquire foreground "
+                    "ownership for the restoration keystroke; " + restore_focus_evidence,
+                )
+                restored = full
+            else:
+                press_f11()
+                restored = wait_for_window(
+                    shell_pid,
+                    win.hwnd,
+                    lambda current: (
+                        current.width == before.width and current.height == before.height
+                    ),
+                )
+                report.check(
+                    "F11 again restores the window to its previous size",
+                    bool(
+                        restored
+                        and restored.width == before.width
+                        and restored.height == before.height
+                    ),
+                    (
+                        f"restored rect=({restored.left},{restored.top})-"
+                        f"({restored.right},{restored.bottom}) {restored.width}x{restored.height}; "
+                        f"before={before.width}x{before.height}; {restore_focus_evidence}"
+                        if restored
+                        else "window vanished"
+                    ),
+                )
+        else:
+            report.could_not_verify(
+                "F11 again restores the window to its previous size",
+                "the foreground-owned F11 did not produce fullscreen, so a restoration "
+                "keystroke was not sent into an unknown application state",
+            )
+            restored = refresh(shell_pid, win.hwnd)
 
     # 7. resizing
-    if restored:
+    if restored and not window_matches_monitor(restored, monitor):
         user32.MoveWindow(win.hwnd, restored.left, restored.top, 1280, 820, True)
         time.sleep(1.2)
         resized = refresh(shell_pid, win.hwnd)
@@ -383,6 +620,12 @@ def main() -> int:
             if resized else "window vanished",
         )
         capture_window(win.hwnd, OUT_DIR / "03-market-resized.png")
+    elif restored:
+        report.could_not_verify(
+            "Window is resizable",
+            "the window remained fullscreen because restoration input could not be verified; "
+            "resize was not attempted in an unknown state",
+        )
 
     # 8. closing the market window must not take the app down
     user32.PostMessageW(win.hwnd, WM_CLOSE, 0, 0)
@@ -433,6 +676,7 @@ def main() -> int:
     if args.quit_after:
         print("\n  -- quitting the app cooperatively to verify shutdown --")
         before = [p.pid for p in supervised_backends(shell_pid)]
+        identity_before_quit = core_identity.copy()
         # The app's own quit path (identical to the tray's Quit item): it asks
         # the backend to exit first. A hard TerminateProcess on the shell
         # would orphan the backend, which tests the OS rather than the
@@ -446,7 +690,9 @@ def main() -> int:
         if quit_exe:
             subprocess.Popen([quit_exe, "--quit"], close_fds=True)
         gone_deadline = time.time() + 60
-        while time.time() < gone_deadline and (shell_processes() or listener_pids(BACKEND_PORT)):
+        while time.time() < gone_deadline and (
+            shell_processes() or (backend_owned and listener_pids(BACKEND_PORT))
+        ):
             time.sleep(2)
         after = sorted(listener_pids(BACKEND_PORT))
         report.check(
@@ -454,18 +700,35 @@ def main() -> int:
             not shell_processes(),
             f"{PROCESS_NAME} instances remaining: {[p.pid for p in shell_processes()]}",
         )
-        report.check(
-            "Quitting the desktop app leaves no orphan Python backend",
-            not after,
-            f"supervised backend pids before quit {before}; "
-            f"still listening on {BACKEND_PORT} after quit: {after}",
-        )
+        if backend_owned:
+            report.check(
+                "Quitting the desktop app leaves no orphan owned backend",
+                not after,
+                f"owned backend pids before quit {before}; "
+                f"still listening on {BACKEND_PORT} after quit: {after}",
+            )
+        else:
+            try:
+                identity_after_quit = api(CORE_HEALTH_URL).get("identity", {})
+            except Exception:  # noqa: BLE001 - failed identity is evidence below
+                identity_after_quit = {}
+            report.check(
+                "Quitting leaves an attached compatible backend untouched",
+                after == before and identity_after_quit == identity_before_quit,
+                f"attached backend pids before quit {before}; listeners after quit {after}; "
+                f"identity unchanged={identity_after_quit == identity_before_quit}",
+            )
 
     payload = {
         "shell_pid": shell_pid,
+        "backend_owned": backend_owned,
+        "backend_identity": core_identity,
         "market_window": asdict(win) | {"width": win.width, "height": win.height},
         "output_dir": str(OUT_DIR.resolve()),
-        "checks": [{"name": n, "ok": ok, "evidence": e} for n, ok, e in report.results],
+        "checks": [
+            {"name": n, "status": status, "ok": status == PASS, "evidence": e}
+            for n, status, e in report.results
+        ],
     }
     (OUT_DIR / "desktop-verification.json").write_text(
         json.dumps(payload, indent=2), encoding="utf-8"
@@ -476,6 +739,9 @@ def main() -> int:
     if report.failed:
         print("FAILED: " + ", ".join(report.failed))
         return 1
+    if report.unverified:
+        print("NOT VERIFIED: " + ", ".join(report.unverified))
+        return 2
     print("All desktop checks passed.")
     return 0
 
