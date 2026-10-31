@@ -185,7 +185,7 @@ if ($running) {
     Write-Warn2 "TARS is already running (pid $($running.Id -join ', ')); opening its Market window."
     & $exe --market
 } else {
-    Start-Process -FilePath $exe | Out-Null
+    Start-Process -FilePath $exe -ArgumentList '--market' | Out-Null
 }
 
 $deadline = (Get-Date).AddMinutes(3)

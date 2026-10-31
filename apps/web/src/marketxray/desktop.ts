@@ -42,6 +42,17 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 export const toggleFullscreen = (): Promise<boolean | null> =>
   invoke<boolean>('market_toggle_fullscreen');
 
+/** Why the shell is not using a backend, when something else holds the port. */
+export interface BackendStatus {
+  health: string;
+  ownership: 'NONE' | 'OWNED' | 'ATTACHED' | 'CONFLICT';
+  detail: string;
+  base_url: string;
+}
+
+export const backendStatus = (): Promise<BackendStatus | null> =>
+  invoke<BackendStatus>('get_backend_status');
+
 /* ---------- local preferences ---------- */
 
 export interface Preferences {

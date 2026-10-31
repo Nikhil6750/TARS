@@ -109,12 +109,30 @@ def test_unavailable_pairs_are_declared_and_really_absent():
         )
 
 
-def test_the_named_fx_universe_adds_up():
-    """17 backed pairs plus 9 unavailable ones are the 26 FX names the
-    target refers to. Stated as arithmetic so a change has to be deliberate."""
-    assert len(universe.FX_PAIRS) == 17
+def test_the_target_does_not_reconcile_and_says_so():
+    """The target is 26 instruments: 25 FX pairs plus XAUUSD. The names on hand
+    make 27, so at least one is not in the target, and the list that would say
+    which does not exist. This fails the day someone closes the gap, which is
+    when `target_list_defined` has to be answered properly."""
+    named = set(universe.SYMBOLS) | set(universe.UNAVAILABLE_PAIRS)
+    assert len(universe.SYMBOLS) == 18
     assert len(universe.UNAVAILABLE_PAIRS) == 9
-    assert len(set(universe.FX_PAIRS) | set(universe.UNAVAILABLE_PAIRS)) == 26
+    assert len(named) == 27
+    assert universe.TARGET_INSTRUMENT_COUNT == 26
+    assert universe.coverage_summary()["target_list_defined"] is False
+
+
+def test_the_nine_named_pairs_are_not_the_whole_gap():
+    """All 28 crosses of the eight currencies are absent-or-backed, and EURCHF
+    and GBPCHF appear in neither list, so a target built from the 28 would have
+    a larger gap than nine."""
+    crosses = {
+        a + b for a in universe.CURRENCIES for b in universe.CURRENCIES
+        if a != b
+    }
+    known = set(universe.FX_PAIRS) | set(universe.UNAVAILABLE_PAIRS)
+    assert known <= crosses
+    assert not {"EURCHF", "GBPCHF"} & known
 
 
 def test_strength_reports_what_is_unavailable_entirely():
@@ -185,6 +203,7 @@ def expanded_universe(monkeypatch):
 
 
 def test_the_expanded_universe_is_actually_bigger(expanded_universe):
+    # A stress case for the coverage machinery, not the product target.
     assert len(universe.FX_PAIRS) == 26
 
 

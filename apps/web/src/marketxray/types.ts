@@ -8,6 +8,22 @@
 
 export type FeedStatusName = 'LIVE' | 'STALE' | 'REPLAY' | 'CLOSED' | 'NO_DATA';
 
+export type FeedConnection = 'NOT_CONFIGURED' | 'AUTH_REQUIRED' | 'DISCONNECTED' | 'CONNECTED';
+
+export interface SetupStatus {
+  ready: boolean;
+  store_root: string;
+  symbols_in_store: number;
+  sources: {
+    csv_root: string;
+    csv_root_exists: boolean;
+    instruments_found: string[];
+    instruments_missing: string[];
+  };
+  import: { state: 'IDLE' | 'RUNNING' | 'DONE' | 'FAILED'; error: string | null };
+  status: MarketStatus;
+}
+
 export interface Provenance {
   source: 'RECORDED_STORE' | 'LIVE_FEED';
   provider: string;
@@ -28,6 +44,8 @@ export interface MarketStatus {
   detail: string;
   replay: boolean;
   source?: 'RECORDED_STORE' | 'LIVE_FEED';
+  feed_connection?: FeedConnection;
+  feed_detail?: string;
   provider?: string;
   is_live?: boolean;
 }

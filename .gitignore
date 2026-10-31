@@ -72,3 +72,6 @@ artifacts/market-xray/
 # Desktop verification evidence (screenshots, not source)
 artifacts/market-desktop/
 @AutomationLog.txt
+
+# Self-contained backend runtime built for the installer
+apps/web/src-tauri/bundle-runtime/

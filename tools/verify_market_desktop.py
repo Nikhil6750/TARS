@@ -49,28 +49,48 @@ DASHBOARD_MIN_COLOURS = 1500
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
+# Without this Windows virtualises every coordinate for a scaled display, so
+# the same window measures differently depending on what ran first, and a
+# 1920x1080 monitor at 125% reads as 1536x864. Must run before any measurement.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor
+except OSError:
+    pass
+
 VK_F11 = 0x7A
 KEYEVENTF_KEYUP = 0x0002
+VK_MENU = 0x12
 WM_CLOSE = 0x0010
 SW_RESTORE = 9
 
 
 class Report:
-    def __init__(self) -> None:
-        self.results: list[tuple[str, bool, str]] = []
+    """PASS, FAIL (the application misbehaved) and UNVERIFIED (this harness
+    could not perform the check, which says nothing about the application)."""
 
-    def check(self, name: str, ok: bool, evidence: str) -> bool:
+    def __init__(self) -> None:
+        self.results: list[tuple[str, bool | None, str]] = []
+
+    def check(self, name: str, ok: bool | None, evidence: str) -> bool:
         self.results.append((name, ok, evidence))
-        print(f"  [{'PASS' if ok else 'FAIL'}] {name}\n         {evidence}")
-        return ok
+        verdict = "UNVERIFIED" if ok is None else ("PASS" if ok else "FAIL")
+        print(f"  [{verdict}] {name}\n         {evidence}")
+        return bool(ok)
 
     @property
     def failed(self) -> list[str]:
-        return [n for n, ok, _ in self.results if not ok]
+        return [n for n, ok, _ in self.results if ok is False]
+
+    @property
+    def unverified(self) -> list[str]:
+        return [n for n, ok, _ in self.results if ok is None]
 
     def summary(self) -> str:
         passed = sum(1 for _, ok, _ in self.results if ok)
-        return f"{passed}/{len(self.results)} desktop checks passed"
+        return (
+            f"{passed}/{len(self.results)} desktop checks passed, {len(self.failed)} failed, "
+            f"{len(self.unverified)} could not be verified"
+        )
 
 
 # ---- native helpers ------------------------------------------------------
@@ -143,10 +163,23 @@ def refresh(pid: int, hwnd: int) -> NativeWindow | None:
     return None
 
 
-def focus(hwnd: int) -> None:
+def is_minimized(hwnd: int) -> bool:
+    return bool(user32.IsIconic(hwnd))
+
+
+def focus(hwnd: int) -> bool:
+    """Bring the window forward, and say whether that actually worked. Windows
+    refuses the foreground to a background process unless it has just sent
+    input, hence the Alt tap, and a refused request is silent."""
     user32.ShowWindow(hwnd, SW_RESTORE)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.6)
+    for _ in range(3):
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.6)
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+    return False
 
 
 def press_f11() -> None:
@@ -211,11 +244,16 @@ def main() -> int:
                     help="close the app at the end and verify no orphan backend survives")
     ap.add_argument("--timeout", type=float, default=240.0,
                     help="seconds to wait for the desktop window to appear")
+    ap.add_argument("--launch", type=Path, metavar="EXE",
+                    help="start this binary first, unless TARS is already running")
     args = ap.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     report = Report()
     print("==== TARS Market Intelligence — desktop verification ====\n")
+
+    if args.launch and not shell_processes():
+        subprocess.Popen([str(args.launch), "--market"], close_fds=True)
 
     # 1. the native shell is running, exactly once
     deadline = time.time() + args.timeout
@@ -226,10 +264,13 @@ def main() -> int:
             break
         time.sleep(2)
     if not shells:
-        report.check("Native desktop shell is running", False,
-                     f"no {PROCESS_NAME} process after {args.timeout:.0f}s")
+        # This script does not start the app unless told to, so an absent
+        # process is a setup problem and not an application failure.
+        report.check("Native desktop shell is running", None,
+                     f"no {PROCESS_NAME} process after {args.timeout:.0f}s; "
+                     "start it first, or pass --launch EXE")
         print("\n==== " + report.summary() + " ====")
-        return 1
+        return 2
 
     report.check(
         "Native desktop shell is running as a single instance",
@@ -243,7 +284,7 @@ def main() -> int:
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         win = market_window(shell_pid)
-        if win and win.visible and win.width > 200:
+        if win and win.visible and (win.width > 200 or is_minimized(win.hwnd)):
             break
         time.sleep(2)
 
@@ -253,6 +294,21 @@ def main() -> int:
                      f"no window titled '{MARKET_TITLE_FRAGMENT}'; saw {titles}")
         print("\n==== " + report.summary() + " ====")
         return 1
+
+    # A minimized window sits at -32000,-32000 at 199x34 and cannot be captured
+    # or sent keys, so it would otherwise surface as several unrelated failures.
+    # Named once here, then restored so the remaining checks measure something.
+    came_up_minimized = is_minimized(win.hwnd)
+    report.check(
+        "The Market window did not open minimized",
+        not came_up_minimized,
+        f"at {win.left},{win.top} size {win.width}x{win.height}"
+        + ("; restoring it so the remaining checks can run" if came_up_minimized else ""),
+    )
+    if came_up_minimized:
+        user32.ShowWindow(win.hwnd, SW_RESTORE)
+        time.sleep(1.5)
+        win = refresh(shell_pid, win.hwnd) or win
 
     all_windows = enumerate_windows(shell_pid)
     report.check(
@@ -341,35 +397,48 @@ def main() -> int:
         report.check("Backend reachable from the desktop app", False, f"{type(exc).__name__}: {exc}")
 
     # 6. fullscreen, via a real keystroke
-    focus(win.hwnd)
+    delivered = focus(win.hwnd)
     mon_w, mon_h = monitor_size_for(win.hwnd)
     before = refresh(shell_pid, win.hwnd) or win
-    press_f11()
-    time.sleep(2.0)
+    if delivered:
+        press_f11()
+        time.sleep(2.0)
     full = refresh(shell_pid, win.hwnd)
     # In fullscreen the window rect is exactly the monitor. A *windowed* rect
     # is normally larger than its client area -- Windows includes the
     # invisible resize border -- so "bigger than the monitor" is not a
     # fullscreen signal; being exactly the monitor is.
     is_full = bool(full and full.width == mon_w and full.height == mon_h)
-    report.check(
-        "F11 puts the window into native fullscreen",
-        is_full,
-        f"{full.width}x{full.height} exactly matches monitor {mon_w}x{mon_h}"
-        if full else "window vanished",
-    )
+    if not delivered:
+        report.check(
+            "F11 puts the window into native fullscreen", None,
+            "Windows refused the foreground, so the keystroke could not be delivered",
+        )
+    else:
+        report.check(
+            "F11 puts the window into native fullscreen",
+            is_full,
+            f"window {full.width}x{full.height}, monitor {mon_w}x{mon_h}"
+            if full else "window vanished",
+        )
     if is_full:
         capture_window(win.hwnd, OUT_DIR / "02-market-fullscreen.png")
 
-    press_f11()
-    time.sleep(2.0)
+    if delivered:
+        press_f11()
+        time.sleep(2.0)
     restored = refresh(shell_pid, win.hwnd)
-    report.check(
-        "F11 again restores the window to its previous size",
-        bool(restored and restored.width == before.width and restored.height == before.height),
-        f"{restored.width}x{restored.height} after restore, was {before.width}x{before.height} "
-        f"before fullscreen" if restored else "window vanished",
-    )
+    if not delivered:
+        report.check("F11 again restores the window to its previous size", None,
+                     "not attempted: fullscreen was never entered")
+    else:
+        report.check(
+            "F11 again restores the window to its previous size",
+            bool(restored and restored.width == before.width and restored.height == before.height),
+            f"{restored.width}x{restored.height} after restore, "
+            f"was {before.width}x{before.height} before fullscreen"
+            if restored else "window vanished",
+        )
 
     # 7. resizing
     if restored:
@@ -475,7 +544,12 @@ def main() -> int:
     print("\n==== " + report.summary() + " ====")
     if report.failed:
         print("FAILED: " + ", ".join(report.failed))
+    if report.unverified:
+        print("COULD NOT VERIFY: " + ", ".join(report.unverified))
+    if report.failed:
         return 1
+    if report.unverified:
+        return 2
     print("All desktop checks passed.")
     return 0
 

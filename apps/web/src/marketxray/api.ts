@@ -12,10 +12,12 @@ import type {
   LeadersSnapshot,
   MarketStatus,
   OrderBlocksPayload,
+  SetupStatus,
   StrengthSnapshot,
   XRaySnapshot
 } from './types';
 import { backendHttpUrl, backendWsUrl } from '../runtime/backendUrl';
+import { isDesktop } from './desktop';
 
 export const API_BASE = backendHttpUrl();
 
@@ -42,7 +44,7 @@ async function get<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(
       `Cannot reach the TARS backend at ${API_BASE}.`,
       0,
-      'Start it with scripts\\start-market-xray.cmd'
+      isDesktop() ? undefined : 'Start it with scripts\\start-market-xray.cmd'
     );
   }
   if (!response.ok) {
@@ -77,6 +79,10 @@ export const api = {
     return get<Dashboard>(`/dashboard?${params}`);
   },
   health: () => get<{ status: MarketStatus; store: Record<string, unknown> }>('/health'),
+  setup: (csvRoot?: string) =>
+    get<SetupStatus>(`/setup${csvRoot ? `?csv_root=${encodeURIComponent(csvRoot)}` : ''}`),
+  startImport: (csvRoot: string) =>
+    post<SetupStatus['import']>(`/import?csv_root=${encodeURIComponent(csvRoot)}`),
   xray: (timeframe: string) => get<XRaySnapshot>(`/xray?timeframe=${timeframe}`),
   strength: (window: string) => get<StrengthSnapshot>(`/strength?window=${window}`),
   leaders: (timeframe: string) => get<LeadersSnapshot>(`/leaders?timeframe=${timeframe}`),

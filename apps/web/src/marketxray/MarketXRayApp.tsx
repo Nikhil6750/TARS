@@ -15,7 +15,8 @@ import { ApiError, WS_URL, api } from './api';
 import { CandleChart } from './components/CandleChart';
 import { CurrencyStrengthPanel, EventHistory, Panel, Segmented, ZoneTable, LeaderBoard } from './components/Panels';
 import { StatusBanner, TopNav, type Section } from './components/TopNav';
-import { isDesktop, loadPreferences, savePreferences, toggleFullscreen } from './desktop';
+import { backendStatus, isDesktop, loadPreferences, savePreferences, toggleFullscreen } from './desktop';
+import { FirstRun } from './components/FirstRun';
 import { XRayCanvas } from './components/XRayCanvas';
 import type {
   ChartPayload,
@@ -26,6 +27,7 @@ import type {
   MarketStatus,
   OrderBlocksPayload,
   Provenance,
+  SetupStatus,
   StrengthSnapshot,
   XRaySnapshot
 } from './types';
@@ -60,6 +62,7 @@ export const MarketXRayApp: React.FC = () => {
   const [events, setEvents] = useState<EventsPayload | null>(null);
   const [provenance, setProvenance] = useState<Provenance | null>(null);
   const [replayPinned, setReplayPinned] = useState(false);
+  const [setup, setSetup] = useState<SetupStatus | null>(null);
 
   const [fatal, setFatal] = useState<Fatal | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -91,14 +94,27 @@ export const MarketXRayApp: React.FC = () => {
       const seq = ++requestSeq.current;
       setBusy(true);
       try {
+        const state = await api.setup();
+        if (seq !== requestSeq.current) return;
+        if (!state.ready) {
+          setSetup(state);
+          setFatal(null);
+          return;
+        }
         const data = await api.dashboard(tf, sym ?? undefined, win);
         if (seq !== requestSeq.current) return;
         applyDashboard(data);
+        setSetup(null);
         setFatal(null);
       } catch (error) {
         if (seq !== requestSeq.current) return;
         if (error instanceof ApiError) {
-          setFatal({ message: error.message, remedy: error.remedy });
+          // The shell knows why, when something else is holding the port.
+          const shell = error.status === 0 ? await backendStatus() : null;
+          setFatal({
+            message: error.message,
+            remedy: shell?.ownership === 'CONFLICT' ? `Port conflict: ${shell.detail}` : error.remedy
+          });
         } else {
           setFatal({ message: String(error) });
         }
@@ -141,10 +157,15 @@ export const MarketXRayApp: React.FC = () => {
       attempt += 1;
       setRetrying(true);
       void api
-        .dashboard(timeframe, symbol ?? undefined, strengthWindow)
-        .then((data) => {
+        .setup()
+        .then(async (state) => {
           if (cancelled) return;
-          applyDashboard(data);
+          if (!state.ready) {
+            setSetup(state);
+          } else {
+            applyDashboard(await api.dashboard(timeframe, symbol ?? undefined, strengthWindow));
+          }
+          if (cancelled) return;
           setFatal(null);
           setRetrying(false);
         })
@@ -162,6 +183,22 @@ export const MarketXRayApp: React.FC = () => {
       window.clearTimeout(timer);
     };
   }, [fatal, timeframe, symbol, strengthWindow, applyDashboard]);
+
+  // While there is nothing to show, watch for that changing: an import
+  // finishing, or a logged-in terminal delivering its first bars.
+  useEffect(() => {
+    if (!setup) return;
+    const timer = window.setInterval(() => {
+      void api
+        .setup(setup.sources.csv_root)
+        .then((state) => {
+          if (state.ready) void loadAll(timeframe, symbol, strengthWindow);
+          else setSetup(state);
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [setup, loadAll, timeframe, symbol, strengthWindow]);
 
   /** Refetch only the per-instrument panels. */
   const loadInstrument = useCallback(async (sym: string, tf: string) => {
@@ -309,13 +346,18 @@ export const MarketXRayApp: React.FC = () => {
   useEffect(() => {
     if (!isDesktop()) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'F11') {
+      if (event.key === 'F11' || event.code === 'F11' || event.keyCode === 122) {
         event.preventDefault();
+        event.stopPropagation();
         handleFullscreen();
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    document.addEventListener('keydown', onKey, true);
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('keydown', onKey, true);
+    };
   }, [handleFullscreen]);
 
   const precisionFor = useCallback(
@@ -328,6 +370,17 @@ export const MarketXRayApp: React.FC = () => {
     () => chart?.precision ?? (symbol ? precisionFor(symbol) : 5),
     [chart, symbol, precisionFor]
   );
+
+  if (setup) {
+    return (
+      <div className="mx">
+        <div className="mx-shell">
+          <TopNav status={setup.status} section={section} onSection={setSection} desktop={isDesktop()} />
+          <FirstRun setup={setup} onChanged={setSetup} />
+        </div>
+      </div>
+    );
+  }
 
   if (fatal) {
     return (
@@ -398,16 +451,6 @@ export const MarketXRayApp: React.FC = () => {
             >
               dismiss
             </button>
-          </div>
-        )}
-
-        {instruments.length === 0 && !busy && (
-          <div className="mx-empty-store-banner">
-            <strong>No market history in local store</strong>
-            <p>
-              The candle store currently contains no completed bars. Run historical ingestion or attach an active feed.
-            </p>
-            <code>python -m market.ingest</code>
           </div>
         )}
 

@@ -41,7 +41,11 @@ PUSH_INTERVAL_SECONDS = 10.0
 
 
 def _service(request: Request) -> MarketXRayService:
-    existing = getattr(request.app.state, "market_xray_service", None)
+    return _app_service(request.app)
+
+
+def _app_service(app) -> MarketXRayService:
+    existing = getattr(app.state, "market_xray_service", None)
     if existing is not None:
         return existing
     try:
@@ -56,8 +60,8 @@ def _service(request: Request) -> MarketXRayService:
                 "remedy": "Build the candle store: python -m market.ingest",
             },
         ) from exc
-    request.app.state.market_xray_service = service
-    _start_feed(request.app)
+    app.state.market_xray_service = service
+    _start_feed(app)
     return service
 
 
@@ -130,6 +134,7 @@ def setup_status(request: Request, csv_root: str | None = Query(None)) -> dict:
         "store_root": str(service.store.root),
         "symbols_in_store": len(service.store.available_symbols),
         "sources": setup.discover_sources(root),
+        "coverage": universe.coverage_summary(),
         "import": import_state,
         "status": service.market_status().as_dict(),
         "trading_execution": "DISABLED",
@@ -314,12 +319,20 @@ def replay_reset(request: Request) -> dict:
 def _build_frame(service: MarketXRayService, timeframe: str) -> dict:
     """One WebSocket frame. Synchronous by design -- callers run it in a
     thread so the event loop stays free."""
+    status = service.market_status().as_dict()
+    if service.bounds[1] is None and not service.panels_follow_feed:
+        # Nothing to compute from yet: the first-run screen owns this state,
+        # and a frame must not fail just because the store is still empty.
+        return {"type": "market.status", "status": status, "feed": service.feed_state}
     return {
         "type": "market.frame",
         "sent_at": datetime.now(UTC).isoformat(),
         "cursor": service.cursor.isoformat(),
         "timeframe": timeframe,
-        "status": service.market_status().as_dict(),
+        "status": status,
+        "provenance": service.data_provenance().as_dict(),
+        "replay_pinned": service.replay_pinned,
+        "feed": service.feed_state,
         "xray": service.xray(timeframe=timeframe),
         "strength": service.strength(),
         "leaders": service.leaders(timeframe=timeframe),
@@ -338,22 +351,19 @@ async def market_ws(websocket: WebSocket) -> None:
     """
     await websocket.accept()
     try:
-        service = await asyncio.to_thread(MarketXRayService)
+        await asyncio.to_thread(_app_service, websocket.app)
     except Exception as exc:  # noqa: BLE001
         await websocket.send_json({
             "type": "market.error",
             "error": "market_store_unavailable",
-            "message": str(exc),
-            "remedy": "Build the candle store: python -m market.ingest",
+            "message": getattr(exc, "detail", None) or str(exc),
         })
         await websocket.close()
         return
 
-    cached = getattr(websocket.app.state, "market_xray_service", None)
-    if cached is not None:
-        service = cached
-    else:
-        websocket.app.state.market_xray_service = service
+    def service() -> MarketXRayService:
+        # Looked up each time: an import replaces the service mid-connection.
+        return _app_service(websocket.app)
 
     timeframe = universe.DEFAULT_TIMEFRAME
     stop = asyncio.Event()
@@ -371,10 +381,10 @@ async def market_ws(websocket: WebSocket) -> None:
                         timeframe = requested
                 elif kind == "replay.step":
                     await asyncio.to_thread(
-                        service.step_cursor, timeframe=timeframe, bars=int(msg.get("bars", 1))
+                        service().step_cursor, timeframe=timeframe, bars=int(msg.get("bars", 1))
                     )
                 elif kind == "replay.reset":
-                    await asyncio.to_thread(service.reset_cursor)
+                    await asyncio.to_thread(service().reset_cursor)
         except (WebSocketDisconnect, RuntimeError):
             stop.set()
         except Exception as exc:  # noqa: BLE001
@@ -388,7 +398,7 @@ async def market_ws(websocket: WebSocket) -> None:
                 # Built in a worker thread: this is seconds of DuckDB and
                 # order-block work, and on the event loop it would stall every
                 # other request between frames.
-                frame = await asyncio.to_thread(_build_frame, service, timeframe)
+                frame = await asyncio.to_thread(_build_frame, service(), timeframe)
             except Exception as exc:  # noqa: BLE001
                 frame = {
                     "type": "market.error",

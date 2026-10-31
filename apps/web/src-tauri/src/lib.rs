@@ -71,8 +71,9 @@ fn resolve_backend_launch(app: &tauri::AppHandle) -> BackendLaunch {
     let explicit = std::env::var("TARS_BACKEND_DIR").is_ok_and(|d| !d.trim().is_empty());
     if !explicit {
         if let Ok(resources) = app.path().resource_dir() {
-            let python = resources.join("backend-runtime").join("python").join("python.exe");
-            let backend = resources.join("backend");
+            let bundle = resources.join("tars");
+            let python = bundle.join("python").join("python.exe");
+            let backend = bundle.join("apps").join("backend");
             if python.is_file() && backend.join("run.py").is_file() {
                 let home = app.path().app_local_data_dir().unwrap_or_else(|_| resources.join("data"));
                 return BackendLaunch {
@@ -896,6 +897,10 @@ fn open_market_impl(app: &tauri::AppHandle) -> Result<(), String> {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    #[cfg(target_os = "windows")]
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(0xFFFFFFFF);
+    }
     Ok(())
 }
 
@@ -921,9 +926,26 @@ mod market_window_tests {
     }
 }
 
+/// Opens the window from a worker thread, one request at a time. Building a
+/// webview on the main thread waits for the very event loop it is blocking,
+/// and every caller here is on it: the tray, a sync command, and the
+/// single-instance callback. Two `--market` launches a second apart hung the
+/// whole app that way, leaving a half-built duplicate window and every later
+/// launch, `--quit` included, stuck waiting on it.
+fn open_market(app: &tauri::AppHandle) {
+    static OPENING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _one_at_a_time = OPENING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(err) = open_market_impl(&app) {
+            eprintln!("[TARS][market] {err}");
+        }
+    });
+}
+
 #[tauri::command]
-fn open_market_intelligence(app: tauri::AppHandle) -> Result<(), String> {
-    open_market_impl(&app)
+fn open_market_intelligence(app: tauri::AppHandle) {
+    open_market(&app);
 }
 
 /// Toggles fullscreen on whichever window asked. Exposed so the dashboard's
@@ -1778,9 +1800,7 @@ pub fn run() {
             // reliable way to (re)open it from a shortcut or a script
             // without going through the tray.
             if args.iter().any(|a| a == "--market") {
-                if let Err(err) = open_market_impl(app) {
-                    eprintln!("[TARS][market] {err}");
-                }
+                open_market(app);
                 return;
             }
             // `TARS.exe --quit` performs the same cooperative shutdown as the
@@ -1789,9 +1809,13 @@ pub fn run() {
             // hard-killing the shell cannot do this, and a scriptable clean
             // stop is what makes shutdown verifiable.
             if args.iter().any(|a| a == "--quit") {
-                let sup = app.state::<Arc<BackendSupervisor>>().inner().clone();
-                sup.stop(app);
-                app.exit(0);
+                // Off the main thread: this waits for the backend to go.
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let sup = app.state::<Arc<BackendSupervisor>>().inner().clone();
+                    sup.stop(&app);
+                    app.exit(0);
+                });
                 return;
             }
             let _ = summon_smart(app);
@@ -1865,6 +1889,15 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            if window.label() == MARKET_WINDOW {
+                if let tauri::WindowEvent::Focused(true) = event {
+                    let _ = window.set_focus();
+                    #[cfg(target_os = "windows")]
+                    unsafe {
+                        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(0xFFFFFFFF);
+                    }
+                }
+            }
             // M2A/M2B Background persistence (Close-to-tray)
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // The Market Intelligence workspace is an ordinary desktop
@@ -1940,11 +1973,7 @@ pub fn run() {
                             "open_workspace" => {
                                 let _ = show_main_impl(app);
                             }
-                            "open_market" => {
-                                if let Err(err) = open_market_impl(app) {
-                                    eprintln!("[TARS][market] {err}");
-                                }
-                            }
+                            "open_market" => open_market(app),
                             "mic_test" => {
                                 let _ = show_main_impl(app);
                                 let _ = app.emit("tars://open-mic-test", ());
@@ -2067,9 +2096,7 @@ pub fn run() {
             let market_requested = std::env::var("TARS_OPEN_MARKET").is_ok_and(|v| v == "1")
                 || std::env::args().any(|a| a == "--market");
             if market_requested {
-                if let Err(err) = open_market_impl(app.handle()) {
-                    eprintln!("[TARS][market] could not open at startup: {err}");
-                }
+                open_market(app.handle());
             }
 
             Ok(())

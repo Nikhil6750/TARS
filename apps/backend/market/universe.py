@@ -83,13 +83,30 @@ INSTRUMENTS["XAUUSD"] = Instrument(
     source_dir="xauusd_utc", source_stem="XAUUSD_1 Min",
 )
 
-# Named in the 26-instrument target but with no source data on this machine
-# (task P2-C4). Declared rather than only documented, so the gap is
-# checkable and cannot be closed by adding a symbol without data behind it.
+# Pairs with no source data on this machine. Declared rather than only
+# documented, so the gap is checkable and cannot be closed by adding a symbol
+# without data behind it.
 UNAVAILABLE_PAIRS: tuple[str, ...] = (
     "AUDNZD", "CADCHF", "CADJPY", "EURNZD", "GBPNZD",
     "NZDCAD", "NZDCHF", "NZDJPY", "USDCHF",
 )
+
+# The product target: 25 FX pairs plus XAUUSD. It has never been written down as
+# a list. The 18 instruments here plus the nine names above make 27, one more
+# than the target, and those nine are not the whole gap either: the 28 crosses
+# of the eight currencies also include EURCHF and GBPCHF. So which FX pairs make
+# up the 25 is an open coordinator decision, and nothing here pretends otherwise.
+TARGET_INSTRUMENT_COUNT = 26
+
+
+def coverage_summary() -> dict:
+    """The instrument count against the target, stated as what is known."""
+    return {
+        "target_instruments": TARGET_INSTRUMENT_COUNT,
+        "backed_instruments": len(INSTRUMENTS),
+        "named_unavailable": sorted(UNAVAILABLE_PAIRS),
+        "target_list_defined": False,
+    }
 
 SYMBOLS: tuple[str, ...] = tuple(INSTRUMENTS)
 FX_PAIRS: tuple[str, ...] = tuple(s for s, m in INSTRUMENTS.items() if m.is_fx_pair)
