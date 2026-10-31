@@ -187,7 +187,7 @@ this page describes checks that were actually run, and these were not.
 
 | Pending | Why it is still open |
 |---|---|
-| **Manual tray-icon click** | Windows 11's tray overflow is an XAML island that resists UI Automation — a pre-existing gap in this repo (ADR-022). The tray item's handler calls the same `open_market_impl` as the verified `--market` and startup paths, but no test drives the click. Needs a human to click it once and confirm the window opens. |
+| **Manual tray-icon click** | Windows 11's tray overflow is an XAML island that resists UI Automation — a pre-existing gap in this repo, recorded in `docs/demo/CAMPUS_DEMO.md` ("Tray icon click and the tray menu are implemented but not automated; verify by eye"). The tray item's handler calls the same `open_market_impl` as the verified `--market` and startup paths, but no test drives the click. Needs a human to click it once and confirm the window opens. |
 | **Clean-install verification** | Everything was verified against a development tree with its toolchain, `node_modules`, a built candle store and a warm data root. The NSIS installer was produced but never installed on a machine without those. Needs `TARS_1.0.0_x64-setup.exe` run on a clean Windows profile, then Market Intelligence opened from the installed app. |
 
 Until each is actually performed, neither should be described as verified.

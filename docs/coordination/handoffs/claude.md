@@ -139,8 +139,10 @@ config,events}`, `GET /api/v1/market/{candles,order-blocks}/{symbol}`,
 ### Known limitations
 
 1. **Tray-icon click is not automated.** Windows 11's tray overflow is an
-   XAML island that resists UI Automation, which is the same gap ADR-022
-   already records for this repo. The tray item is registered and its handler
+   XAML island that resists UI Automation, which is the same gap
+   `docs/demo/CAMPUS_DEMO.md` already records for this repo ("Tray icon
+   click and the tray menu are implemented but not automated; verify by
+   eye"). The tray item is registered and its handler
    calls `open_market_impl` — the identical function exercised by the two
    verified entry points (`TARS_OPEN_MARKET=1` at startup, and `--market`
    through the single-instance plugin) — but the click itself was not driven
