@@ -6,12 +6,22 @@ labelled ``LIVE`` when a real feed produced it within the freshness window
 ``REPLAY``; a feed that has fallen behind is ``STALE``; outside trading hours
 it is ``CLOSED``. Nothing here can produce a ``LIVE`` label from stored
 candles, because stored candles never pass through `live_status`.
+
+`resolve_status` is the single gate every caller must use. Attaching a real
+feed is exactly what could erode the rule above -- with a feed connected and
+a replay cursor pinned, the panels are still computed with ``ts <= cursor``,
+so reporting LIVE because a tick happens to be fresh would be a lie about
+data the user is deliberately rewinding. The gate therefore lets replay win
+over any attached feed, and it is the only function that calls
+`live_status`.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from enum import Enum
+
+from market.provenance import DataSource
 
 # FX trades continuously from Sunday 21:00 UTC to Friday 21:00 UTC (approximating
 # the 17:00 New York convention; it shifts by an hour across DST changes and is
@@ -61,6 +71,10 @@ class MarketStatus:
     next_transition: datetime | None
     detail: str
     replay: bool
+    # Which kind of source produced `data_as_of`. Defaulted to the recorded
+    # store because that is the safe answer: a status that forgets to say
+    # it is live is read as recorded, never the other way round.
+    source: str = DataSource.RECORDED_STORE.value
 
     def as_dict(self) -> dict:
         return {
@@ -73,6 +87,7 @@ class MarketStatus:
             "next_transition": self.next_transition.isoformat() if self.next_transition else None,
             "detail": self.detail,
             "replay": self.replay,
+            "source": self.source,
         }
 
 
@@ -157,6 +172,7 @@ def live_status(
         next_transition=next_transition(now),
         detail=detail,
         replay=False,
+        source=DataSource.LIVE_FEED.value,
     )
 
 
@@ -186,6 +202,55 @@ def replay_status(*, now: datetime, cursor: datetime, store_last_bar: datetime |
         next_transition=next_transition(now),
         detail=detail,
         replay=True,
+        source=DataSource.RECORDED_STORE.value,
+    )
+
+
+def no_data_status(*, now: datetime, detail: str) -> MarketStatus:
+    """Nothing to show at all -- an empty store, typically."""
+    return MarketStatus(
+        status=FeedStatus.NO_DATA,
+        market_open=is_market_open(now),
+        as_of=now,
+        data_as_of=None,
+        data_age_seconds=None,
+        sessions_active=active_sessions(now),
+        next_transition=next_transition(now),
+        detail=detail,
+        replay=False,
+        source=DataSource.RECORDED_STORE.value,
+    )
+
+
+def resolve_status(
+    *,
+    now: datetime,
+    feed_last_tick: datetime | None,
+    replay_pinned: bool,
+    cursor: datetime | None,
+    store_last_bar: datetime | None,
+    freshness_seconds: float = LIVE_FRESHNESS_SECONDS,
+    no_data_detail: str = "No candle store. Run `python -m market.ingest`.",
+) -> MarketStatus:
+    """The one gate that decides a feed status.
+
+    Precedence, and the reason for it:
+
+    1. **A pinned replay cursor wins over everything.** The panels were
+       computed at ``ts <= cursor``; a fresh tick elsewhere does not make
+       rewound data live.
+    2. No feed attached -> recorded history (or NO_DATA with no store).
+    3. Only then may a real feed be judged LIVE or STALE.
+
+    LIVE is unreachable through this function whenever `replay_pinned` is
+    true, whatever the feed is doing.
+    """
+    if replay_pinned or feed_last_tick is None:
+        if cursor is None:
+            return no_data_status(now=now, detail=no_data_detail)
+        return replay_status(now=now, cursor=cursor, store_last_bar=store_last_bar)
+    return live_status(
+        now=now, feed_last_tick=feed_last_tick, freshness_seconds=freshness_seconds
     )
 
 

@@ -99,6 +99,9 @@ class StrengthSnapshot:
     pairs_evaluated: list[str]
     pairs_missing: list[str]
     method: str
+    # Pairs named in the 26-instrument target that have no data here at all,
+    # as distinct from `pairs_missing`, which is about this window.
+    pairs_unavailable: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -109,6 +112,7 @@ class StrengthSnapshot:
             "ranking": [r.as_dict() for r in self.ranking],
             "pairs_evaluated": self.pairs_evaluated,
             "pairs_missing": self.pairs_missing,
+            "pairs_unavailable": self.pairs_unavailable,
             "method": self.method,
         }
 
@@ -222,5 +226,6 @@ def compute_strength(store, *, as_of, window: str = DEFAULT_WINDOW) -> StrengthS
         ranking=ranking,
         pairs_evaluated=sorted(pair_z),
         pairs_missing=sorted(set(missing)),
+        pairs_unavailable=sorted(universe.UNAVAILABLE_PAIRS),
         method=_METHOD,
     )
