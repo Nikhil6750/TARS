@@ -11,7 +11,121 @@ for that).
 
 ---
 
-## Latest handoff — Alexa-speed hot-state, Phases E-H: deep verification, provider health, benchmark harness (2026-08-21)
+## Latest handoff — Market X-Ray market-intelligence feature (2026-10-31)
+
+**Branch**: `feature/market-xray-dashboard`
+**Base SHA**: `db49310` (Phase 3E, `feature/tars-desktop-demo-20260920`)
+**Final SHA**: `26de505`
+
+Branched from `db49310` rather than `integration/v1` because the feature
+reuses Phase 3E backend infrastructure that only exists on that line. No
+existing file was rewritten; `apps/web/` was touched outside Claude's normal
+lane under explicit coordinator direction (see "Ownership note" below).
+
+### Work completed
+
+A deterministic Forex/XAUUSD market-intelligence feature. Everything it
+displays is computed from recorded bid/ask candles on this machine.
+
+* `apps/backend/market/` — new package: `universe` (the 18 data-backed
+  instruments), `ingest` (bid/ask CSV → mid-price Parquet via DuckDB),
+  `store` (as-of-bounded reads), `indicators` (Wilder ATR, normalised
+  returns, pivots, regime), `strength` (8-currency ranking with coverage +
+  leave-one-pair-out), `orderblocks` (displacement/origin/BOS detection and
+  zone lifecycle), `xray` (the X-Ray series), `state` (SQLite persistence),
+  `clock` (sessions, feed status, replay), `service` (orchestration).
+* `apps/backend/app/routers/market_xray.py` — HTTP + WebSocket API under
+  `/api/v1/market`, registered in `app/main.py`.
+* `apps/web/src/marketxray/` + `apps/web/market.html` — the dashboard, built
+  as a second Vite entry so the companion app at `index.html` is untouched.
+* `apps/web/src-tauri/src/lib.rs` — a `market` window, tray item, and the
+  `open_market_intelligence` / `market_toggle_fullscreen` commands.
+* `scripts/start-market-xray.{ps1,cmd}` (browser) and
+  `scripts/start-market-desktop.{ps1,cmd}` (Tauri desktop).
+* `tools/verify_market_xray.py` — API + Chromium acceptance verification.
+* `apps/backend/tests/test_market_xray.py` — 42 unit tests.
+
+### Interfaces exposed
+
+`GET /api/v1/market/{health,instruments,dashboard,xray,strength,leaders,
+config,events}`, `GET /api/v1/market/{candles,order-blocks}/{symbol}`,
+`GET /api/v1/market/strength/{currency}/history`,
+`POST /api/v1/market/replay/{seek,step,reset}`, and
+`WS /api/v1/market/ws` pushing `market.frame` every 5s.
+
+### Tests run
+
+* 42 new unit tests pass (`tests/test_market_xray.py`).
+* 27/27 acceptance checks pass (`tools/verify_market_xray.py`), covering
+  real candles, X-Ray pixels, replay determinism, event dedupe, hover,
+  symbol selection, timeframe switching and backend-loss handling.
+* Currency strength cross-checked against an independent NumPy/pandas
+  implementation — identical to 3 decimals.
+* Regression: backend `1681 passed, 8 skipped`; frontend `207 passed`;
+  ruff + mypy + tsc + eslint clean on all new code.
+
+### Known limitations
+
+1. **The Tauri desktop shell is NOT built or verified.** This machine has no
+   MSVC C++ build tools (`C:\Program Files\Microsoft Visual Studio\2022`
+   exists but is empty; no `link.exe`, no `cl.exe`, and `rustfmt` is not
+   installed either), so `cargo check` fails at the link step for dependency
+   proc-macros — my Rust additions were never compiled or even parsed. They
+   are reviewed by inspection only. Install the "Desktop development with
+   C++" workload, then run `scripts\start-market-desktop.cmd`, which
+   preflights for the linker and reports this exact blocker.
+2. **No live feed.** MT5 returns `-6 Authorization failed` (no logged-in
+   account) and the market is closed. The dashboard runs in REPLAY off
+   recorded history ending 2026-09-14 (XAUUSD 2026-09-11). The MT5 adapter
+   path exists in `monitors/mt5_provider.py` but is not wired into the market
+   service — `_feed_last_tick` stays `None`, which is what keeps the status
+   out of LIVE. Wiring a real feed is the obvious next step.
+3. **18 instruments, not 26.** Only 17 FX pairs plus XAUUSD have source data
+   under `C:\Trade Data`. Missing: USDCHF, NZDJPY, NZDCAD, NZDCHF, EURNZD,
+   GBPNZD, AUDNZD, CADJPY, CADCHF. Consequently NZD strength rests on one
+   pair and CHF on two; both are flagged `thin_coverage` in the payload and
+   badged in the UI.
+4. `C:\Quant` does not exist on this machine; the brief's reference to it
+   could not be honoured.
+5. The candle store covers 2024-01-01 onward (bounded deliberately to keep a
+   full ingest at ~35s). Earlier history is available in the CSVs via
+   `python -m market.ingest --start YYYY-MM-DD`.
+6. D1 bars are UTC-midnight bins, not the 17:00 New York convention that
+   `research/instruments.py` documents. Stated explicitly rather than
+   silently assumed.
+7. The Scanner and Journal tabs in the top nav are navigation placeholders;
+   only Market X-Ray and Order Blocks have content.
+
+### Dependencies required from other agents
+
+* **Coordinator**: a decision on whether MSVC build tools get installed so
+  the desktop shell can be built and verified; and sign-off on the
+  `apps/web/` ownership exception recorded below.
+* **Antigravity** (`apps/web/` owner): the dashboard lives in its own
+  `src/marketxray/` subtree and a separate `market.html` entry, so it should
+  not conflict with companion-shell work. The only shared-file edits are
+  `vite.config.ts` (added `build.rollupOptions.input` for the second entry)
+  and `src-tauri/` (the market window + capability).
+* **Codex**: no contract under `contracts/` was added or changed — the market
+  API is additive and outside the trading-event contract.
+
+### Ownership note
+
+`AGENTS.md` assigns `apps/web/` to Antigravity. The user directed this
+session to build the feature full-stack as lead developer, which is a
+coordinator override; it is recorded here rather than treated as licence to
+keep working in that lane. Nothing outside `src/marketxray/`, `market.html`,
+`vite.config.ts` and the two `src-tauri/` files was modified.
+
+### Next recommended action
+
+Install the MSVC C++ build tools and run `scripts\start-market-desktop.cmd`
+to build and verify the desktop window, which is the one acceptance item
+that could not be demonstrated here. After that, wire `MT5Provider` into
+`MarketXRayService` so `_feed_last_tick` is fed by a real session and the
+LIVE/STALE path can be exercised during market hours.
+
+## Previous handoff — Alexa-speed hot-state, Phases E-H: deep verification, provider health, benchmark harness (2026-08-21)
 
 **Branch**: `feature/realtime-hot-state`
 **Base SHA**: `17713e4` (unchanged across the whole effort)
