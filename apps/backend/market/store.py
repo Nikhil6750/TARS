@@ -5,6 +5,11 @@ bars whose close time is at or before it. That single rule is what keeps the
 whole dashboard free of look-ahead: replaying to an earlier moment cannot
 reveal a bar that had not completed yet, because the filter is applied in SQL
 rather than trimmed afterwards.
+
+A bar's ``ts`` is its *open*. Comparing that directly with ``as_of`` would
+return the bar still forming at that moment, complete with prices from after
+it, so every read compares against `_completed_before`, which subtracts the
+bar's own length.
 """
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -125,7 +130,7 @@ class CandleStore:
             + "  WHERE ts <= ? ORDER BY ts DESC LIMIT ?"
             ") ORDER BY ts ASC"
         )
-        rows = self._query(sql, [_naive(as_of), int(limit)])
+        rows = self._query(sql, [_completed_before(as_of, timeframe), int(limit)])
         return [
             Candle(r[0].replace(tzinfo=UTC), r[1], r[2], r[3], r[4], r[5] or 0.0, r[6] or 0.0)
             for r in rows
@@ -136,7 +141,7 @@ class CandleStore:
             "SELECT ts, open, high, low, close, spread, volume FROM "
             + self._scan(symbol, timeframe)
             + " WHERE ts <= ? ORDER BY ts DESC LIMIT 1",
-            [_naive(as_of)],
+            [_completed_before(as_of, timeframe)],
         )
         if not rows:
             return None
@@ -157,10 +162,11 @@ class CandleStore:
         )
 
     def store_bounds(self, timeframe: str = "M5") -> tuple[datetime | None, datetime | None]:
-        """Earliest and latest bar available across every symbol at this
-        timeframe. The latest is the *minimum* of per-symbol maxima, so an
-        instrument that stopped recording early cannot drag the dashboard's
-        clock past its own coverage."""
+        """The span of moments the dashboard can be asked about: from the
+        earliest bar's open to the latest bar's *close*, because that is when
+        the newest bar becomes visible. The latest is the *minimum* of
+        per-symbol maxima, so an instrument that stopped recording early
+        cannot drag the dashboard's clock past its own coverage."""
         firsts: list[datetime] = []
         lasts: list[datetime] = []
         for symbol in self.available_symbols:
@@ -170,7 +176,7 @@ class CandleStore:
                 lasts.append(cov.last_bar)
         if not firsts:
             return None, None
-        return max(firsts), min(lasts)
+        return max(firsts), min(lasts) + timedelta(minutes=universe.TIMEFRAMES[timeframe.upper()])
 
     def close_series(
         self,
@@ -188,7 +194,7 @@ class CandleStore:
         )
         return [
             (r[0].replace(tzinfo=UTC), r[1])
-            for r in self._query(sql, [_naive(as_of), int(limit)])
+            for r in self._query(sql, [_completed_before(as_of, timeframe), int(limit)])
         ]
 
     def close(self) -> None:
@@ -199,6 +205,11 @@ class CandleStore:
 def _naive(ts: datetime) -> datetime:
     """DuckDB TIMESTAMP columns here are UTC-naive; compare like with like."""
     return ts.astimezone(UTC).replace(tzinfo=None) if ts.tzinfo else ts
+
+
+def _completed_before(as_of: datetime, timeframe: str) -> datetime:
+    """The latest bar *open* whose bar had finished by `as_of`."""
+    return _naive(as_of) - timedelta(minutes=universe.TIMEFRAMES[timeframe.upper()])
 
 
 @lru_cache(maxsize=1)

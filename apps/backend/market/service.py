@@ -43,7 +43,9 @@ LEADERS = 6
 class CalcConfig:
     """Everything that affects a number the dashboard shows, versioned
     together so a stored zone or snapshot can be traced to its rules."""
-    version: str = "xray-v1"
+    # v2: reads stop at the last *closed* bar. v1 included the bar still
+    # forming at the cursor, so replayed numbers differ between the two.
+    version: str = "xray-v2"
     xray_return_window: int = xray.DEFAULT_RETURN_WINDOW
     xray_points: int = xray.DEFAULT_POINTS
     strength_window: str = strength.DEFAULT_WINDOW
