@@ -180,3 +180,69 @@ def test_both_health_routes_carry_identity(client):
     """`/health` is the alias the shell may use; it must not be the one
     route that cannot be identified."""
     assert client.get("/health").json()["identity"]["instance_id"] == ident.instance_id()
+
+
+# ---- adoption compatibility (coordinator point 5) ----------------------
+
+
+def test_identity_declares_what_kind_of_process_this_is():
+    """A supervisor that polls a port and gets 200 has learned almost
+    nothing. This marker is how it knows a TARS backend answered and not an
+    unrelated server, which is what stops it adopting an arbitrary process."""
+    assert ident.identity()["service"] == ident.SERVICE_NAME
+    assert ident.SERVICE_NAME == "tars-backend"
+
+
+def test_identity_declares_the_api_contract_it_speaks():
+    assert ident.identity()["contract_version"] == ident.CONTRACT_VERSION
+    assert isinstance(ident.CONTRACT_VERSION, int)
+
+
+def test_a_matching_backend_is_adoptable():
+    assert ident.is_compatible(
+        service=ident.SERVICE_NAME, contract_version=ident.CONTRACT_VERSION
+    )
+
+
+@pytest.mark.parametrize(
+    "service,contract",
+    [
+        ("nginx", 1),              # something else entirely on the port
+        ("tars-frontend", 1),      # a TARS thing, but not the backend
+        (None, 1),                 # no declaration at all
+        ("", 1),                   # empty declaration
+        ("tars-backend", 0),       # older contract
+        ("tars-backend", 99),      # newer, unknown contract
+        ("tars-backend", None),    # contract not declared
+        ("tars-backend", "1"),     # string where an int is required
+    ],
+)
+def test_anything_that_does_not_match_is_not_adoptable(service, contract):
+    """The failure mode this guards against is adopting an orphan from an
+    older build, or worse, a process belonging to someone else."""
+    assert not ident.is_compatible(service=service, contract_version=contract)
+
+
+def test_compatibility_does_not_depend_on_the_build():
+    """Compatibility and identity are different questions. A backend built
+    from a newer commit that still speaks the same contract must remain
+    adoptable, or every rebuild would look like an incompatible backend."""
+    assert ident.is_compatible(
+        service=ident.SERVICE_NAME, contract_version=ident.CONTRACT_VERSION
+    )
+    # Nothing in the rule reads build_id or instance_id.
+    import inspect
+
+    rule = inspect.getsource(ident.is_compatible)
+    assert "build_id" not in rule
+    assert "instance_id" not in rule
+
+
+def test_health_carries_everything_a_supervisor_needs_to_decide(client):
+    block = client.get("/api/v1/health").json()["identity"]
+    assert ident.is_compatible(
+        service=block["service"], contract_version=block["contract_version"]
+    )
+    # And enough to tell one process from another once adopted.
+    assert block["instance_id"]
+    assert block["build_id"]

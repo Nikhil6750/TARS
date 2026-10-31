@@ -159,6 +159,7 @@ class HealthResponse(BaseModel):
     gemini_live_health: str = "unknown"
     live_trading_enabled: bool = False
     # Build and process identity, so a supervisor can tell *which* backend
-    # answered rather than only that something did. Defaulted so every
-    # existing construction of this model keeps working.
-    identity: dict[str, str] = {}
+    # answered rather than only that something did, and whether it is
+    # compatible rather than merely identical. Defaulted so every existing
+    # construction of this model keeps working.
+    identity: dict[str, str | int] = {}

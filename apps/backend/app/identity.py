@@ -22,6 +22,18 @@ This module supplies the two values that make the difference checkable:
     the release version, and ``build_source`` says which of the two you are
     looking at, so a fallback is never mistaken for a real SHA.
 
+``service`` and ``contract_version``
+    Identify this *kind* of process and the API shape it speaks. A build id
+    answers "is this the same code?", which is the wrong question for
+    adoption: a shell must refuse an **incompatible** backend, not every
+    backend that differs. ``service`` is a fixed marker, so a supervisor can
+    establish that what answered the port is a TARS backend at all rather
+    than an unrelated server that happens to return 200 -- which is what
+    stops it taking ownership of an arbitrary healthy process.
+    ``contract_version`` is bumped only by a breaking change to the API the
+    shell depends on, so a newer backend with the same contract is adoptable
+    and a different contract is not.
+
 Nothing here raises. Identity is diagnostic: a backend that cannot work out
 its own build must still serve health, or the supervisor's health poll would
 fail over a missing `git`, which would be a worse outcome than an unknown
@@ -43,6 +55,22 @@ from pathlib import Path
 # backend's is comparing these two numbers. `test_identity.py` asserts they
 # have not drifted apart.
 APP_VERSION = "1.0.0"
+
+# A fixed marker saying what kind of process this is. A supervisor that polls
+# a port and gets 200 has learned almost nothing; finding this field is how
+# it knows it is talking to a TARS backend and not something else that
+# happens to serve `/api/v1/health`. Never change this string -- an older
+# shell matching on it would stop recognising its own backend.
+SERVICE_NAME = "tars-backend"
+
+# The shape of the API the desktop shell depends on. Bump ONLY for a
+# breaking change to it: a removed or renamed field, a changed meaning, a
+# removed route. Adding a field is not breaking and must not bump this, or
+# every additive change would make existing shells refuse a perfectly good
+# backend. The point of a separate number is that compatibility is a
+# different question from identity -- a backend built from a newer commit
+# that still speaks contract 1 is safe to adopt.
+CONTRACT_VERSION = 1
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -101,16 +129,31 @@ def started_at() -> datetime:
     return _STARTED_AT
 
 
-def identity() -> dict[str, str]:
+def identity() -> dict[str, str | int]:
     """The identity block served inside the health payload."""
     build_id, build_source = build_identity()
     return {
+        "service": SERVICE_NAME,
+        "contract_version": CONTRACT_VERSION,
         "instance_id": _INSTANCE_ID,
         "build_id": build_id,
         "build_source": build_source,
         "app_version": APP_VERSION,
         "started_at": _STARTED_AT.isoformat(),
     }
+
+
+def is_compatible(*, service: str | None, contract_version: object) -> bool:
+    """Whether a backend advertising this identity is safe to adopt.
+
+    Defined here, next to the values it judges, so the rule lives with the
+    thing that produces it rather than being restated in the shell. The shell
+    (task P1-A1) should apply exactly this: a process is adoptable only when
+    it declares itself a TARS backend **and** speaks the contract this
+    release expects. Anything else is reported, not adopted -- and never
+    shut down, because it may belong to somebody else.
+    """
+    return service == SERVICE_NAME and contract_version == CONTRACT_VERSION
 
 
 def shell_version() -> str | None:
