@@ -6,6 +6,113 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Latest handoff — Market X-Ray independent verification (2026-10-31)
+
+**Branch**: `feature/market-xray-independent-verification`
+
+**Implementation commit SHA**: `807c8f2e24ec19bafac4479f29fd481e25188dc6`
+
+**Base / worktree**: `110d07e770606f8c812032878da09b5c3f655548` /
+`C:\TARS-Market-XRay-Codex`
+
+**Work completed**:
+
+- Added a black-box integration verifier for backend identity stability,
+  adoption compatibility, port conflicts, replay isolation/determinism,
+  recorded provenance, feed status, coverage warnings, and the permanent
+  trading-execution guard.
+- Hardened the native desktop verifier for per-monitor DPI, exact physical
+  monitor rectangles, proven foreground ownership before input injection,
+  minimized-window signatures, tri-state PASS/FAIL/NOT VERIFIED reporting,
+  owned-versus-attached backend lifecycles, and evidence-preserving shutdown.
+- Fixed two confirmed Market X-Ray verifier defects: event dedupe now primes
+  both first scans before taking its baseline, and the replay UI assertion
+  waits for an actual cursor change instead of assuming a 3.2-second response.
+  Both browser and integration verifiers now reset shared replay state even
+  after a failed assertion.
+- Verified the candidate desktop at Antigravity hardening commit
+  `d8d2dcb8b65950f76f4feb7f648d8fc127b82e6b`: exact 1920x1080 fullscreen and
+  restoration, single-instance routing, owned backend spawn/recovery,
+  identity/ownership changes after forced loss, and cooperative no-orphan
+  shutdown all passed. The intermittent spontaneous minimized launch did not
+  reproduce; the verifier now detects and diagnoses it without cascading
+  unrelated failures.
+
+**Files changed**:
+
+- `tools/verify_market_desktop.py`
+- `tools/verify_market_xray.py`
+- `tools/verify_market_integration.py`
+- `tests/unit/test_market_desktop_verifier.py`
+- `tests/unit/test_market_integration_verifier.py`
+- This Codex handoff file only.
+
+**Interfaces exposed**:
+
+- `python tools/verify_market_integration.py --api http://127.0.0.1:8000`
+- `python tools/verify_market_desktop.py --quit-after`
+- Desktop JSON evidence now records `status` as `PASS`, `FAIL`, or
+  `NOT VERIFIED`, plus backend identity and ownership classification.
+
+**Tests run / evidence**:
+
+- Backend full suite: **1,757 passed, 8 skipped, 2 timing failures** in 73m19s.
+  Both failures passed together in isolation (**2 passed**) and are therefore
+  recorded as load-sensitive suite flakiness, not hidden as a clean full run.
+- Frontend Vitest: **207 passed**; TypeScript `--noEmit`: passed.
+- Root contract/integration suite: **75 passed, 24 expected skips** after
+  linking the already-installed pinned codegen dependency.
+- New verifier regressions: **9 passed**; Ruff and `git diff --check`: passed.
+- Market API + Chromium: **27/27 passed**. Independent black-box API suite:
+  **15/15 passed**. Trading execution was `DISABLED` in API and native UI.
+- Desktop harness run: 17 checks passed, zero application failures, two F11
+  checks correctly reported NOT VERIFIED when Win32 denied foreground. A
+  separate native UI invocation then proved fullscreen geometry
+  `(0,0)-(1920,1080)` and restoration to `(48,11)-(1871,1017)`.
+- Owned backend PID 31960 was forcibly stopped; supervisor recovered PID 33344
+  with a new instance/owner identity. Second launch retained one shell and one
+  listener. Cooperative quit left zero shell/backend processes and listeners.
+
+**Known limitations / unresolved defects**:
+
+- Clean NSIS installation is **BLOCKED**: this host has no Windows Sandbox,
+  Hyper-V service, clean user profile, or separate clean Windows VM. Development
+  execution was not substituted. The tested installer SHA-256 is
+  `BFD48DB154F1A1164ADDA2FEEBDEAF7184581F9CE5E724AF8AAF78B0EA32C90F`.
+- Candidate packaging is not releasable: `tauri.conf.json` declares no bundle
+  resources, while `supervisor.rs` expects installed
+  `backend-runtime/python/python.exe` and `backend/run.py`. The NSIS file is
+  only 4,094,171 bytes and contains no adjacent bundled runtime evidence.
+- Aborting/reloading a client on `/api/v1/market/ws` can race the sender after
+  close and log an unhandled `RuntimeError: Unexpected ASGI message
+  'websocket.send'` at `apps/backend/app/routers/market_xray.py:331`.
+- Loss of an attached external backend was not replaced within 90 seconds;
+  owned-child loss recovered correctly. The desktop owner must confirm whether
+  takeover after external loss is required or intentionally deferred to a new
+  shell launch.
+- Candidate Rust tests were not completed because Cargo exhausted the host's
+  remaining disk while building a fresh detached worktree. This is an
+  environment block, not a claimed Rust pass.
+- Empty-store behavior and installed desktop/companion coexistence remain part
+  of the blocked clean-install gate. Spontaneous minimized launch remains
+  unreproduced, so no root cause is claimed.
+
+**Exact dependencies required from other agents**:
+
+- Antigravity/desktop: bundle the backend runtime and application resources in
+  NSIS; decide and test attached-backend loss policy; review the no-resource
+  installer before producing another release candidate.
+- Claude/backend: serialize/cancel the Market WebSocket sender during client
+  disconnect so it cannot send after close; investigate the two load-sensitive
+  agent-runtime timeouts without weakening their assertions.
+- Coordinator/environment: provide a genuinely clean Windows VM/profile with
+  no developer dependencies and enough disk for Rust verification.
+
+**Next recommended action**: owners fix the WebSocket close race and NSIS
+runtime packaging, produce a new installer, then rerun this branch's black-box,
+desktop, Cargo, and clean-install gates. Do not merge this branch into `main` or
+`integration/v1` as part of the handoff.
+
 ## Latest handoff — minimal golden voice loop awaiting physical certification (2026-08-22)
 
 **Branch**: `feature/tars-minimal-golden-loop`
