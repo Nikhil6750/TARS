@@ -76,7 +76,9 @@ fn resolve_backend_launch(app: &tauri::AppHandle) -> BackendLaunch {
             let backend = bundle.join("apps").join("backend");
             if python.is_file() && backend.join("run.py").is_file() {
                 let home = app.path().app_local_data_dir().unwrap_or_else(|_| resources.join("data"));
+                let log_file = Some(home.join("logs").join("backend.log"));
                 return BackendLaunch {
+                    log_file,
                     program: python,
                     working_dir: backend,
                     envs: vec![
@@ -91,7 +93,7 @@ fn resolve_backend_launch(app: &tauri::AppHandle) -> BackendLaunch {
         }
     }
     match resolve_backend_dir() {
-        Some(dir) => BackendLaunch { program: "python".into(), working_dir: dir, envs: Vec::new() },
+        Some(dir) => BackendLaunch { program: "python".into(), working_dir: dir, ..Default::default() },
         None => {
             eprintln!("[TARS][supervisor] could not resolve a backend to start (set TARS_BACKEND_DIR to override); will still attach to a compatible backend, but cannot spawn one");
             BackendLaunch::default()
@@ -897,10 +899,6 @@ fn open_market_impl(app: &tauri::AppHandle) -> Result<(), String> {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
-    #[cfg(target_os = "windows")]
-    unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(0xFFFFFFFF);
-    }
     Ok(())
 }
 
@@ -1889,15 +1887,6 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
-            if window.label() == MARKET_WINDOW {
-                if let tauri::WindowEvent::Focused(true) = event {
-                    let _ = window.set_focus();
-                    #[cfg(target_os = "windows")]
-                    unsafe {
-                        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(0xFFFFFFFF);
-                    }
-                }
-            }
             // M2A/M2B Background persistence (Close-to-tray)
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // The Market Intelligence workspace is an ordinary desktop

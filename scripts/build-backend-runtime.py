@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -193,6 +194,17 @@ def copy_backend(destination: Path) -> None:
     shutil.copytree(BACKEND, destination, ignore=ignore)
 
 
+def pregenerate_com_cache(python_dir: Path) -> None:
+    """comtypes writes generated bindings beside itself on first use, which at
+    runtime would mean writing into the install directory. Generated here, they
+    ship with the bundle and nothing needs to."""
+    step("Pre-generating the comtypes cache")
+    subprocess.run(
+        [str(python_dir / "python.exe"), "-c", "import uiautomation"],
+        check=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+
+
 def write_manifest(output: Path) -> None:
     files = [p for p in output.rglob("*") if p.is_file()]
     manifest = {
@@ -221,6 +233,7 @@ def main() -> int:
     # Normally found through a bootstrap hook; beside python.exe they just work.
     for dll in (python_dir / "Lib" / "site-packages" / "pywin32_system32").glob("*.dll"):
         shutil.copy2(dll, python_dir / dll.name)
+    pregenerate_com_cache(python_dir)
     copy_backend(OUTPUT / "apps" / "backend")
     shutil.copytree(REPO / "contracts", OUTPUT / "contracts")
     write_manifest(OUTPUT)

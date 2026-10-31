@@ -46,7 +46,7 @@
 //! ureq's HTTP calls and `Child::wait()` are both blocking.
 use crate::backend_endpoint;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -223,6 +223,7 @@ pub struct BackendLaunch {
     pub program: PathBuf,
     pub working_dir: PathBuf,
     pub envs: Vec<(String, String)>,
+    pub log_file: Option<PathBuf>,
 }
 
 /// The proof of ownership, kept on disk so that it survives a shell crash.
@@ -544,6 +545,18 @@ impl BackendSupervisor {
             .env("TARS_SUPERVISOR_OWNER_ID", &record.owner_id)
             .env("TARS_SUPERVISOR_SECRET", &record.secret)
             .envs(self.launch.envs.iter().map(|(k, v)| (k, v)));
+        // An installed app has no console, so without this a backend that
+        // fails to start leaves nothing to diagnose it from.
+        if let Some(path) = &self.launch.log_file {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(log) = std::fs::File::create(path) {
+                if let Ok(err) = log.try_clone() {
+                    cmd.stdout(Stdio::from(log)).stderr(Stdio::from(err));
+                }
+            }
+        }
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
