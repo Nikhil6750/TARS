@@ -38,7 +38,12 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendDir = Join-Path $repoRoot 'apps\backend'
 $webDir = Join-Path $repoRoot 'apps\web'
-$storeRoot = 'D:\TARS_DATA\market\xray_store'
+# Resolved by the backend, which honours TARS_DATA_ROOT (P1-C2).
+$storeRoot = & python -c "import sys; sys.path.insert(0, r'$backendDir'); from market.ingest import DEFAULT_STORE_ROOT; print(DEFAULT_STORE_ROOT)"
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($storeRoot)) {
+    throw "Could not resolve the candle-store root from the backend. Is Python on PATH?"
+}
+$storeRoot = $storeRoot.Trim()
 
 function Write-Step { param([string]$Message) Write-Host "`n>> $Message" -ForegroundColor Cyan }
 function Write-Ok { param([string]$Message) Write-Host "   OK  $Message" -ForegroundColor Green }
@@ -64,7 +69,7 @@ if ($Reingest -or -not (Test-Path $manifest)) {
     }
 }
 if (-not (Test-Path $manifest)) {
-    throw "Candle store still missing at $storeRoot. Check that the source CSVs exist under 'C:\Trade Data'."
+    throw "Candle store still missing at $storeRoot. Check that the source CSVs exist under the CSV root (C:\Trade Data by default, or TARS_MARKET_CSV_ROOT)."
 }
 $meta = Get-Content $manifest -Raw | ConvertFrom-Json
 Write-Ok "$($meta.symbols_ok.Count) instruments, window from $($meta.window_start), built $($meta.generated_at)"

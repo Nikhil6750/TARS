@@ -19,7 +19,7 @@ from pathlib import Path
 import duckdb
 
 from market import universe
-from market.ingest import DEFAULT_STORE_ROOT
+from market.ingest import DEFAULT_STORE_ROOT  # resolved from TARS_DATA_ROOT; see P1-C2
 
 logger = logging.getLogger("tars.market.store")
 
