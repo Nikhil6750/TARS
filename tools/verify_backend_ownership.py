@@ -220,6 +220,90 @@ def attach_compatible(h: Harness) -> None:
         wait_for(lambda: not listeners(), 15)
 
 
+def attached_disappears(h: Harness) -> None:
+    """An adopted process may vanish, but the shell must stay useful.
+
+    The replacement is allowed only after the compatible external process has
+    actually exited and released the port.  It must be a newly owned child,
+    not an attempted shutdown or mutation of the attached process.
+    """
+    manual = h.manual_backend()
+    try:
+        wait_for(health, BACKEND_START_SECONDS)
+        old_instance = identity().get("instance_id")
+        h.launch()
+        time.sleep(15)
+        attached = listeners() == [manual.pid] and identity().get("instance_id") == old_instance
+        record("attached_disappears", "The shell first adopts the compatible backend", attached)
+
+        manual.terminate()
+        manual.wait(15)
+        recovered = wait_for(
+            lambda: identity().get("owner_id") and identity().get("instance_id") != old_instance,
+            BACKEND_START_SECONDS,
+        )
+        new_listeners = listeners()
+        record(
+            "attached_disappears",
+            "It replaces a disappeared attached backend",
+            bool(recovered) and len(new_listeners) == 1,
+            f"old instance {old_instance}, new {identity().get('instance_id')}, listeners {new_listeners}",
+        )
+        child_pids = {
+            child.pid
+            for shell in shells()
+            for child in shell.children(recursive=True)
+        }
+        record(
+            "attached_disappears",
+            "The recovered backend is now an owned child",
+            bool(new_listeners) and new_listeners[0] in child_pids and bool(identity().get("owner_id")),
+            f"children {sorted(child_pids)}",
+        )
+        h.quit()
+        record(
+            "attached_disappears",
+            "Quitting stops the replacement it owns",
+            bool(wait_for(lambda: not listeners(), 20)),
+            f"listeners {listeners()}",
+        )
+    finally:
+        if manual.poll() is None:
+            manual.terminate()
+        wait_for(lambda: not listeners(), 15)
+
+
+def owned_process_failure(h: Harness) -> None:
+    """A killed owned child must be replaced without restarting the shell."""
+    h.launch()
+    wait_for(lambda: identity().get("owner_id"), BACKEND_START_SECONDS)
+    old_instance = identity().get("instance_id")
+    old_listeners = listeners()
+    record("owned_process_failure", "An owned backend starts", len(old_listeners) == 1, str(old_listeners))
+    if old_listeners:
+        psutil.Process(old_listeners[0]).kill()
+        wait_for(lambda: not psutil.pid_exists(old_listeners[0]), 15)
+
+    recovered = wait_for(
+        lambda: identity().get("owner_id") and identity().get("instance_id") != old_instance,
+        BACKEND_START_SECONDS,
+    )
+    new_listeners = listeners()
+    record(
+        "owned_process_failure",
+        "The shell recovers after its backend process fails",
+        bool(recovered) and len(new_listeners) == 1 and new_listeners != old_listeners,
+        f"old {old_listeners}/{old_instance}, new {new_listeners}/{identity().get('instance_id')}",
+    )
+    h.quit()
+    record(
+        "owned_process_failure",
+        "Quitting stops the recovered backend",
+        bool(wait_for(lambda: not listeners(), 20)),
+        f"listeners {listeners()}",
+    )
+
+
 def conflict(h: Harness, name: str, body: bytes, status: int = 200) -> None:
     fake = FakeServer(body, status)
     try:
@@ -379,6 +463,8 @@ def webview_on_port() -> bool:
 SCENARIOS = {
     "fresh_spawn": fresh_spawn,
     "attach_compatible": attach_compatible,
+    "attached_disappears": attached_disappears,
+    "owned_process_failure": owned_process_failure,
     "foreign_200": foreign_200,
     "foreign_500": foreign_500,
     "incompatible_contract": incompatible_contract,
