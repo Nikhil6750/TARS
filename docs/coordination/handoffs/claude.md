@@ -18,19 +18,24 @@ coordinator authorized implementation and asked for the priority order
 "backend ownership safety and replay/live isolation", which is why P1-C1 and
 P2-C3 were done first and P1-C2 last.
 
-**This entry covers two branches**, because the task board assigns the P1 and
-P2 work to separate ones. Both are branched from `feature/market-xray-dashboard`
-(`f7022f8`) rather than `integration/v1`, since every task needs the Market
-X-Ray code the coordinator asked these branches to include. Neither is
-merged.
+All four were implemented on two task branches and are now **integrated on
+`feature/market-xray-phase12-integration`**, which the coordinator accepted as
+implementation candidates and explicitly did **not** release approve. Nothing
+is merged into `integration/v1` or `main`.
 
 | Branch | Tasks | Commits |
 |---|---|---|
-| `feature/backend-build-identity` | P1-C1, P1-C2 | `5fd0921`, `333c609` |
+| `feature/backend-build-identity` | P1-C1, P1-C2 | `5fd0921`, `333c609`, docs `ddf5606` |
 | `feature/market-live-feed` | P2-C3, P2-C5 | `75e3ff5`, `4fee2d0` |
+| `feature/market-xray-phase12-integration` | both of the above, plus the compatibility work below and the task board | see "Integration" at the end of this entry |
 
-Note for whoever merges: both branches add an entry to this file, so expect a
-conflict here and keep this combined version.
+All branch from `feature/market-xray-dashboard` (`f7022f8`) rather than
+`integration/v1`, since every task needs the Market X-Ray code the
+coordinator asked these branches to include.
+
+The handoff conflict anticipated in the previous version of this note did not
+materialise: the combined entry only ever existed on the P1 branch, so both
+merges applied cleanly and there was nothing to reconcile by hand.
 
 ### P1-C1 — backend build identity — IMPLEMENTED, tests pass
 
@@ -255,6 +260,60 @@ task (P2-C1, P2-C2, P2-C4) is blocked on B1, B2 or B3, which are
 credential, calendar and data-acquisition problems rather than code. The
 most useful thing a coordinator can do to unblock this lane is authenticate
 an MT5 account (B1).
+
+### Integration — `feature/market-xray-phase12-integration`
+
+Built by merging both task branches onto the Market X-Ray line with
+`--no-ff`, so each task's history stays legible. Both merges were clean.
+Market X-Ray functionality is preserved: nothing was reverted, and the
+desktop app was launched and exercised against the integrated backend.
+
+One addition was made on the integration branch itself, for the
+coordinator's requirement that **adoption verifies compatibility and never
+assumes ownership of an arbitrary healthy process**:
+
+* `identity` now also carries `service` (a fixed `"tars-backend"` marker)
+  and `contract_version`, and `app.identity.is_compatible()` states the
+  adoption rule next to the values it judges.
+* The reasoning, because it changes what P1-A1 should implement: `build_id`
+  answers "is this the same code?", which is the wrong question. A shell
+  that refused every backend differing from itself would refuse its own
+  backend after any rebuild. Compatibility has to be a separate, coarser
+  check — hence a contract number bumped only by a breaking change, never
+  by an added field.
+* `service` is the part that addresses "arbitrary healthy process": a 200
+  from a port proves almost nothing, and an unrelated server can serve
+  `/api/v1/health`. Finding this marker is how the shell knows a TARS
+  backend answered. P1-A2 now states the rule plainly — a process TARS has
+  not verified is one TARS does not touch, not adopted and above all not
+  sent a shutdown, since it may belong to somebody else.
+
+Pre-existing lint not touched: `ruff` reports 3 errors in `app/main.py`,
+`app/routers/realtime.py` and `app/routers/voice.py`. All three are present
+on the base commit and in files this integration does not modify, so they
+were left alone rather than mixed into this work. Every file this branch
+does change is clean under `ruff` and `mypy`.
+
+### Assignments prepared on this branch
+
+The task board now carries an "Implementation status" table naming the exact
+fields Antigravity and Codex need, since the earlier assignments were
+written before the backend half existed. Four tasks were added from defects
+found by running things rather than reading them:
+
+* **P1-A5** (Antigravity) — `--market` does nothing on a cold start.
+* **P1-X3** (Codex) — fullscreen verification is neither DPI-safe nor able
+  to distinguish "could not verify" from "failed".
+* **P1-X4** (Codex) — the intermittent minimized window, and making the
+  verifier detect that state instead of reporting three unrelated failures.
+* **P2-X3** (Codex) — independent integration testing of this branch,
+  explicitly not reusing `apps/backend/tests/`, because work verified by the
+  agent that wrote it is the weakest form of evidence.
+
+P1-A4 is restated as **evaluation only**, per the coordinator, with the
+reason spelled out: a kill-on-close job object would also kill a
+legitimately adopted backend, which is the exact process P1-A2 says not to
+touch.
 
 ## Previous handoff — Market X-Ray market-intelligence feature (2026-10-31)
 

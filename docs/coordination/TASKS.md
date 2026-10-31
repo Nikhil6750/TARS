@@ -115,6 +115,31 @@ Four tasks below cannot be completed by an agent alone. They are marked
 
 ---
 
+## Implementation status — read before starting
+
+The Claude-lane Phase 1/2 tasks (P1-C1, P1-C2, P2-C3, P2-C5) are **done and
+integrated** on `feature/market-xray-phase12-integration`, accepted by the
+coordinator as implementation candidates and **not release approved**. That
+branch is what Antigravity and Codex should branch from, because the fields
+and seams the tasks below need only exist there.
+
+What it gives you:
+
+| You need | It is at | Shape |
+|---|---|---|
+| Backend identity (P1-A1) | `GET /api/v1/health` → `identity` | `service`, `contract_version`, `instance_id`, `build_id`, `build_source`, `app_version`, `started_at` |
+| The adoption rule (P1-A1, P1-A2) | `app.identity.is_compatible(service=, contract_version=)` | returns bool |
+| Provenance (P2-A1, P2-X1) | every market payload → `provenance` | `source` (`RECORDED_STORE`/`LIVE_FEED`), `provider`, `observed_at`, `replay`, `is_live` |
+| Replay state (P2-A1) | `GET /api/v1/market/dashboard` → `replay_pinned` | bool |
+| Feed source (P2-A1) | `status.source` | same two values as `provenance.source` |
+
+**Compatibility, not equality, is the test.** `build_id` answers "is this the
+same code?", which is the wrong question: a shell that refuses every backend
+differing from itself would refuse its own backend after any rebuild. Judge
+with `service` + `contract_version`. `contract_version` is bumped only by a
+breaking change to the API the shell depends on; adding a field does not
+bump it.
+
 ## Phase 1 — Desktop release hardening
 
 Goal: the desktop app can be released without the shell ever attaching to,
@@ -159,8 +184,12 @@ established as already correct, so that none of it is broken by accident:
 `stop()` is deliberately ownership-agnostic, and `intentional_stop` is
 deliberately set before the shutdown POST.
 
-- [ ] READY: **P1-A1 — Verify backend identity before adopting.** Depends on
-  **P1-C1**. `health_check_once()` in `src-tauri/src/supervisor.rs`
+- [ ] READY: **P1-A1 — Verify backend identity before adopting.**
+  **P1-C1 is done**, so this is unblocked; the fields are in the table
+  above. Adopt only a process that declares `service == "tars-backend"` and
+  the `contract_version` this release expects — the same rule as
+  `app.identity.is_compatible`, which exists so the shell does not have to
+  restate it. `health_check_once()` in `src-tauri/src/supervisor.rs`
   currently requires only HTTP 200 from the health URL, so the shell adopts
   *any* process answering there — including an orphan from an older build,
   after which a new UI silently drives old backend code. Check the identity
@@ -179,9 +208,19 @@ deliberately set before the shutdown POST.
   port can be told to exit. Since `f796e1d`, mid-session adoption makes
   that reachable at runtime, not only at startup. Gate the cooperative
   shutdown on verified identity.
+  The rule, stated so it cannot be read loosely: **a process TARS has not
+  verified is a process TARS does not touch.** Not adopted, and above all
+  not sent a shutdown — it may belong to somebody else. An unverified
+  listener on the port is a visible, reported condition, not something to
+  clear out of the way. Note that this is the one place where "do nothing"
+  is the correct behaviour even though it leaves the app degraded: taking a
+  stranger's process down to free a port would be worse than failing to
+  start.
+
   *Done when*: Quit and `--quit` still leave no orphan on the port for an
   owned or legitimately adopted backend, and a foreign listener is left
-  untouched. State plainly which of those two you actually tested.
+  untouched. State plainly which of those two you actually tested — the
+  second one is the claim that matters and the easier one to skip.
 
 - [ ] READY: **P1-A3 — Resolve the backend port inconsistency.**
   `supervisor.rs` hardcodes `127.0.0.1:8000` in three constants while
@@ -202,9 +241,30 @@ deliberately set before the shutdown POST.
   **evaluation**: establish whether a Job Object is the right mechanism
   here, including what it would do to a *legitimately adopted* backend that
   TARS did not spawn and must not kill.
+  **Evaluation only — reaffirmed by the coordinator.** Do not implement a
+  Job Object under this task, even if the evaluation is favourable. It needs
+  explicit approval first, because the mechanism interacts badly with the
+  rule in P1-A2: a job object that kills on close would also kill a
+  *legitimately adopted* backend TARS never spawned, which is precisely the
+  process P1-A2 says not to touch. Say how your recommendation handles that.
+
   *Done when*: a written recommendation exists with the trade-off stated,
-  proposed as an ADR for coordinator sign-off. Implement only if the
-  evaluation says to and the coordinator agrees.
+  proposed as an ADR for coordinator sign-off. No implementation.
+
+- [ ] READY: **P1-A5 — `--market` does nothing on a cold start.** Found by
+  trying it, not by reading the code. `--market` is handled only inside the
+  single-instance plugin's callback, which by design fires on a *second*
+  launch, so passing it to a cold start gives you the companion and no
+  Market window — and no later launch can fix it, because the startup hook
+  reads `TARS_OPEN_MARKET=1` rather than argv. The launcher is unaffected
+  since it sets that variable, which is why this went unnoticed.
+  Handle the argv on a cold start as well, in the same place the env var is
+  read, so both entry points behave the same. `docs/runtime/market-xray.md`
+  has been corrected to state the current limitation; update it when this
+  lands.
+  *Done when*: `tars-companion.exe --market` opens the window from cold and
+  still focuses rather than duplicating when TARS is already running, with
+  both cases actually exercised.
 
 ### Codex — `tests/`, `tools/` (Branch: `feature/clean-install-acceptance`)
 
@@ -229,6 +289,42 @@ deliberately set before the shutdown POST.
   `tools/verify_market_desktop.py` against a cold-started release binary.
   *Done when*: counts are reported as counts, and any drop from the Phase 0
   floor in constraint 3 above is named rather than averaged away.
+
+- [ ] READY: **P1-X3 — Make fullscreen verification DPI-safe, and say when
+  it could not run.** `verify_market_desktop.py`'s fullscreen check fails
+  today for a harness reason, not an app one, and its failure message is
+  actively misleading: it prints the pass-condition wording
+  ("1942x1102 exactly matches monitor 1920x1080") over numbers that plainly
+  do not match. Two defects behind it:
+  (a) **The keystroke never arrives.** `SetForegroundWindow` on the Market
+  window returns false — Windows refuses the foreground to a process that
+  does not have it — so the synthetic F11 goes nowhere. A check that cannot
+  deliver its input must report *"could not verify"* and not *"failed"*;
+  the two mean different things to whoever reads the summary.
+  (b) **DPI scaling.** `GetSystemMetrics` reported 1536x864 in one run and
+  1920x1080 in another on the same display, and windowed rects include
+  invisible borders (1942x1102), so comparing a window rect against a
+  monitor size is unreliable. Use per-monitor-DPI-aware measurement, or
+  compare against the monitor the window is actually on, rather than the
+  primary metrics.
+  *Done when*: the check either verifies fullscreen or reports that it could
+  not, never a bare FAIL for a harness limitation, and the numbers it prints
+  support the verdict it gives.
+
+- [ ] READY: **P1-X4 — Investigate the intermittent minimized window.**
+  Observed once: the Market window appeared at `-32000,-32000` sized
+  199x34, the Windows signature of a minimized window, which silently
+  invalidated three checks in that run — a minimized window cannot be
+  captured (the sample held 515 distinct colours, below the 1500 threshold),
+  is not desktop-sized, and ignores keystrokes. It did not reproduce on
+  relaunch and no cause has been established. Two jobs, and the second
+  matters more: find the cause if you can, and in any case make the
+  verifier **detect** the condition and say so, because the failure
+  currently presents as three unrelated check failures rather than one
+  explicable state.
+  *Done when*: the verifier reports a minimized window as exactly that, and
+  whatever is known about the cause is written down even if the answer is
+  "not reproduced, cause unknown".
 
 ### Human (the user) — not assignable to an agent
 
@@ -320,8 +416,10 @@ reports it.
 ### Codex — `tests/`, `tools/` (Branch: `feature/feed-status-acceptance`)
 
 - [ ] READY: **P2-X1 — Independent acceptance of the feed-status
-  separation.** Verify P2-C3 from outside the backend rather than trusting
-  its own tests: drive the API with a replay cursor set and assert no
+  separation.** **P2-C3 is done**, so this is unblocked, and the fields are
+  in the table at the top. Verify it from outside the backend rather than
+  trusting its own tests — the backend asserting its own honesty is exactly
+  the claim an independent check is for: drive the API with a replay cursor set and assert no
   response anywhere reports LIVE; assert every observation carries
   provenance. An independent check is the point — this is the invariant the
   whole feature's honesty rests on.
@@ -331,12 +429,31 @@ reports it.
 - [ ] READY: **P2-X2 — Regression gate for Phase 2.** As P1-X2, re-run
   against the Phase 2 branches before any merge is proposed.
 
+- [ ] READY: **P2-X3 — Independent integration testing of
+  `feature/market-xray-phase12-integration`.** The Claude-lane work was
+  verified by the agent that wrote it, which is the weakest form of
+  evidence. Test the integrated branch end to end without reusing its
+  tests: drive the real HTTP API and the desktop app, and check at minimum
+  that the health identity is well formed and compatible, that no payload
+  anywhere reports a replayed observation as live, that every instrument
+  declares its data backing, that the thin-coverage flags for NZD and CHF
+  are still present and still true, and that the dashboard still paints
+  against the real store. Where a check cannot run, say so rather than
+  omitting it.
+  *Done when*: a pass/fail list exists that was not derived from
+  `apps/backend/tests/`, with counts.
+
 ---
 
 ## Coordinator actions outstanding
 
-- **Merge decision** on `feature/market-xray-dashboard` (tip `f7022f8`).
-  Deferred by the coordinator; the branch is on origin and unmerged.
+- **Merge decision** on `feature/market-xray-phase12-integration`, which
+  now contains `feature/market-xray-dashboard`, both Claude Phase 1/2
+  branches and this board. Accepted as implementation candidates, **not
+  release approved**; nothing is merged to `integration/v1` or `main`.
+- **Release approval** is blocked on evidence that does not exist yet:
+  clean install (B4), real-feed LIVE/STALE (B1, B2) and a human tray click
+  (B5). None of the three may be recorded as done without it.
 - **`CURRENT_STATE.md` is stale** — it predates the Market X-Ray feature and
   does not mention it. Agents are told to read it second, so it is actively
   misleading right now. Only the coordinator can update it.
