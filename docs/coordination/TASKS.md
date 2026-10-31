@@ -115,6 +115,26 @@ Four tasks below cannot be completed by an agent alone. They are marked
 
 ---
 
+## Final directive status (2026-10-31)
+
+Integrated branch `feature/market-xray-phase12-integration`, tip `9926aa8`. DONE below
+means implemented and tested on that build; it does not mean release approved.
+
+Evidence on the final build: backend 1819 passed, 8 skipped, 0 failed; frontend 217 passed, 31 files; API and Chromium
+27/27; black-box integration 15/15; native desktop 17 of 19 with 0 failed; the 2 F11 checks were not verified by the harness, and real F11 was proven separately on this binary; backend
+ownership 37/37; installer in an isolated environment 24/24; native dependency scan
+clean across 558 modules.
+
+| Open item | Why it is open |
+|---|---|
+| Clean-machine install (B4) | Windows 11 Home has no Sandbox or Hyper-V here. The real installer passed with PATH cut to Windows and an empty data root, on a development machine. That is not a clean machine. |
+| Real LIVE and STALE (B1, B2) | No logged-in MT5 account, and the market is closed. Proven only against a fake terminal. |
+| Manual tray click (B5) | Needs a person. |
+| The 26-instrument target (B3) | 18 + 9 named = 27. EURCHF and GBPCHF are in neither list. No list of the 25 FX pairs exists. Coordinator decision. |
+| Independent check of the tip | Codex independently verified `d8d2dcb`. The look-ahead fix, feed, first run and deadlock fix came later. |
+
+Job Objects remain evaluation-only, as directed: not implemented.
+
 ## Implementation status — read before starting
 
 The Claude-lane Phase 1/2 tasks (P1-C1, P1-C2, P2-C3, P2-C5) are **done and
@@ -147,7 +167,7 @@ or shutting down, something it does not own.
 
 ### Claude Code — `apps/backend/` (Branch: `feature/backend-build-identity`)
 
-- [ ] READY: **P1-C1 — Expose a backend build identity from
+- [x] DONE: **P1-C1 — Expose a backend build identity from
   `/api/v1/health`.** Add a stable identity to the existing health payload
   (`apps/backend/app/routers/health.py`): an instance id generated per
   process start, plus a build/version identifier derived from something that
@@ -160,7 +180,7 @@ or shutting down, something it does not own.
   asserting it is stable within a process and differs across builds, and
   the existing health-endpoint tests still pass.
 
-- [ ] READY: **P1-C2 — Make the market data roots configurable.**
+- [x] DONE: **P1-C2 — Make the market data roots configurable.**
   `market/ingest.py` hardcodes `CSV_ROOT = C:/Trade Data` and
   `DEFAULT_STORE_ROOT = D:/TARS_DATA/...` instead of reusing
   `research/config.py`'s `resolve_data_root()`, which already implements
@@ -184,7 +204,7 @@ established as already correct, so that none of it is broken by accident:
 `stop()` is deliberately ownership-agnostic, and `intentional_stop` is
 deliberately set before the shutdown POST.
 
-- [ ] READY: **P1-A1 — Verify backend identity before adopting.**
+- [x] DONE: **P1-A1 — Verify backend identity before adopting.**
   **P1-C1 is done**, so this is unblocked; the fields are in the table
   above. Adopt only a process that declares `service == "tars-backend"` and
   the `contract_version` this release expects — the same rule as
@@ -201,7 +221,7 @@ deliberately set before the shutdown POST.
   mismatched backend is refused and reported, and neither case produces the
   restart loop that `f796e1d` fixed.
 
-- [ ] READY: **P1-A2 — Never shut down a process TARS does not own.**
+- [x] DONE: **P1-A2 — Never shut down a process TARS does not own.**
   Follows from P1-A1 and is the half that matters most: `stop()` POSTs the
   shutdown endpoint regardless of ownership, which is correct for a backend
   TARS spawned or legitimately adopted, but means a foreign process on the
@@ -222,7 +242,7 @@ deliberately set before the shutdown POST.
   untouched. State plainly which of those two you actually tested — the
   second one is the claim that matters and the easier one to skip.
 
-- [ ] READY: **P1-A3 — Resolve the backend port inconsistency.**
+- [x] DONE: **P1-A3 — Resolve the backend port inconsistency.**
   `supervisor.rs` hardcodes `127.0.0.1:8000` in three constants while
   `chart_watcher.rs` honours `TARS_BACKEND_URL`. One mechanism, used by
   both. Consequence to fix with it: the desktop launcher's `-BackendPort`
@@ -232,7 +252,7 @@ deliberately set before the shutdown POST.
   default is unchanged, and the launcher parameter either works end to end
   or is removed.
 
-- [ ] READY: **P1-A4 — Evaluate a Windows Job Object for crash cleanup.**
+- [x] DONE: **P1-A4 — Evaluate a Windows Job Object for crash cleanup.**
   The backend child is not in a Job Object with
   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so `TerminateProcess`, a crash or
   power loss orphans Python holding the port. Today that self-heals on the
@@ -251,7 +271,7 @@ deliberately set before the shutdown POST.
   *Done when*: a written recommendation exists with the trade-off stated,
   proposed as an ADR for coordinator sign-off. No implementation.
 
-- [ ] READY: **P1-A5 — `--market` does nothing on a cold start.** Found by
+- [x] DONE: **P1-A5 — `--market` does nothing on a cold start.** Found by
   trying it, not by reading the code. `--market` is handled only inside the
   single-instance plugin's callback, which by design fires on a *second*
   launch, so passing it to a cold start gives you the companion and no
@@ -268,7 +288,7 @@ deliberately set before the shutdown POST.
 
 ### Codex — `tests/`, `tools/` (Branch: `feature/clean-install-acceptance`)
 
-- [ ] BLOCKED (**B4**): **P1-X1 — Test the real NSIS installer in a clean
+- [ ] BLOCKED (**B4**, isolated run passed, clean machine not done): **P1-X1 — Test the real NSIS installer in a clean
   environment.** Everything verified so far ran against a development tree
   with its toolchain, `node_modules`, a built candle store and a warm data
   root. `TARS_1.0.0_x64-setup.exe` was produced but never installed
@@ -283,14 +303,14 @@ deliberately set before the shutdown POST.
   Codex's lane but were written by Claude under a coordinator override;
   extending them is Codex's call.
 
-- [ ] READY: **P1-X2 — Regression gate for Phase 1.** Re-run the existing
+- [x] DONE: **P1-X2 — Regression gate for Phase 1.** Re-run the existing
   suites against the Phase 1 branches before any merge is proposed: backend
   pytest, frontend tests, the 27-check API+Chromium acceptance run, and
   `tools/verify_market_desktop.py` against a cold-started release binary.
   *Done when*: counts are reported as counts, and any drop from the Phase 0
   floor in constraint 3 above is named rather than averaged away.
 
-- [ ] READY: **P1-X3 — Make fullscreen verification DPI-safe, and say when
+- [x] DONE: **P1-X3 — Make fullscreen verification DPI-safe, and say when
   it could not run.** Note first what is *not* broken: fullscreen itself is
   **verified working** -- a clean run reported `1920x1080 exactly matches
   monitor 1920x1080`. The problem is that the check is unreliable across
@@ -316,7 +336,7 @@ deliberately set before the shutdown POST.
   support the verdict it gives. A flaky check that cries wolf is worse than
   no check, because it teaches people to ignore the summary.
 
-- [ ] READY: **P1-X4 — Investigate the intermittent minimized window.**
+- [x] DONE: **P1-X4 — Investigate the intermittent minimized window.**
   Observed once: the Market window appeared at `-32000,-32000` sized
   199x34, the Windows signature of a minimized window, which silently
   invalidated three checks in that run — a minimized window cannot be
@@ -352,7 +372,7 @@ reports it.
 
 ### Claude Code — `apps/backend/` (Branch: `feature/market-live-feed`)
 
-- [ ] BLOCKED (**B1**): **P2-C1 — Integrate MT5 through the existing
+- [ ] BLOCKED (**B1**, code done, real session unverified): **P2-C1 — Integrate MT5 through the existing
   provider interface.** Wire `monitors/mt5_provider.py` into
   `MarketXRayService` behind the current provider seam so `_feed_last_tick`
   is fed by a real authenticated session. Do not hard-code MT5 into the
@@ -375,7 +395,7 @@ reports it.
   states have been seen against a live session. Until the second half
   happens, this task is not done — report it as implemented, not verified.
 
-- [ ] READY: **P2-C3 — Make "replay is never live" an enforced invariant.**
+- [x] DONE: **P2-C3 — Make "replay is never live" an enforced invariant.**
   The design already guarantees that only a real feed can produce LIVE and
   that stored candles never reach that code path. Phase 2 attaches a live
   provider, which is exactly what could erode it. Assert at the service
@@ -388,7 +408,7 @@ reports it.
   *Done when*: a test attaches a live provider, sets a replay cursor, and
   asserts LIVE is unreachable; and every payload carries provenance.
 
-- [ ] BLOCKED (**B3**): **P2-C4 — Reconcile the 26-instrument target.** The
+- [ ] BLOCKED (**B3**, **target list undefined**): **P2-C4 — Reconcile the 26-instrument target.** The
   ceiling is source data, not code: nine pairs have no CSVs (see B3).
   Either obtain history for them, or accrue it from the live feed going
   forward and accept a short history — the second option changes what the
@@ -399,7 +419,7 @@ reports it.
   backing per instrument, and any instrument added on short history is
   labelled as such.
 
-- [ ] READY: **P2-C5 — Preserve coverage warnings and provenance.** The
+- [x] DONE: **P2-C5 — Preserve coverage warnings and provenance.** The
   `thin_coverage` flag and the leave-one-pair-out diagnostic are what make
   uneven coverage visible; adding instruments must not weaken either.
   Closing the coverage gap silently would be worse than the gap.
@@ -409,7 +429,7 @@ reports it.
 
 ### Antigravity — `apps/web/` (Branch: `feature/market-provenance-badges`)
 
-- [ ] READY: **P2-A1 — Surface provenance and keep the status honest in the
+- [x] DONE: **P2-A1 — Surface provenance and keep the status honest in the
   UI.** Depends on P2-C3's provenance field. The dashboard already badges
   `thin_coverage` and shows the feed status; extend it to show which source
   produced the data being displayed, so a REPLAY view can never be mistaken
@@ -420,7 +440,7 @@ reports it.
 
 ### Codex — `tests/`, `tools/` (Branch: `feature/feed-status-acceptance`)
 
-- [ ] READY: **P2-X1 — Independent acceptance of the feed-status
+- [ ] PARTIAL (independent run predates the feed work): **P2-X1 — Independent acceptance of the feed-status
   separation.** **P2-C3 is done**, so this is unblocked, and the fields are
   in the table at the top. Verify it from outside the backend rather than
   trusting its own tests — the backend asserting its own honesty is exactly
@@ -431,10 +451,10 @@ reports it.
   *Done when*: the check runs against a live backend and fails loudly if a
   replayed observation is ever labelled live.
 
-- [ ] READY: **P2-X2 — Regression gate for Phase 2.** As P1-X2, re-run
+- [x] DONE: **P2-X2 — Regression gate for Phase 2.** As P1-X2, re-run
   against the Phase 2 branches before any merge is proposed.
 
-- [ ] READY: **P2-X3 — Independent integration testing of
+- [ ] PARTIAL (independent run covers `d8d2dcb`, not the tip): **P2-X3 — Independent integration testing of
   `feature/market-xray-phase12-integration`.** The Claude-lane work was
   verified by the agent that wrote it, which is the weakest form of
   evidence. Test the integrated branch end to end without reusing its

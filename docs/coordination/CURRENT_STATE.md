@@ -6,6 +6,13 @@ shared/read-only, see [AGENTS.md](../../AGENTS.md)).
 
 ## Stage
 
+**MARKET INTELLIGENCE FINAL DIRECTIVE (ENGINEERING COMPLETE, NOT RELEASE READY).**
+`feature/market-xray-phase12-integration` at `9926aa8` carries the Market X-Ray dashboard,
+verified backend ownership, the self-contained NSIS installer, first-run import and the
+MT5 feed. Unmerged. Open before release: a clean-machine install, real-feed LIVE and
+STALE, a manual tray click, the undefined 25-pair target, and independent verification
+of the tip. See `TASKS.md` and `handoffs/claude.md`. The sections below predate this.
+
 **OVERNIGHT TARS INTEGRATION (COMPLETE).**
 Three parallel overnight streams -- `feature/overnight-tars-core` (TARS
 Orchestrator, Trading Intelligence foundation, bounded Agent framework,

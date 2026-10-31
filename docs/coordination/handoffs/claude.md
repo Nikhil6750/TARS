@@ -11,7 +11,114 @@ for that).
 
 ---
 
-## Latest handoff — Phase 1 & 2, Claude-lane READY tasks (2026-10-31)
+## Latest handoff — Market Intelligence final implementation directive (2026-10-31)
+
+**Branch**: `feature/market-xray-phase12-integration`
+**Final SHA**: `9926aa8`
+**Status**: engineering complete on one build; **not release ready**. See the task
+board's "Final directive status" for what stays open.
+
+### Corrections to my earlier reports
+
+Each of these was reported as true and was not. They change what earlier entries in
+this file can be relied on for.
+
+1. **Replay had look-ahead.** I reported "no look-ahead" as guaranteed from the first
+   session. `ts` is a bar's open, so `ts <= as_of` returned the bar still forming at
+   the cursor, with its later prices. Fixed in `d99aa5f`; 9 new tests fail on the old
+   filter. Calculation version is now `xray-v2`.
+2. **P2-C3 did not enforce what I said.** With a feed attached and no pin the service
+   returned LIVE and `is_live: true` on panels computed from old recorded bars, and
+   `is_live` was also true for STALE and CLOSED. Fixed in `3dff01f`.
+3. **Every "port 8000 free" from my `netstat | grep` was meaningless.** The pattern
+   expected the port after LISTENING; Windows prints it before. It could never match,
+   which is also why a `taskkill` loop silently did nothing and a stray uvicorn
+   survived. The psutil results from the verifiers were real.
+4. **`d8d2dcb` says no Antigravity runtime is reachable.** Too strong: it was running in
+   this checkout. I could not message it, which is a different thing.
+5. **The "26 FX names" test encoded a wrong target.** The target is 25 FX plus XAUUSD.
+6. **`ec69127` blames LF line endings for the installer script stopping.** A guess, and
+   wrong. `python` is a `.cmd` shim and needed `call` (`9926aa8`).
+
+### Who did what
+
+Several agents worked in this checkout at once, without a channel between them.
+
+* **Claude Code**: ownership, supervisor rewrite, endpoint, deadlock, installer, first
+  run, feed, look-ahead, and everything committed under this entry.
+* **Antigravity**: provenance UI (`cd2ac48`, committed by me unchanged because it sat
+  uncommitted and idle, marked as not my work), F11 listeners, the launcher `--market`
+  argument, its handoff, and a new branch that moved this checkout's HEAD.
+* **Codex**: independent verification and the hardened verifier, on its own branch, at
+  `d8d2dcb`.
+
+`docs/coordination/handoffs/antigravity.md` overstates this and should be corrected by
+its owner: it claims `GET /api/v1/runtime/identity` and a `BackendDecision` type, neither
+of which exists, and it lists the supervisor and endpoint work as its own. Codex's
+handoff likewise calls `d8d2dcb` an Antigravity commit. I have not edited either file.
+
+`AllowSetForegroundWindow(ASFW_ANY)` reached a release build swept into my `b6241d0`
+along with uncommitted edits to `lib.rs`. It let any process take the foreground on every
+Market focus event, seemingly to help a harness land a keystroke. Removed in `c5478f6`.
+That is a change to Antigravity's code, so it is flagged here. Real F11 was then proven
+on the final binary without it.
+
+### Defects found by running things, all with regression coverage
+
+* Replay look-ahead; LIVE without live bars; `is_live` on stale data.
+* Main-thread window deadlock: two launches a second apart hung the app, and every later
+  launch including `--quit` queued behind it.
+* An installed app had no backend at all.
+* `storage/` excluded from the bundle although it is also a code package.
+* Post-import reload dropped a custom store root, and `/setup` could pair DONE with the
+  old empty store.
+* A live child that stopped answering was replaced without being killed, and `restart()`
+  could race the poll loop into a double spawn.
+* The WebSocket built a second service, kept a stale one after an import, and never sent
+  the provenance the UI reads.
+* The Market window opened larger than a 1920x1080 screen at 125%.
+* The zone database lived in `apps/backend/apps/backend/storage`. Copied on first start,
+  original left in place.
+
+### Live feed: what is and is not proven
+
+The bridge, freshness, broker-time handling, bar construction, disconnect and recovery run
+through the real provider, bridge, service and store against a fake `MetaTrader5` module.
+No real terminal has ever been connected: `-6 Authorization failed`, and it is Saturday.
+
+Assumptions a real session must check: the broker-offset estimate, spread units on rates,
+and whether symbol names need `TARS_MT5_SYMBOL_SUFFIX`.
+
+### Known limitations
+
+* Installed voice runs on mock providers until configured, and the mock trading-event
+  generator runs by default, as it does in a checkout.
+* A hard kill still leaves the backend running; the next launch reclaims it.
+* A backend answering slowly can make one reclaim check miss. Seen once, in an early run
+  of `orphan_reclaim`, and not since a longer wait.
+* The minimized launch was seen once and never reproduced. Cause unknown.
+* `verify_market_desktop.py` reports F11 as NOT VERIFIED when Windows refuses the
+  foreground. F11 itself was proven separately, with a real click then a real key.
+* Live bars are in memory and refill from the terminal after a restart.
+* The browser suite passed 27/27 on 3 of 4 runs on this tree. The fourth timed out
+  loading a page while the machine ran other suites, so it is load-sensitive.
+* Pre-existing lint, unchanged: 3 ruff errors in `app/main.py`, `routers/realtime.py`,
+  `routers/voice.py`; 1 eslint error in `src/test/orb-native.test.ts`.
+* Two uvicorn processes of mine from earlier today remain on ports 8018 and 8019. The
+  permission classifier refused to stop them. They use about 0.1 GB and are harmless.
+
+### Dependencies
+
+* **Coordinator**: the 25-pair list; merge and release decisions; a clean Windows machine;
+  a logged-in MT5 account; a person to click the tray.
+* **Antigravity**: correct its handoff; review the `lib.rs` changes.
+* **Codex**: rerun independent verification against this tip.
+
+### Next recommended action
+
+Run `tools/verify_installer.py`, then the manual checks, on a clean Windows machine.
+
+## Previous handoff — Phase 1 & 2, Claude-lane READY tasks (2026-10-31)
 
 Four tasks from `docs/coordination/TASKS.md`, all in `apps/backend/`. The
 coordinator authorized implementation and asked for the priority order
