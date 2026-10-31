@@ -6,6 +6,95 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Latest handoff — Market X-Ray final release-candidate review (2026-10-31)
+
+**Branch**: `feature/market-xray-final-verification`
+
+**Implementation commit SHA**: `93c6c2a47deb98395f8418ec78ebd10e781db458`
+
+**Reviewed integration commit / worktree**:
+`7fe5875ecbe682f36cf7ded3245089184e44a2f9` /
+`C:\TARS-Market-XRay-RC`
+
+**Work completed**:
+
+- Reviewed and executed the exact integrated candidate. Confirmed the earlier
+  no-lookahead, live-feed truthfulness, installer, first-run, and desktop
+  hardening commits are already ancestors; no older patch was replayed.
+- Added real-release-binary ownership scenarios for recovery after an attached
+  compatible backend disappears and after an owned backend process is killed.
+- Added a deterministic regression for the confirmed Market WebSocket
+  disconnect/build race. It is explicitly xfailed until the backend owner fixes
+  the sender, so the defect is visible without making unrelated Codex gates red.
+- Kept trading execution disabled. No backend, frontend, contract, or UI source
+  was modified.
+
+**Files changed**:
+
+- `tools/verify_backend_ownership.py`
+- `tests/integration/test_market_ws_disconnect.py`
+- This Codex handoff file only.
+
+**Tests run / evidence**:
+
+- Backend full suite: **1,819 passed, 8 skipped, 0 failed** in 19m42s.
+- Root contract/integration: **75 passed, 24 skipped, 1 known-defect xfailed**.
+- Targeted market/identity/lifecycle: **119 passed**.
+- Frontend: **217 Vitest tests passed**; typecheck and production build passed;
+  lint has one existing `prefer-const` error in `src/test/orb-native.test.ts:4`.
+- Rust: **33 passed, 1 hardware capture ignored, 0 failed**.
+- Black-box Market integration: **15/15 passed**. API+Chromium: **27/27**
+  passed on four consecutive correctly bound runs; the earlier timeout did not
+  reproduce after fixing the verifier environment's IPv4 Vite binding.
+- Native desktop: **19/19 passed**, including per-monitor DPI, proven foreground,
+  1920x1080 fullscreen, exact restoration, resize, reopen, and orphan-free quit.
+- Consolidated ownership/port/single-instance/recovery matrix: **44/44 passed**.
+  One cold `--quit` timeout in an earlier loaded run passed in three later runs
+  (including the consolidated matrix), so it is retained as intermittent
+  evidence rather than claimed as a confirmed application defect.
+- Real NSIS installer: **24/24 passed** in an isolated location on this developer
+  host; **558 native modules** had no unresolved non-Windows imports. Artifact:
+  208,044,916 bytes, SHA-256
+  `0574CA45D1688A8C872537644604DBB4F5569241567FE9630F333CA259B9203D`.
+
+**Known limitations / unresolved defects**:
+
+- **Release blocker:** abrupt Market WebSocket disconnects can finish while
+  `_build_frame` is in a worker, after which the sender unconditionally calls
+  `send_json`. Repeated real Uvicorn runs emit `RuntimeError: Unexpected ASGI
+  message 'websocket.send' ... response already completed` at
+  `app/routers/market_xray.py:408`. Chromium page teardown reproduced the same
+  server error. The focused regression is xfailed on this exact behavior.
+- The explicit target supplied for this review is 25 FX pairs plus XAUUSD. The
+  registry has 17 required FX pairs plus XAUUSD. Missing required pairs are
+  `USDCHF`, `EURCHF`, `EURNZD`, `GBPCHF`, `AUDNZD`, `NZDJPY`, `NZDCAD`, and
+  `CADJPY`. `EURCHF` and `GBPCHF` are not even in `UNAVAILABLE_PAIRS`; the API
+  coverage note still describes the earlier ambiguous universe and names three
+  non-target pairs (`CADCHF`, `GBPNZD`, `NZDCHF`). No data was manufactured and
+  no warning was removed.
+- A genuine clean-Windows installation remains **BLOCKED**. The real installer
+  test used an isolated install/data root but this is still a development host;
+  no suitable Windows Sandbox/clean VM is available.
+- Native CUA visual inspection was unavailable because its Windows native pipe
+  was absent. The purpose-built Win32 desktop verifier supplied independent
+  pixel, HWND, DPI, foreground, fullscreen, restoration, and process evidence.
+
+**Exact dependencies required from other agents**:
+
+- Claude Code/backend: recheck the stop event after `_build_frame` returns and
+  handle closed-send RuntimeError without hiding unrelated failures; add the
+  missing target symbols only when genuine source/live backing exists; correct
+  registry coverage metadata and the `/instruments` note.
+- Antigravity/frontend: correct the existing `prefer-const` lint error.
+- Release coordinator: provide a clean Windows VM for the final installer test.
+
+**Next recommended action**: **NO-GO** until the Market WebSocket send-after-close
+race is fixed and the xfailed regression passes. Resolve or explicitly defer the
+eight-pair target gap with truthful coverage metadata, then rerun backend,
+Chromium, ownership, desktop, and clean-machine installer verification.
+
+---
+
 ## Latest handoff — Market X-Ray independent verification (2026-10-31)
 
 **Branch**: `feature/market-xray-independent-verification`
