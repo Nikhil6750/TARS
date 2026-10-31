@@ -15,8 +15,9 @@ for that).
 
 **Branch**: `feature/market-xray-dashboard`
 **Base SHA**: `db49310` (Phase 3E, `feature/tars-desktop-demo-20260920`)
-**Final SHA**: `9417161` (engine + dashboard: `26de505`; docs: `f87d62a`;
-desktop integration and the three defects below: `9417161`)
+**Final SHA**: `f796e1d` (engine + dashboard: `26de505`; docs: `f87d62a`;
+desktop integration and the three defects below: `f796e1d`; this SHA
+itself is recorded by the small docs commit that follows it)
 
 Branched from `db49310` rather than `integration/v1` because the feature
 reuses Phase 3E backend infrastructure that only exists on that line. No
