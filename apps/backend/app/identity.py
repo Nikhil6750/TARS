@@ -34,6 +34,18 @@ This module supplies the two values that make the difference checkable:
     shell depends on, so a newer backend with the same contract is adoptable
     and a different contract is not.
 
+``owner_id``
+    Identifies who *started* this process, which is a third question again.
+    Compatibility says a shell may talk to a backend; only ownership says it
+    may stop one. A shell generates this value before spawning and passes it
+    in the environment, so a backend that reports the shell's own value is
+    provably that shell's child, and one that does not was started by
+    somebody else -- however compatible it looks. Empty when nothing
+    supervises this process. ``TARS_SUPERVISOR_SECRET`` travels with it but
+    is never served: it is what authorises `POST /api/v1/runtime/shutdown`,
+    so reading the health endpoint does not grant the ability to stop a
+    backend.
+
 Nothing here raises. Identity is diagnostic: a backend that cannot work out
 its own build must still serve health, or the supervisor's health poll would
 fail over a missing `git`, which would be a worse outcome than an unknown
@@ -41,6 +53,7 @@ build id.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import subprocess
@@ -77,6 +90,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 # Generated at import, i.e. once per process start.
 _INSTANCE_ID = uuid.uuid4().hex[:16]
 _STARTED_AT = datetime.now(UTC)
+
+# Read once and removed from the environment, so the secret is not inherited
+# by the assistant CLIs and tools this backend launches.
+_OWNER_ID = os.environ.get("TARS_SUPERVISOR_OWNER_ID", "").strip()
+_SHUTDOWN_SECRET = os.environ.pop("TARS_SUPERVISOR_SECRET", "").strip()
 
 
 def _git_commit() -> str | None:
@@ -136,11 +154,25 @@ def identity() -> dict[str, str | int]:
         "service": SERVICE_NAME,
         "contract_version": CONTRACT_VERSION,
         "instance_id": _INSTANCE_ID,
+        "owner_id": _OWNER_ID,
+        "pid": os.getpid(),
         "build_id": build_id,
         "build_source": build_source,
         "app_version": APP_VERSION,
         "started_at": _STARTED_AT.isoformat(),
     }
+
+
+def shutdown_authorized(presented: str | None) -> bool:
+    """Whether a shutdown request came from the shell that owns this process.
+
+    A backend started by hand has no secret and stays stoppable as before. A
+    supervised one obeys only its supervisor, so a second shell, or anything
+    else on the machine that can reach loopback, cannot take it down.
+    """
+    if not _SHUTDOWN_SECRET:
+        return True
+    return hmac.compare_digest(_SHUTDOWN_SECRET, (presented or "").strip())
 
 
 def is_compatible(*, service: str | None, contract_version: object) -> bool:

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app.deps import get_daily_brief_service, get_market_watch_service, get_monitors
+from app.identity import shutdown_authorized
 from app.supervisor_hooks import request_graceful_shutdown
 
 if TYPE_CHECKING:
@@ -22,12 +23,19 @@ router = APIRouter(tags=["lifecycle"])
 
 
 @router.post("/api/v1/runtime/shutdown")
-async def shutdown() -> dict:
+async def shutdown(
+    x_tars_supervisor_secret: str | None = Header(default=None),
+) -> dict:
     """Cooperative shutdown: sets uvicorn's own should_exit flag, which
     runs app/main.py's lifespan `finally` block (clean watcher/monitor/db
     teardown) before the process exits. The caller (the Rust supervisor)
     treats a response from this endpoint as "intentional" and must not
-    auto-restart on the process exit that follows."""
+    auto-restart on the process exit that follows.
+
+    A supervised backend answers only its own supervisor; see
+    `app.identity.shutdown_authorized`."""
+    if not shutdown_authorized(x_tars_supervisor_secret):
+        raise HTTPException(status_code=403, detail="not this backend's supervisor")
     requested = request_graceful_shutdown()
     return {"status": "shutting_down" if requested else "no_server_reference"}
 

@@ -40,6 +40,7 @@ import { VisualInspectorCard } from './VisualInspectorCard';
 import { BrowserContextCard } from './BrowserContextCard';
 import { MultiStepPlanView } from './MultiStepPlanView';
 import { ChartAnalysisCard, ChartAnalysisData } from './ChartAnalysisCard';
+import { backendHttpUrl } from '../../runtime/backendUrl';
 
 interface HUDOverlayProps {
   companionState: CompanionVisualState;
@@ -71,7 +72,7 @@ export const HUDOverlay: React.FC<HUDOverlayProps> = ({
   isListening,
   onTogglePushToTalk,
   audioVolume,
-  apiEndpoint = 'http://127.0.0.1:8000',
+  apiEndpoint = backendHttpUrl(),
   onSendMessage,
   onAnalyzeChart,
   latestChartAnalysis,

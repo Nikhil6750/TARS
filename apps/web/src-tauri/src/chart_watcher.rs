@@ -62,7 +62,7 @@ pub fn start(app: AppHandle) {
 }
 
 fn backend_base_url() -> String {
-    std::env::var("TARS_BACKEND_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string())
+    crate::backend_endpoint::base_url().to_string()
 }
 
 struct WatchedSession {

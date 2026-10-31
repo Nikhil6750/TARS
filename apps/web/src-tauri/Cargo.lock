@@ -3641,6 +3641,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
  "ureq",
+ "uuid",
  "windows 0.61.3",
  "windows-sys 0.59.0",
  "winreg 0.52.0",

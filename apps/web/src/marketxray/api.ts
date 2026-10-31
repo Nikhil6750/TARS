@@ -15,14 +15,11 @@ import type {
   StrengthSnapshot,
   XRaySnapshot
 } from './types';
+import { backendHttpUrl, backendWsUrl } from '../runtime/backendUrl';
 
-const metaEnv = (import.meta as unknown as { env?: Record<string, string> }).env;
+export const API_BASE = backendHttpUrl();
 
-export const API_BASE = metaEnv?.VITE_TARS_API_URL
-  ? String(metaEnv.VITE_TARS_API_URL).replace(/\/$/, '')
-  : 'http://127.0.0.1:8000';
-
-export const WS_URL = `${API_BASE.replace(/^http/, 'ws')}/api/v1/market/ws`;
+export const WS_URL = backendWsUrl('/api/v1/market/ws');
 
 const ROOT = `${API_BASE}/api/v1/market`;
 

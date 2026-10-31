@@ -1,3 +1,5 @@
+import { backendHttpUrl } from '../runtime/backendUrl';
+
 /** Read-only monitor status for the HUD. Backend is the only source of truth. */
 export interface MonitorStatus {
   mt5: { state: string; detail?: string };
@@ -18,7 +20,7 @@ export interface TarsAlert {
 
 export const ALERT_EVENT = 'tars-alert';
 
-export async function fetchMonitorStatus(base = 'http://127.0.0.1:8000'): Promise<MonitorStatus | null> {
+export async function fetchMonitorStatus(base = backendHttpUrl()): Promise<MonitorStatus | null> {
   try {
     const response = await fetch(`${base}/api/v1/monitors/status`);
     return response.ok ? ((await response.json()) as MonitorStatus) : null;

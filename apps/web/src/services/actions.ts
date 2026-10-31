@@ -14,6 +14,7 @@ import {
 } from '../types/actions';
 import { validateActionRequest, validateActionResult } from '../contracts/action-validator';
 import { isTauri } from './tauri';
+import { backendHttpUrl } from '../runtime/backendUrl';
 
 export class ActionRuntimeClient {
   private apiEndpoint: string;
@@ -21,7 +22,7 @@ export class ActionRuntimeClient {
   private globalListeners: Set<(result: ActionResult, request?: ActionRequest) => void> = new Set();
   private inFlightRequests: Map<string, ActionRequest> = new Map();
 
-  constructor(apiEndpoint: string = 'http://127.0.0.1:8000') {
+  constructor(apiEndpoint: string = backendHttpUrl()) {
     this.apiEndpoint = apiEndpoint;
   }
 

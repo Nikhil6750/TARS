@@ -10,6 +10,7 @@ import {
   Play
 } from 'lucide-react';
 import { audioService } from '../../services/audio';
+import { backendHttpUrl } from '../../runtime/backendUrl';
 
 interface VoiceControlViewProps {
   isListening: boolean;
@@ -38,7 +39,7 @@ export const VoiceControlView: React.FC<VoiceControlViewProps> = ({
   isListening,
   onTogglePushToTalk,
   audioVolume,
-  apiEndpoint = 'http://127.0.0.1:8000'
+  apiEndpoint = backendHttpUrl()
 }) => {
   const [hasMicPermission, setHasMicPermission] = useState<boolean | null>(null);
   const [readiness, setReadiness] = useState<RuntimeReadiness | null>(null);

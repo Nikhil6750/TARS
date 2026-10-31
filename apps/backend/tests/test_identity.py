@@ -246,3 +246,72 @@ def test_health_carries_everything_a_supervisor_needs_to_decide(client):
     # And enough to tell one process from another once adopted.
     assert block["instance_id"]
     assert block["build_id"]
+
+
+# ---- ownership (the shell may only stop what it started) ---------------
+
+
+def test_identity_reports_who_started_this_process():
+    block = ident.identity()
+    assert block["owner_id"] == ident._OWNER_ID
+    assert block["pid"] > 0
+
+
+def test_the_owner_id_is_read_from_the_supervisors_environment():
+    code = (
+        f"import sys; sys.path.insert(0, r'{BACKEND_DIR}'); "
+        "from app.identity import identity; print(identity()['owner_id'])"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=True,
+        env={**__import__("os").environ, "TARS_SUPERVISOR_OWNER_ID": "shell-123"},
+    )
+    assert out.stdout.strip() == "shell-123"
+
+
+def test_the_shutdown_secret_is_never_served_and_never_inherited():
+    code = (
+        f"import os, sys, json; sys.path.insert(0, r'{BACKEND_DIR}'); "
+        "from app.identity import identity; "
+        "print(json.dumps({'env': os.environ.get('TARS_SUPERVISOR_SECRET'), 'block': identity()}))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60, check=True,
+        env={**__import__("os").environ, "TARS_SUPERVISOR_SECRET": "s3cret-value"},
+    )
+    result = json.loads(out.stdout.strip())
+    assert result["env"] is None, "child processes of the backend must not inherit the secret"
+    assert "s3cret-value" not in out.stdout
+
+
+def test_an_unsupervised_backend_stays_stoppable(monkeypatch):
+    monkeypatch.setattr(ident, "_SHUTDOWN_SECRET", "")
+    assert ident.shutdown_authorized(None)
+
+
+def test_a_supervised_backend_obeys_only_its_supervisor(monkeypatch):
+    monkeypatch.setattr(ident, "_SHUTDOWN_SECRET", "right")
+    assert ident.shutdown_authorized("right")
+    assert not ident.shutdown_authorized("wrong")
+    assert not ident.shutdown_authorized(None)
+    assert not ident.shutdown_authorized("")
+
+
+def test_the_shutdown_route_refuses_the_wrong_secret(client, monkeypatch):
+    monkeypatch.setattr(ident, "_SHUTDOWN_SECRET", "right")
+    denied = client.post("/api/v1/runtime/shutdown", headers={"X-TARS-Supervisor-Secret": "wrong"})
+    assert denied.status_code == 403
+    assert client.post("/api/v1/runtime/shutdown").status_code == 403
+    allowed = client.post("/api/v1/runtime/shutdown", headers={"X-TARS-Supervisor-Secret": "right"})
+    assert allowed.status_code == 200
+
+
+def test_the_rust_supervisor_expects_the_same_service_and_contract():
+    """The rule exists on both sides of the process boundary, so a change to
+    one must fail here rather than silently orphan the other."""
+    source = REPO_ROOT / "apps" / "web" / "src-tauri" / "src" / "supervisor.rs"
+    if not source.exists():
+        pytest.skip("apps/web is not present in this checkout")
+    text = source.read_text(encoding="utf-8")
+    assert f'pub const EXPECTED_SERVICE: &str = "{ident.SERVICE_NAME}";' in text
+    assert f"pub const EXPECTED_CONTRACT: i64 = {ident.CONTRACT_VERSION};" in text

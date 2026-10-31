@@ -46,7 +46,15 @@ describe('Tauri 2 Configuration & Service Compatibility', () => {
     expect(defaultCap.permissions).toContain('global-shortcut:default');
 
     // Security & CSP
-    expect(tauriConfig.app.security.csp).toContain("connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:8000 http://localhost:8000 ws://127.0.0.1:8000 ws://localhost:8000");
+    // Any loopback port, because the backend address is configurable, but
+    // nothing beyond this machine.
+    const connectSrc = (tauriConfig.app.security.csp as string)
+      .split(';').map((d) => d.trim()).find((d) => d.startsWith('connect-src')) ?? '';
+    expect(connectSrc).toContain('http://127.0.0.1:*');
+    expect(connectSrc).toContain('ws://127.0.0.1:*');
+    for (const source of connectSrc.split(/\s+/).slice(1)) {
+      expect(source).toMatch(/^('self'|ipc:|https?:\/\/ipc\.localhost|(http|ws):\/\/(127\.0\.0\.1|localhost):\*)$/);
+    }
     expect(tauriConfig.app.security.csp).not.toContain("unsafe-eval");
   });
 

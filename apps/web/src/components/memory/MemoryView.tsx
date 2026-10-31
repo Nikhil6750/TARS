@@ -6,6 +6,7 @@ import {
   FileText
 } from 'lucide-react';
 import { MemoryItem } from '../../types/companion';
+import { backendHttpUrl } from '../../runtime/backendUrl';
 
 const DEMO_FIXTURE_MEMORY_ITEMS: MemoryItem[] = [
   {
@@ -43,7 +44,7 @@ interface MemoryViewProps {
 }
 
 export const MemoryView: React.FC<MemoryViewProps> = ({
-  apiEndpoint = 'http://127.0.0.1:8000',
+  apiEndpoint = backendHttpUrl(),
   mockModeActive = false
 }) => {
   const [search, setSearch] = useState('');

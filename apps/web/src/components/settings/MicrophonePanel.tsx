@@ -2,9 +2,10 @@ import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore }
 import { MicInfo, MicTestResult, SILENT_DB, judgeMicTest, meterFraction, micStore } from '../../orb/micStore';
 import { isTauri } from '../../services/tauri';
 import { muteStore } from '../../orb/muteStore';
+import { backendHttpUrl } from '../../runtime/backendUrl';
 
 const PREF_KEY = 'tars.mic.preferred';
-const API = 'http://127.0.0.1:8000';
+const API = backendHttpUrl();
 
 interface DeviceRow { name: string; is_default: boolean }
 interface Diagnostics {

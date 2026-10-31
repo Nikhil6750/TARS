@@ -12,10 +12,11 @@ mod wake_engine;
 mod capture_wgc;
 #[cfg(target_os = "windows")]
 mod chart_watcher;
+mod backend_endpoint;
 mod supervisor;
 
 use std::sync::Arc;
-use supervisor::BackendSupervisor;
+use supervisor::{BackendLaunch, BackendSupervisor};
 
 /// Resolves the Python backend's source directory so the supervisor can
 /// spawn `python run.py` in it. `TARS_BACKEND_DIR` (an explicit override)
@@ -58,6 +59,43 @@ fn resolve_backend_dir() -> Option<std::path::PathBuf> {
         return Some(candidate);
     }
     None
+}
+
+/// How this copy of TARS starts its backend. An installed build carries its
+/// own Python runtime and backend source as bundled resources, so it needs
+/// neither a checkout nor a system Python; a development build runs
+/// `python run.py` from the checkout as it always has. `TARS_HOME` keeps an
+/// installed backend's writable state out of the install directory, where an
+/// upgrade or uninstall would delete it.
+fn resolve_backend_launch(app: &tauri::AppHandle) -> BackendLaunch {
+    let explicit = std::env::var("TARS_BACKEND_DIR").is_ok_and(|d| !d.trim().is_empty());
+    if !explicit {
+        if let Ok(resources) = app.path().resource_dir() {
+            let python = resources.join("backend-runtime").join("python").join("python.exe");
+            let backend = resources.join("backend");
+            if python.is_file() && backend.join("run.py").is_file() {
+                let home = app.path().app_local_data_dir().unwrap_or_else(|_| resources.join("data"));
+                return BackendLaunch {
+                    program: python,
+                    working_dir: backend,
+                    envs: vec![
+                        ("TARS_HOME".to_string(), home.to_string_lossy().into_owned()),
+                        ("TARS_BUILD_ID".to_string(), format!("installed-{}", app.package_info().version)),
+                        ("PYTHONNOUSERSITE".to_string(), "1".to_string()),
+                        ("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string()),
+                        ("PYTHONUTF8".to_string(), "1".to_string()),
+                    ],
+                };
+            }
+        }
+    }
+    match resolve_backend_dir() {
+        Some(dir) => BackendLaunch { program: "python".into(), working_dir: dir, envs: Vec::new() },
+        None => {
+            eprintln!("[TARS][supervisor] could not resolve a backend to start (set TARS_BACKEND_DIR to override); will still attach to a compatible backend, but cannot spawn one");
+            BackendLaunch::default()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -698,6 +736,11 @@ fn get_backend_health(supervisor: tauri::State<Arc<BackendSupervisor>>) -> super
 }
 
 #[tauri::command]
+fn get_backend_status(supervisor: tauri::State<Arc<BackendSupervisor>>) -> supervisor::BackendStatus {
+    supervisor.status()
+}
+
+#[tauri::command]
 fn restart_backend(app: tauri::AppHandle, supervisor: tauri::State<Arc<BackendSupervisor>>) -> Result<(), String> {
     let sup = Arc::clone(&supervisor);
     std::thread::spawn(move || sup.restart(&app));
@@ -708,7 +751,7 @@ fn restart_backend(app: tauri::AppHandle, supervisor: tauri::State<Arc<BackendSu
 /// the SAME MarketWatchService pause state the voice tools already use --
 /// never a second pause flag.
 fn post_watcher_toggle(path: &str) -> Result<bool, String> {
-    let url = format!("http://127.0.0.1:8000{path}");
+    let url = backend_endpoint::url(path);
     let resp = ureq::post(&url)
         .timeout(std::time::Duration::from_secs(5))
         .send_bytes(b"{}")
@@ -719,7 +762,7 @@ fn post_watcher_toggle(path: &str) -> Result<bool, String> {
 }
 
 fn get_watcher_paused_status() -> bool {
-    ureq::get("http://127.0.0.1:8000/api/v1/watcher/status")
+    ureq::get(&backend_endpoint::url("/api/v1/watcher/status"))
         .timeout(std::time::Duration::from_secs(3))
         .call()
         .ok()
@@ -792,6 +835,35 @@ fn show_main_impl(app: &tauri::AppHandle) -> Result<(), String> {
 /// monitor.
 const MARKET_WINDOW: &str = "market";
 
+/// The window's preferred size, fitted to the screen it opens on. Asking for
+/// more than the work area does not get you a scrollbar: Windows hands back a
+/// window larger than the monitor, with its edges behind the taskbar. On a
+/// 1920x1080 display at 125% scaling that is exactly what a fixed 1680x1000
+/// produced.
+fn fit_market_window(work_width: f64, work_height: f64) -> (f64, f64) {
+    const PREFERRED: (f64, f64) = (1680.0, 1000.0);
+    const MINIMUM: (f64, f64) = (1024.0, 680.0);
+    const MARGIN: f64 = 0.94;
+    (
+        PREFERRED.0.min(work_width * MARGIN).max(MINIMUM.0),
+        PREFERRED.1.min(work_height * MARGIN).max(MINIMUM.1),
+    )
+}
+
+fn market_window_size(app: &tauri::AppHandle) -> (f64, f64) {
+    let monitor = app.primary_monitor().ok().flatten();
+    match monitor {
+        Some(m) => {
+            let area = m.work_area();
+            fit_market_window(
+                f64::from(area.size.width) / m.scale_factor(),
+                f64::from(area.size.height) / m.scale_factor(),
+            )
+        }
+        None => (1680.0, 1000.0),
+    }
+}
+
 fn open_market_impl(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window(MARKET_WINDOW) {
         // Already open: unminimise, show and focus it.
@@ -801,13 +873,14 @@ fn open_market_impl(app: &tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    tauri::WebviewWindowBuilder::new(
+    let (width, height) = market_window_size(app);
+    let window = tauri::WebviewWindowBuilder::new(
         app,
         MARKET_WINDOW,
         tauri::WebviewUrl::App("market.html".into()),
     )
     .title("TARS — Market Intelligence")
-    .inner_size(1680.0, 1000.0)
+    .inner_size(width, height)
     .min_inner_size(1024.0, 680.0)
     .resizable(true)
     .maximizable(true)
@@ -817,8 +890,35 @@ fn open_market_impl(app: &tauri::AppHandle) -> Result<(), String> {
     .skip_taskbar(false)
     .center()
     .build()
-    .map(|_| ())
-    .map_err(|e| format!("could not open the Market Intelligence window: {e}"))
+    .map_err(|e| format!("could not open the Market Intelligence window: {e}"))?;
+    // A window asked for by the user must end up usable, whatever show state
+    // the launching process handed down.
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[cfg(test)]
+mod market_window_tests {
+    use super::fit_market_window;
+
+    #[test]
+    fn a_large_screen_gets_the_preferred_size() {
+        assert_eq!(fit_market_window(2560.0, 1400.0), (1680.0, 1000.0));
+    }
+
+    #[test]
+    fn a_scaled_laptop_screen_is_not_overflowed() {
+        // 1920x1080 at 125%, less the taskbar: the reported defect.
+        let (width, height) = fit_market_window(1536.0, 824.0);
+        assert!(width < 1536.0 && height < 824.0, "{width}x{height}");
+    }
+
+    #[test]
+    fn the_minimum_size_still_holds_on_a_tiny_screen() {
+        assert_eq!(fit_market_window(800.0, 600.0), (1024.0, 680.0));
+    }
 }
 
 #[tauri::command]
@@ -1696,6 +1796,11 @@ pub fn run() {
             }
             let _ = summon_smart(app);
         }))
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("tars-backend-endpoint")
+                .js_init_script(backend_endpoint::init_script())
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1712,6 +1817,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             greet,
+            get_backend_status,
             open_market_intelligence,
             market_toggle_fullscreen,
             mark_frontend_ready,
@@ -1781,6 +1887,15 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            // `--quit` with nothing running has nothing to stop. Without this
+            // it would start the whole app, the opposite of what was asked.
+            // (A second launch never gets here: the single-instance plugin
+            // routes it to the running app.)
+            if std::env::args().any(|a| a == "--quit") {
+                app.handle().exit(0);
+                return Ok(());
+            }
+
             // Setup System Tray Menu
             let show_i = MenuItem::with_id(app, "show_tars", "Show TARS", true, None::<&str>)?;
             let hide_i = MenuItem::with_id(app, "hide_tars", "Hide TARS", true, None::<&str>)?;
@@ -1934,11 +2049,8 @@ pub fn run() {
             // adopts an already-healthy backend (e.g. started by
             // scripts/start_tars.ps1) rather than spawning a duplicate,
             // or spawns + supervises one itself with bounded crash backoff.
-            let backend_dir = resolve_backend_dir().unwrap_or_else(|| {
-                eprintln!("[TARS][supervisor] could not resolve the backend directory (set TARS_BACKEND_DIR to override); will still adopt an already-running backend, but cannot spawn one");
-                std::path::PathBuf::new()
-            });
-            let supervisor = Arc::new(BackendSupervisor::new(backend_dir));
+            let owner_record = app.path().app_local_data_dir().ok().map(|d| d.join("backend-owner.json"));
+            let supervisor = Arc::new(BackendSupervisor::new(resolve_backend_launch(app.handle()), owner_record));
             app.manage(Arc::clone(&supervisor));
             supervisor.start(app.handle().clone());
 
@@ -1947,7 +2059,14 @@ pub fn run() {
             // instead of making the user find it in the tray. The companion
             // orb still starts as usual, so this adds a window rather than
             // replacing the normal startup.
-            if std::env::var("TARS_OPEN_MARKET").is_ok_and(|v| v == "1") {
+            //
+            // `--market` is honoured here as well as in the single-instance
+            // callback, which only ever fires on a *second* launch: a cold
+            // start with the flag would otherwise give the companion and no
+            // Market window.
+            let market_requested = std::env::var("TARS_OPEN_MARKET").is_ok_and(|v| v == "1")
+                || std::env::args().any(|a| a == "--market");
+            if market_requested {
                 if let Err(err) = open_market_impl(app.handle()) {
                     eprintln!("[TARS][market] could not open at startup: {err}");
                 }

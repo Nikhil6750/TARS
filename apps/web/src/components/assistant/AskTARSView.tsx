@@ -12,6 +12,7 @@ import {
 import { TARSAssistantMessage } from '../../types/assistant-message';
 import { TARSTradingEvent } from '../../types/trading-event';
 import { audioService } from '../../services/audio';
+import { backendHttpUrl } from '../../runtime/backendUrl';
 
 interface AskTARSViewProps {
   messages: TARSAssistantMessage[];
@@ -30,7 +31,7 @@ export const AskTARSView: React.FC<AskTARSViewProps> = ({
   onTogglePushToTalk,
   activeSetups,
   onInspectSetup,
-  apiEndpoint = 'http://127.0.0.1:8000'
+  apiEndpoint = backendHttpUrl()
 }) => {
   const [inputText, setInputText] = useState('');
   const [speakingId, setSpeakingId] = useState<string | null>(null);
