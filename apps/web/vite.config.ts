@@ -50,6 +50,17 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src')
     }
   },
+  build: {
+    rollupOptions: {
+      input: {
+        // The existing companion app, unchanged.
+        main: path.resolve(__dirname, 'index.html'),
+        // Market X-Ray dashboard, served at /market.html so it shares the
+        // dev server and build pipeline without touching the companion shell.
+        market: path.resolve(__dirname, 'market.html')
+      }
+    }
+  },
   server: {
     port: 5173,
     host: '0.0.0.0'

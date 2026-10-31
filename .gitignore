@@ -64,3 +64,7 @@ Thumbs.db
 # Build artifacts
 build/
 coverage/
+
+# Market X-Ray local state + verification output (data, not source)
+apps/backend/storage/market_xray.db*
+artifacts/market-xray/

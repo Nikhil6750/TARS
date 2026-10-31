@@ -776,6 +776,65 @@ fn show_main_impl(app: &tauri::AppHandle) -> Result<(), String> {
     enter_workspace(app)
 }
 
+/// The Market Intelligence workspace: a dedicated, decorated desktop window
+/// rendering the Market X-Ray dashboard (`market.html`).
+///
+/// It is a second window of this same app, not a second application -- it
+/// shares the frontend bundle, the Tauri runtime and the supervised Python
+/// backend. Opening it when it already exists focuses the existing window
+/// rather than creating a duplicate, so the tray item and the in-app button
+/// can both be pressed repeatedly without stacking windows.
+///
+/// Unlike the companion orb (undecorated and transparent), this window is a
+/// conventional resizable desktop window: it has native decorations, a
+/// taskbar entry, a minimum size and working maximise/fullscreen, because a
+/// dense market terminal is something people resize and put on a second
+/// monitor.
+const MARKET_WINDOW: &str = "market";
+
+fn open_market_impl(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(MARKET_WINDOW) {
+        // Already open: unminimise, show and focus it.
+        let _ = existing.unminimize();
+        existing.show().map_err(|e| e.to_string())?;
+        existing.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        MARKET_WINDOW,
+        tauri::WebviewUrl::App("market.html".into()),
+    )
+    .title("TARS — Market Intelligence")
+    .inner_size(1680.0, 1000.0)
+    .min_inner_size(1024.0, 680.0)
+    .resizable(true)
+    .maximizable(true)
+    .fullscreen(false)
+    .decorations(true)
+    .transparent(false)
+    .skip_taskbar(false)
+    .center()
+    .build()
+    .map(|_| ())
+    .map_err(|e| format!("could not open the Market Intelligence window: {e}"))
+}
+
+#[tauri::command]
+fn open_market_intelligence(app: tauri::AppHandle) -> Result<(), String> {
+    open_market_impl(&app)
+}
+
+/// Toggles fullscreen on whichever window asked. Exposed so the dashboard's
+/// own header control behaves like a native app rather than a web page.
+#[tauri::command]
+fn market_toggle_fullscreen(window: tauri::WebviewWindow) -> Result<bool, String> {
+    let next = !window.is_fullscreen().map_err(|e| e.to_string())?;
+    window.set_fullscreen(next).map_err(|e| e.to_string())?;
+    Ok(next)
+}
+
 fn hide_hud_impl(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         window.hide().map_err(|e| e.to_string())?;
@@ -1631,6 +1690,8 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             greet,
+            open_market_intelligence,
+            market_toggle_fullscreen,
             mark_frontend_ready,
             toggle_compact_mode,
             set_window_size,
@@ -1692,6 +1753,7 @@ pub fn run() {
             let show_i = MenuItem::with_id(app, "show_tars", "Show TARS", true, None::<&str>)?;
             let hide_i = MenuItem::with_id(app, "hide_tars", "Hide TARS", true, None::<&str>)?;
             let workspace_i = MenuItem::with_id(app, "open_workspace", "Open Workspace", true, None::<&str>)?;
+            let market_i = MenuItem::with_id(app, "open_market", "Market Intelligence", true, None::<&str>)?;
             let mic_i = MenuItem::with_id(app, "mic_test", "Microphone Test", true, None::<&str>)?;
             let mute_i = MenuItem::with_id(app, "toggle_mute", if wake_engine::is_muted() { "Unmute Microphone" } else { "Mute Microphone" }, true, None::<&str>)?;
             if let Ok(mut g) = MUTE_MENU_ITEM.lock() { *g = Some(mute_i.clone()); }
@@ -1701,7 +1763,7 @@ pub fn run() {
             let restart_i = MenuItem::with_id(app, "restart_tars", "Restart TARS", true, None::<&str>)?;
             let sep2 = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit TARS", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &workspace_i, &mute_i, &mic_i, &sep1, &pause_i, &restart_i, &sep2, &quit_i])?;
+            let tray_menu = Menu::with_items(app, &[&show_i, &hide_i, &workspace_i, &market_i, &mute_i, &mic_i, &sep1, &pause_i, &restart_i, &sep2, &quit_i])?;
 
             // A stable, explicit id is required: TrayIconBuilder::new() (no id) defaults to
             // "{process_id}-{counter}", a different identity every single launch. Windows treats
@@ -1730,6 +1792,11 @@ pub fn run() {
                             }
                             "open_workspace" => {
                                 let _ = show_main_impl(app);
+                            }
+                            "open_market" => {
+                                if let Err(err) = open_market_impl(app) {
+                                    eprintln!("[TARS][market] {err}");
+                                }
                             }
                             "mic_test" => {
                                 let _ = show_main_impl(app);
@@ -1842,6 +1909,17 @@ pub fn run() {
             let supervisor = Arc::new(BackendSupervisor::new(backend_dir));
             app.manage(Arc::clone(&supervisor));
             supervisor.start(app.handle().clone());
+
+            // Launching specifically for market work (scripts/start-market-
+            // desktop.ps1) opens the Market Intelligence window straight away
+            // instead of making the user find it in the tray. The companion
+            // orb still starts as usual, so this adds a window rather than
+            // replacing the normal startup.
+            if std::env::var("TARS_OPEN_MARKET").is_ok_and(|v| v == "1") {
+                if let Err(err) = open_market_impl(app.handle()) {
+                    eprintln!("[TARS][market] could not open at startup: {err}");
+                }
+            }
 
             Ok(())
         })

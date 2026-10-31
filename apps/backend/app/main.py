@@ -39,6 +39,7 @@ from app.routers import (
     events,
     health,
     lifecycle,
+    market_xray,
     memory,
     runtime,
     voice,
@@ -493,6 +494,7 @@ def create_app() -> FastAPI:
     app.include_router(voice.router)
     app.include_router(realtime_router.router)
     app.include_router(monitors_router.router)
+    app.include_router(market_xray.router)
     app.include_router(ws.router)
     app.include_router(actions.router)
     app.include_router(action_plans.router)
