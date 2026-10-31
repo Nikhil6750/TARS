@@ -10,6 +10,14 @@ cursor names the moment being shown and every panel is computed with
 ``ts <= cursor``. Advancing or rewinding the cursor changes what is shown
 deterministically, and no panel can ever be labelled LIVE from it (see
 `market.clock`).
+
+Two things here exist to keep that true once a real feed is attached
+(P2-C3). `_replay_pinned` records that the user has deliberately moved the
+cursor off the live edge, and every status decision goes through
+`clock.resolve_status`, which cannot return LIVE while that pin is set. And
+every payload carries `provenance`, naming the source of the observations
+in it, so a client or a test can check what it is looking at instead of
+inferring it from a label.
 """
 from __future__ import annotations
 
@@ -18,7 +26,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from market import clock, orderblocks, strength, universe, xray
+from market import clock, orderblocks, provenance, strength, universe, xray
 from market.indicators import normalized_return, volatility_regime
 from market.orderblocks import OBConfig
 from market.state import MarketState
@@ -67,9 +75,15 @@ class MarketXRayService:
 
         self._first_bar, self._last_bar = self.store.store_bounds("M5")
         self._cursor: datetime | None = self._last_bar
-        # Set only by a real feed adapter; stays None while no feed is
-        # authenticated, which is what keeps the status out of LIVE.
+        # Set only by a real feed adapter via `attach_feed`; stays None while
+        # no feed is authenticated, which is what keeps the status out of LIVE.
         self._feed_last_tick: datetime | None = None
+        self._feed_provider: str = provenance.NO_PROVIDER
+        # True once the cursor has been moved off the live edge on purpose.
+        # While it is set, no status can be LIVE -- see `clock.resolve_status`.
+        # It starts False: with no feed attached the status is REPLAY anyway,
+        # and pinning on construction would be a claim the user never made.
+        self._replay_pinned: bool = False
 
         self.state.record_config(self.config.version, self.config.as_dict())
 
@@ -84,14 +98,23 @@ class MarketXRayService:
     def bounds(self) -> tuple[datetime | None, datetime | None]:
         return self._first_bar, self._last_bar
 
-    def set_cursor(self, moment: datetime) -> datetime:
+    def set_cursor(self, moment: datetime, *, pin_replay: bool = True) -> datetime:
         """Move the as-of cursor, clamped to the store's real coverage so the
-        dashboard can never be pointed at a moment it has no data for."""
+        dashboard can never be pointed at a moment it has no data for.
+
+        Moving the cursor pins replay by default: the caller has chosen a
+        moment, so what is shown is recorded history and must not be
+        labelled live even if a feed is connected. `reset_cursor` is the one
+        caller that unpins, because returning to the live edge is the
+        request to stop replaying.
+        """
         with self._lock:
             if self._first_bar is None or self._last_bar is None:
                 raise RuntimeError("candle store is empty")
             target = moment.astimezone(UTC)
             self._cursor = max(self._first_bar, min(self._last_bar, target))
+            if pin_replay:
+                self._replay_pinned = True
             return self._cursor
 
     def step_cursor(self, *, timeframe: str, bars: int) -> datetime:
@@ -101,28 +124,91 @@ class MarketXRayService:
         return self.set_cursor(self.cursor + timedelta(minutes=minutes * bars))
 
     def reset_cursor(self) -> datetime:
+        """Back to the newest bar, and stop replaying."""
         if self._last_bar is None:
             raise RuntimeError("candle store is empty")
-        return self.set_cursor(self._last_bar)
+        cursor = self.set_cursor(self._last_bar, pin_replay=False)
+        with self._lock:
+            self._replay_pinned = False
+        return cursor
+
+    @property
+    def replay_pinned(self) -> bool:
+        return self._replay_pinned
+
+    # ---- feed attachment -------------------------------------------------
+    def attach_feed(self, *, provider: str, last_tick: datetime | None) -> None:
+        """Report the newest tick from an authenticated provider.
+
+        The seam a real adapter uses (P2-C1) so that wiring a feed never
+        requires reaching into this object's internals. Attaching a feed is
+        not on its own enough to produce LIVE: the replay pin still wins,
+        and the tick still has to be fresh and the market open.
+        """
+        if not provider or provider == provenance.NO_PROVIDER:
+            raise ValueError("a live feed must name its provider")
+        with self._lock:
+            self._feed_provider = provider
+            self._feed_last_tick = last_tick.astimezone(UTC) if last_tick else None
+
+    def detach_feed(self) -> None:
+        """Forget the feed. The dashboard falls back to recorded history."""
+        with self._lock:
+            self._feed_provider = provenance.NO_PROVIDER
+            self._feed_last_tick = None
+
+    def data_provenance(self) -> provenance.Provenance:
+        """Where the observations in the next payload come from.
+
+        Derived from the same inputs as the status, so the two can never
+        disagree: anything but a resolved LIVE/STALE feed is recorded data.
+        """
+        status = self._resolve_status()
+        if status.source == provenance.DataSource.LIVE_FEED.value:
+            return provenance.live(
+                provider=self._feed_provider, observed_at=status.data_as_of
+            )
+        detail = ""
+        if self._feed_last_tick is not None and self._replay_pinned:
+            detail = (
+                "A live feed is attached but the cursor is pinned to recorded "
+                "history, so these observations are replayed, not live."
+            )
+        return provenance.recorded(observed_at=status.data_as_of, detail=detail)
 
     # ---- status ----------------------------------------------------------
     def market_status(self) -> clock.MarketStatus:
-        now = datetime.now(UTC)
-        if self._feed_last_tick is not None:
-            status = clock.live_status(now=now, feed_last_tick=self._feed_last_tick)
-        elif self._cursor is None:
-            status = clock.MarketStatus(
-                status=clock.FeedStatus.NO_DATA, market_open=clock.is_market_open(now),
-                as_of=now, data_as_of=None, data_age_seconds=None,
-                sessions_active=clock.active_sessions(now),
-                next_transition=clock.next_transition(now),
-                detail="No candle store. Run `python -m market.ingest`.", replay=False,
-            )
-        else:
-            status = clock.replay_status(
-                now=now, cursor=self._cursor, store_last_bar=self._last_bar
-            )
+        """The status, recorded to the feed-health history.
+
+        `_resolve_status` is the same decision without the write, so
+        stamping provenance on a payload does not persist a health row for
+        every panel it contains.
+        """
+        status = self._resolve_status()
         self.state.record_feed_health(status)
+        return status
+
+    def _resolve_status(self) -> clock.MarketStatus:
+        now = datetime.now(UTC)
+        status = clock.resolve_status(
+            now=now,
+            feed_last_tick=self._feed_last_tick,
+            replay_pinned=self._replay_pinned,
+            cursor=self._cursor,
+            store_last_bar=self._last_bar,
+        )
+        # Fail closed. The gate above cannot return LIVE while replay is
+        # pinned, so this can only fire if that guarantee is ever broken --
+        # in which case showing REPLAY and logging loudly is the right
+        # outcome, not surfacing a label we know to be wrong.
+        if status.status is clock.FeedStatus.LIVE and self._replay_pinned:
+            logger.error(
+                "feed status resolved LIVE while the replay cursor is pinned; "
+                "downgrading to REPLAY (this is a bug in clock.resolve_status)"
+            )
+            status = clock.replay_status(
+                now=now, cursor=self.cursor, store_last_bar=self._last_bar
+            )
         return status
 
     # ---- panels ----------------------------------------------------------
@@ -155,14 +241,18 @@ class MarketXRayService:
              None, None)
             for s in snap.series
         ])
-        return snap.as_dict()
+        payload = snap.as_dict()
+        payload["provenance"] = self.data_provenance().as_dict()
+        return payload
 
     def strength(self, *, window: str | None = None) -> dict:
         snap = strength.compute_strength(
             self.store, as_of=self.cursor, window=window or self.config.strength_window
         )
         self.state.record_strength(snap)
-        return snap.as_dict()
+        payload = snap.as_dict()
+        payload["provenance"] = self.data_provenance().as_dict()
+        return payload
 
     def leaders(self, *, timeframe: str, limit: int = LEADERS) -> dict:
         """Ranked bullish and bearish cards, each carrying its real price, its
@@ -217,6 +307,7 @@ class MarketXRayService:
             "bullish": bullish,
             "bearish": bearish,
             "measures": snap.measures,
+            "provenance": self.data_provenance().as_dict(),
         }
 
     def candles(self, *, symbol: str, timeframe: str, limit: int = CHART_BARS) -> dict:
@@ -226,6 +317,7 @@ class MarketXRayService:
             return {
                 "symbol": symbol, "timeframe": timeframe, "as_of": self.cursor.isoformat(),
                 "candles": [], "error": "no completed bars at or before the current cursor",
+                "provenance": self.data_provenance().as_dict(),
             }
         regime = volatility_regime(candles)
         closes = [c.close for c in candles]
@@ -239,6 +331,7 @@ class MarketXRayService:
             "normalized_return": nr.as_dict() if nr else None,
             "precision": universe.INSTRUMENTS[symbol].price_precision
             if symbol in universe.INSTRUMENTS else 5,
+            "provenance": self.data_provenance().as_dict(),
         }
 
     def order_blocks(self, *, symbol: str, timeframe: str) -> dict:
@@ -270,6 +363,7 @@ class MarketXRayService:
             "nearest": near.as_dict() if near else None,
             "events_recorded_new": new_events,
             "config": self.config.ob.as_dict(),
+            "provenance": self.data_provenance().as_dict(),
         }
 
     def events(self, *, symbol: str | None = None, limit: int = 100) -> dict:
@@ -277,6 +371,7 @@ class MarketXRayService:
             "events": self.state.recent_events(symbol=symbol, limit=limit),
             "total_stored": self.state.event_count(),
             "zones_stored": self.state.zone_count(),
+            "provenance": self.data_provenance().as_dict(),
         }
 
     # ---- aggregate -------------------------------------------------------
@@ -307,4 +402,6 @@ class MarketXRayService:
             "order_blocks": self.order_blocks(symbol=selected, timeframe=timeframe),
             "events": self.events(limit=40),
             "config": self.config.as_dict(),
+            "provenance": self.data_provenance().as_dict(),
+            "replay_pinned": self._replay_pinned,
         }
