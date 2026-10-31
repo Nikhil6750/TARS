@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Request
 from app.config import Settings, get_settings
 from app.db import Database
 from app.deps import get_db
+from app.identity import identity
 from app.schemas import HealthResponse
 from trading.execution_guard import live_trading_enabled
 
@@ -42,6 +43,7 @@ async def health(
         offline_tts_provider=settings.tts_provider,
         online_voice_provider=settings.voice_provider,
         live_trading_enabled=live_trading_enabled(),
+        identity=identity(),
         **lane,
     )
 

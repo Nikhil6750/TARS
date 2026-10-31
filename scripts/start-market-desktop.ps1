@@ -42,7 +42,14 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $backendDir = Join-Path $repoRoot 'apps\backend'
 $webDir = Join-Path $repoRoot 'apps\web'
-$storeRoot = 'D:\TARS_DATA\market\xray_store'
+# Ask the backend where its store is rather than restating the path here:
+# it resolves TARS_DATA_ROOT (see apps/backend/market/ingest.py, P1-C2), so a
+# machine with its data elsewhere needs no change to this script.
+$storeRoot = & python -c "import sys; sys.path.insert(0, r'$backendDir'); from market.ingest import DEFAULT_STORE_ROOT; print(DEFAULT_STORE_ROOT)"
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($storeRoot)) {
+    throw "Could not resolve the candle-store root from the backend. Is Python on PATH?"
+}
+$storeRoot = $storeRoot.Trim()
 
 function Write-Step { param([string]$Message) Write-Host "`n>> $Message" -ForegroundColor Cyan }
 function Write-Ok { param([string]$Message) Write-Host "   OK  $Message" -ForegroundColor Green }

@@ -22,13 +22,22 @@ then clamped to envelope the bucket's own open/close, which removes
 floating-point noise from the mid-price arithmetic.
 
 Nothing is written outside `store_root`. The frozen Quant Agent research
-partitions (``D:/TARS_DATA/market/local_xauusd``, ``.../dukascopy``) are never
+partitions (``<data root>/market/local_xauusd``, ``.../dukascopy``) are never
 written to and never modified.
+
+Neither root is hardcoded (task P1-C2). The store lives under
+`research.config.resolve_data_root()`, which is this repo's existing
+`TARS_DATA_ROOT` convention -- reusing it rather than restating it means the
+market store follows the same rule as every other dataset, including its
+refusal to fill the system drive. The CSV source root is overridable with
+`TARS_MARKET_CSV_ROOT`, because a machine that holds its history elsewhere
+should not need a code change to ingest.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -37,11 +46,36 @@ from pathlib import Path
 import duckdb
 
 from market import universe
+from research.config import resolve_data_root
 
 logger = logging.getLogger("tars.market.ingest")
 
-CSV_ROOT = Path("C:/Trade Data")
-DEFAULT_STORE_ROOT = Path("D:/TARS_DATA/market/xray_store")
+# Where the source bid/ask CSVs live. `C:\Trade Data` is where they sit on
+# the machine this was built on, kept as the fallback so nothing changes for
+# it, but overridable for any machine that stores them elsewhere.
+_DEFAULT_CSV_ROOT = Path("C:/Trade Data")
+
+
+def csv_root() -> Path:
+    env = os.environ.get("TARS_MARKET_CSV_ROOT", "").strip()
+    return Path(env) if env else _DEFAULT_CSV_ROOT
+
+
+def default_store_root() -> Path:
+    r"""The candle store, under the repo's shared data root.
+
+    `resolve_data_root()` honours TARS_DATA_ROOT, else picks a non-system
+    drive with room to spare, else falls back inside the repo. On the
+    machine this was developed on it returns `D:\TARS_DATA`, so this is the
+    same path as the constant it replaces.
+    """
+    return resolve_data_root() / "market" / "xray_store"
+
+
+# Resolved once at import: these are defaults for arguments, and a root that
+# changed under a running ingest would write half the bars to each.
+CSV_ROOT = csv_root()
+DEFAULT_STORE_ROOT = default_store_root()
 # Everything before this is recorded history the dashboard does not need;
 # keeping the window bounded is what makes a full ingest take seconds.
 DEFAULT_START = "2024-01-01"
