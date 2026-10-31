@@ -38,6 +38,16 @@ router = APIRouter(prefix="/api/v1/market", tags=["market-xray"])
 # Each frame costs real CPU (see `_build_frame`), so this is deliberately
 # unhurried: the underlying data is recorded history, not a ticking feed.
 PUSH_INTERVAL_SECONDS = 10.0
+# How long a disconnect waits for a frame already being built before giving up.
+FRAME_DRAIN_SECONDS = 60.0
+# WebSocket close codes.
+_POLICY_VIOLATION = 1008
+_INTERNAL_ERROR = 1011
+# How uvicorn and Starlette say a socket is already closed.
+_CLOSED_SOCKET_MESSAGES = (
+    "after sending 'websocket.close'",
+    "once a close message has been sent",
+)
 
 
 def _service(request: Request) -> MarketXRayService:
@@ -340,6 +350,96 @@ def _build_frame(service: MarketXRayService, timeframe: str) -> dict:
 
 
 # ---- websocket ----------------------------------------------------------
+class _MarketSocket:
+    """The only route to one connection's socket.
+
+    A client can vanish at any moment, including while a frame is being built
+    in a thread, and checking a flag before writing cannot close that gap: the
+    server can have closed the connection before the receiver task has been
+    scheduled to notice. So writes are serialised here, each one checks under
+    the lock, and a write that finds the connection gone reports that instead
+    of raising. Only disconnects are treated this way; any other error from a
+    write is a bug and propagates.
+    """
+
+    def __init__(self, websocket: WebSocket):
+        self._websocket = websocket
+        self._write = asyncio.Lock()
+        self._closed = False
+        # Set when frames should stop: the peer left, or the receiver ended.
+        self.stopped = asyncio.Event()
+
+    def peer_gone(self) -> None:
+        self._closed = True
+        self.stopped.set()
+
+    async def send(self, frame: dict) -> bool:
+        """False if the connection is over, in which case nothing was sent."""
+        async with self._write:
+            if self._closed or self.stopped.is_set():
+                return False
+            try:
+                await self._websocket.send_json(frame)
+            except WebSocketDisconnect:
+                self.peer_gone()
+                return False
+            except RuntimeError as exc:
+                if not _is_closed_socket_error(exc):
+                    raise
+                self.peer_gone()
+                return False
+            return True
+
+    async def close(self, code: int = 1000) -> None:
+        """Close once. A connection that is already over needs nothing."""
+        async with self._write:
+            if self._closed:
+                return
+            self._closed = True
+            self.stopped.set()
+            try:
+                await self._websocket.close(code)
+            except WebSocketDisconnect:
+                pass
+            except RuntimeError as exc:
+                if not _is_closed_socket_error(exc):
+                    raise
+
+
+def _is_closed_socket_error(exc: RuntimeError) -> bool:
+    """Whether this is the server or Starlette refusing a write to a closed
+    socket. Neither has an exception type of its own for it, so the wording is
+    all there is, and it is matched narrowly so a real bug is never absorbed."""
+    return any(marker in str(exc) for marker in _CLOSED_SOCKET_MESSAGES)
+
+
+async def _finished_before(task: asyncio.Future, stop: asyncio.Event) -> bool:
+    """Wait for `task`, or for `stop`. True only if the result is still wanted."""
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({task, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stopping.cancel()
+    return not stop.is_set()
+
+
+async def _drain_build(building: asyncio.Future | None) -> None:
+    """See a frame build through after the connection has ended.
+
+    Its thread cannot be cancelled, so returning now would leave it running
+    with nothing attached. Bounded, because a stuck query must not pin the
+    handler forever. Its result is unwanted, but a failure is still reported.
+    """
+    if building is None:
+        return
+    if not building.done():
+        await asyncio.wait({building}, timeout=FRAME_DRAIN_SECONDS)
+    if not building.done():
+        logger.warning("market ws frame build still running after %ss", FRAME_DRAIN_SECONDS)
+    elif not building.cancelled() and building.exception() is not None:
+        logger.warning("market ws frame build failed after disconnect: %s", building.exception())
+
+
 @router.websocket("/ws")
 async def market_ws(websocket: WebSocket) -> None:
     """Pushes `market.frame` messages: status plus the current X-Ray, strength
@@ -350,15 +450,16 @@ async def market_ws(websocket: WebSocket) -> None:
     is showing is current.
     """
     await websocket.accept()
+    connection = _MarketSocket(websocket)
     try:
         await asyncio.to_thread(_app_service, websocket.app)
     except Exception as exc:  # noqa: BLE001
-        await websocket.send_json({
+        await connection.send({
             "type": "market.error",
             "error": "market_store_unavailable",
             "message": getattr(exc, "detail", None) or str(exc),
         })
-        await websocket.close()
+        await connection.close()
         return
 
     def service() -> MarketXRayService:
@@ -366,53 +467,83 @@ async def market_ws(websocket: WebSocket) -> None:
         return _app_service(websocket.app)
 
     timeframe = universe.DEFAULT_TIMEFRAME
-    stop = asyncio.Event()
+
+    async def handle(msg: object) -> None:
+        nonlocal timeframe
+        if not isinstance(msg, dict):
+            raise ValueError("expected a JSON object")
+        kind = msg.get("type")
+        if kind == "subscribe":
+            requested = str(msg.get("timeframe", timeframe)).upper()
+            if requested in universe.TIMEFRAMES:
+                timeframe = requested
+        elif kind == "replay.step":
+            bars = int(msg.get("bars", 1))
+            if service().bounds[1] is not None:
+                await asyncio.to_thread(service().step_cursor, timeframe=timeframe, bars=bars)
+        elif kind == "replay.reset":
+            if service().bounds[1] is not None:
+                await asyncio.to_thread(service().reset_cursor)
 
     async def receive_loop() -> None:
-        """Client control messages: change timeframe, or drive the replay."""
-        nonlocal timeframe
-        try:
-            while True:
+        """Client control messages: change timeframe, or drive the replay.
+
+        Ends on a disconnect or on a message that cannot be understood. Any
+        other exception is a bug, and reaches the end of `market_ws`.
+        """
+        while True:
+            try:
                 msg = await websocket.receive_json()
-                kind = msg.get("type")
-                if kind == "subscribe":
-                    requested = str(msg.get("timeframe", timeframe)).upper()
-                    if requested in universe.TIMEFRAMES:
-                        timeframe = requested
-                elif kind == "replay.step":
-                    await asyncio.to_thread(
-                        service().step_cursor, timeframe=timeframe, bars=int(msg.get("bars", 1))
-                    )
-                elif kind == "replay.reset":
-                    await asyncio.to_thread(service().reset_cursor)
-        except (WebSocketDisconnect, RuntimeError):
-            stop.set()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("market ws receive ended: %s", exc)
-            stop.set()
+            except WebSocketDisconnect:
+                connection.peer_gone()
+                return
+            except (KeyError, TypeError, ValueError) as exc:
+                # A binary frame, or text that is not JSON.
+                logger.info("market ws closing on an unreadable message: %s", exc)
+                await connection.close(_POLICY_VIOLATION)
+                return
+            try:
+                await handle(msg)
+            except (TypeError, ValueError) as exc:
+                logger.info("market ws closing on an invalid command: %s", exc)
+                await connection.close(_POLICY_VIOLATION)
+                return
+
+    def build_frame(tf: str) -> dict:
+        return _build_frame(service(), tf)
 
     receiver = asyncio.create_task(receive_loop())
+    # However it ends, a finished receiver means nothing is listening.
+    receiver.add_done_callback(lambda _task: connection.stopped.set())
+    building: asyncio.Future | None = None
     try:
-        while not stop.is_set():
+        while not connection.stopped.is_set():
+            # Built in a worker thread: this is seconds of DuckDB and
+            # order-block work, and on the event loop it would stall every
+            # other request between frames.
+            building = asyncio.ensure_future(asyncio.to_thread(build_frame, timeframe))
+            if not await _finished_before(building, connection.stopped):
+                break
             try:
-                # Built in a worker thread: this is seconds of DuckDB and
-                # order-block work, and on the event loop it would stall every
-                # other request between frames.
-                frame = await asyncio.to_thread(_build_frame, service(), timeframe)
+                frame = building.result()
             except Exception as exc:  # noqa: BLE001
                 frame = {
                     "type": "market.error",
                     "sent_at": datetime.now(UTC).isoformat(),
                     "message": str(exc),
                 }
-            await websocket.send_json(frame)
+            building = None
+            if not await connection.send(frame):
+                break
             try:
-                await asyncio.wait_for(stop.wait(), timeout=PUSH_INTERVAL_SECONDS)
+                await asyncio.wait_for(connection.stopped.wait(), timeout=PUSH_INTERVAL_SECONDS)
             except TimeoutError:
                 pass
-    except WebSocketDisconnect:
-        pass
     finally:
-        stop.set()
+        connection.stopped.set()
         receiver.cancel()
-        await asyncio.gather(receiver, return_exceptions=True)
+        outcome = (await asyncio.gather(receiver, return_exceptions=True))[0]
+        await _drain_build(building)
+    if isinstance(outcome, Exception):
+        await connection.close(_INTERNAL_ERROR)
+        raise outcome
