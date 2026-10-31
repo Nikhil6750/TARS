@@ -112,10 +112,10 @@ _VALID_SIDE = (
 )
 
 
-def _csv_path(meta: universe.Instrument, side: str) -> Path:
+def _csv_path(meta: universe.Instrument, side: str, root: Path | None = None) -> Path:
     """Resolve the one CSV for this instrument/side, or raise naming what was
     actually searched. Never silently falls back to another instrument."""
-    directory = CSV_ROOT / meta.source_dir
+    directory = (root or CSV_ROOT) / meta.source_dir
     matches = sorted(directory.glob(meta.source_stem + "_" + side + "_*.csv"))
     if not matches:
         raise FileNotFoundError("no " + side + " CSV for " + meta.symbol + " under " + str(directory))
@@ -137,9 +137,10 @@ def ingest_symbol(
     *,
     store_root: Path = DEFAULT_STORE_ROOT,
     start: str = DEFAULT_START,
+    csv_root: Path | None = None,
 ) -> list[IngestResult]:
     meta = universe.get(symbol)
-    bid, ask = _csv_path(meta, "Bid"), _csv_path(meta, "Ask")
+    bid, ask = _csv_path(meta, "Bid", csv_root), _csv_path(meta, "Ask", csv_root)
 
     # Every minute quoted on both sides, before validity filtering, so the
     # rejection rate can be measured rather than guessed.
@@ -231,6 +232,7 @@ def ingest_all(
     *,
     store_root: Path = DEFAULT_STORE_ROOT,
     start: str = DEFAULT_START,
+    csv_root: Path | None = None,
 ) -> dict:
     """Ingest every requested instrument, recording per-symbol failures rather
     than aborting the run, so partial coverage is reported and never hidden."""
@@ -245,7 +247,9 @@ def ingest_all(
     for symbol in targets:
         t0 = time.time()
         try:
-            for r in ingest_symbol(con, symbol, store_root=store_root, start=start):
+            for r in ingest_symbol(
+                con, symbol, store_root=store_root, start=start, csv_root=csv_root
+            ):
                 rows.append(asdict(r))
             logger.info("ingested %s in %.1fs", symbol, time.time() - t0)
         except Exception as exc:  # noqa: BLE001 - recorded in the manifest, not swallowed
@@ -255,7 +259,7 @@ def ingest_all(
 
     manifest = {
         "generated_at": datetime.now(UTC).isoformat(),
-        "csv_root": str(CSV_ROOT),
+        "csv_root": str(csv_root or CSV_ROOT),
         "store_root": str(store_root),
         "window_start": start,
         "timeframes": universe.TIMEFRAMES,

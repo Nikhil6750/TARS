@@ -7,6 +7,7 @@ to `.env.example` as well.
 """
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -14,10 +15,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+# Where writable state lives. An installed build's code sits in the install
+# directory, which an upgrade or uninstall replaces, so the desktop shell sets
+# TARS_HOME to the per-user data directory. A checkout has no such variable
+# and keeps everything where it always has.
+DATA_HOME = Path(os.environ["TARS_HOME"]) if os.environ.get("TARS_HOME", "").strip() else REPO_ROOT
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(REPO_ROOT / ".env"),
+        env_file=str(DATA_HOME / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -178,7 +185,7 @@ class Settings(BaseSettings):
             raw = raw[len(prefix) :]
         path = Path(raw)
         if not path.is_absolute():
-            path = REPO_ROOT / path
+            path = DATA_HOME / path
         return path
 
     @property

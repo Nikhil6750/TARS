@@ -30,10 +30,19 @@ STORE_LAST = datetime(2026, 6, 3, 11, 55, tzinfo=UTC)
 # ---- the gate, as a pure function --------------------------------------
 
 
+def _resolve(**kwargs):
+    """The gate with the panels following the feed, so each test varies only
+    what it is about. The case where they do not is in test_market_live_feed."""
+    kwargs.setdefault("panels_follow_feed", True)
+    kwargs.setdefault("feed_connection", "CONNECTED")
+    return clock.resolve_status(**kwargs)
+
+
+
 def test_a_fresh_feed_is_live_when_nothing_is_pinned():
     """The control case: without a replay pin, a healthy feed is LIVE. If
     this ever fails the rest of these tests prove nothing."""
-    status = clock.resolve_status(
+    status = _resolve(
         now=OPEN_MOMENT,
         feed_last_tick=OPEN_MOMENT - timedelta(seconds=5),
         replay_pinned=False,
@@ -48,7 +57,7 @@ def test_a_fresh_feed_is_live_when_nothing_is_pinned():
 def test_a_pinned_replay_cursor_beats_a_perfectly_healthy_feed():
     """The invariant. A tick one second old does not make rewound data
     live."""
-    status = clock.resolve_status(
+    status = _resolve(
         now=OPEN_MOMENT,
         feed_last_tick=OPEN_MOMENT - timedelta(seconds=1),
         replay_pinned=True,
@@ -65,7 +74,7 @@ def test_a_pinned_replay_cursor_beats_a_perfectly_healthy_feed():
 def test_no_feed_age_whatsoever_can_defeat_the_pin(tick_age_seconds):
     """Swept across the freshness boundary: the pin wins at every age, so
     the rule cannot be escaped by timing."""
-    status = clock.resolve_status(
+    status = _resolve(
         now=OPEN_MOMENT,
         feed_last_tick=OPEN_MOMENT - timedelta(seconds=tick_age_seconds),
         replay_pinned=True,
@@ -91,7 +100,7 @@ def test_resolve_status_is_the_only_path_to_live():
 
 
 def test_an_empty_store_is_no_data_not_live():
-    status = clock.resolve_status(
+    status = _resolve(
         now=OPEN_MOMENT, feed_last_tick=None, replay_pinned=False,
         cursor=None, store_last_bar=None,
     )
@@ -100,7 +109,7 @@ def test_an_empty_store_is_no_data_not_live():
 
 
 def test_no_feed_means_recorded_history():
-    status = clock.resolve_status(
+    status = _resolve(
         now=OPEN_MOMENT, feed_last_tick=None, replay_pinned=False,
         cursor=CURSOR, store_last_bar=STORE_LAST,
     )
@@ -109,7 +118,7 @@ def test_no_feed_means_recorded_history():
 
 
 def test_a_stale_feed_is_still_not_live_and_says_so():
-    status = clock.resolve_status(
+    status = _resolve(
         now=OPEN_MOMENT,
         feed_last_tick=OPEN_MOMENT - timedelta(minutes=10),
         replay_pinned=False, cursor=CURSOR, store_last_bar=STORE_LAST,
@@ -122,7 +131,7 @@ def test_a_stale_feed_is_still_not_live_and_says_so():
 
 def test_the_status_dict_always_names_its_source():
     for pinned in (True, False):
-        payload = clock.resolve_status(
+        payload = _resolve(
             now=OPEN_MOMENT, feed_last_tick=OPEN_MOMENT, replay_pinned=pinned,
             cursor=CURSOR, store_last_bar=STORE_LAST,
         ).as_dict()
@@ -142,10 +151,19 @@ def test_recorded_provenance_is_never_live():
 
 
 def test_live_provenance_names_its_provider():
-    p = provenance.live(provider="mt5", observed_at=OPEN_MOMENT)
+    p = provenance.live(provider="mt5", observed_at=OPEN_MOMENT, fresh=True)
     assert p.source is DataSource.LIVE_FEED
     assert p.is_live is True
     assert p.as_dict()["provider"] == "mt5"
+
+
+def test_data_from_a_feed_that_is_no_longer_fresh_is_not_live():
+    """STALE and CLOSED data did come from the feed, so the source is true,
+    but `is_live` used to read the source alone and reported them as live."""
+    p = provenance.live(provider="mt5", observed_at=OPEN_MOMENT, fresh=False)
+    assert p.source is DataSource.LIVE_FEED
+    assert p.is_live is False
+    assert p.as_dict()["is_live"] is False
 
 
 def test_provenance_round_trips_its_observation_time():

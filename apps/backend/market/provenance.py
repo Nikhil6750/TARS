@@ -45,10 +45,14 @@ class Provenance:
     observed_at: datetime | None
     replay: bool
     detail: str
+    # Whether the feed behind this is fresh right now. Data from a feed that
+    # has gone stale or shut for the weekend still came from that feed, so
+    # `source` stays LIVE_FEED, but it is not live.
+    fresh: bool = False
 
     @property
     def is_live(self) -> bool:
-        return self.source is DataSource.LIVE_FEED and not self.replay
+        return self.source is DataSource.LIVE_FEED and not self.replay and self.fresh
 
     def as_dict(self) -> dict:
         return {
@@ -72,12 +76,15 @@ def recorded(*, observed_at: datetime | None, detail: str = "") -> Provenance:
     )
 
 
-def live(*, provider: str, observed_at: datetime | None, detail: str = "") -> Provenance:
-    """Provenance for anything computed from an authenticated live feed."""
+def live(*, provider: str, observed_at: datetime | None, fresh: bool, detail: str = "") -> Provenance:
+    """Provenance for anything computed from an authenticated feed's bars."""
     return Provenance(
         source=DataSource.LIVE_FEED,
         provider=provider,
         observed_at=observed_at,
         replay=False,
-        detail=detail or ("Live observations from " + provider + "."),
+        fresh=fresh,
+        detail=detail or (
+            ("Live observations from " if fresh else "Last observations from ") + provider + "."
+        ),
     )

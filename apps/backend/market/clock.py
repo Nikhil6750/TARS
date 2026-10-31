@@ -7,17 +7,16 @@ labelled ``LIVE`` when a real feed produced it within the freshness window
 it is ``CLOSED``. Nothing here can produce a ``LIVE`` label from stored
 candles, because stored candles never pass through `live_status`.
 
-`resolve_status` is the single gate every caller must use. Attaching a real
-feed is exactly what could erode the rule above -- with a feed connected and
-a replay cursor pinned, the panels are still computed with ``ts <= cursor``,
-so reporting LIVE because a tick happens to be fresh would be a lie about
-data the user is deliberately rewinding. The gate therefore lets replay win
-over any attached feed, and it is the only function that calls
-`live_status`.
+`resolve_status` is the single gate every caller must use, and the only
+function that calls `live_status`. A fresh tick is not enough to say LIVE: the
+label describes the panels, so it also requires that they are being computed
+from the feed's own bars. That rules out a pinned replay cursor, and equally a
+feed that has connected but has not delivered bars yet, when everything on
+screen would still be recorded history.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from enum import Enum
 
@@ -75,6 +74,11 @@ class MarketStatus:
     # store because that is the safe answer: a status that forgets to say
     # it is live is read as recorded, never the other way round.
     source: str = DataSource.RECORDED_STORE.value
+    # The state of the connection itself, which is a different thing from the
+    # status: an unconfigured feed and a dropped one both show recorded data,
+    # and only one of them is something to fix.
+    feed_connection: str = "NOT_CONFIGURED"
+    feed_detail: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -88,6 +92,8 @@ class MarketStatus:
             "detail": self.detail,
             "replay": self.replay,
             "source": self.source,
+            "feed_connection": self.feed_connection,
+            "feed_detail": self.feed_detail,
         }
 
 
@@ -140,6 +146,7 @@ def live_status(
     now: datetime,
     feed_last_tick: datetime | None,
     freshness_seconds: float = LIVE_FRESHNESS_SECONDS,
+    connected: bool = True,
 ) -> MarketStatus:
     """Status of a *real* feed. Only this function can return LIVE."""
     open_ = is_market_open(now)
@@ -155,6 +162,9 @@ def live_status(
     elif not open_:
         status = FeedStatus.CLOSED
         detail = "Market closed. Showing the last recorded observations."
+    elif not connected:
+        status = FeedStatus.STALE
+        detail = "Live feed disconnected; last tick was " + _humanize(age or 0.0) + " ago."
     elif age is not None and age <= freshness_seconds:
         status = FeedStatus.LIVE
         detail = "Live feed healthy."
@@ -227,10 +237,13 @@ def resolve_status(
     now: datetime,
     feed_last_tick: datetime | None,
     replay_pinned: bool,
+    panels_follow_feed: bool,
     cursor: datetime | None,
     store_last_bar: datetime | None,
     freshness_seconds: float = LIVE_FRESHNESS_SECONDS,
-    no_data_detail: str = "No candle store. Run `python -m market.ingest`.",
+    no_data_detail: str = "No market history yet. Import it from the dashboard.",
+    feed_connection: str = "NOT_CONFIGURED",
+    feed_detail: str = "",
 ) -> MarketStatus:
     """The one gate that decides a feed status.
 
@@ -239,19 +252,25 @@ def resolve_status(
     1. **A pinned replay cursor wins over everything.** The panels were
        computed at ``ts <= cursor``; a fresh tick elsewhere does not make
        rewound data live.
-    2. No feed attached -> recorded history (or NO_DATA with no store).
+    2. Panels not computed from the feed's bars -> recorded history (or
+       NO_DATA with no store), however healthy the feed itself is.
     3. Only then may a real feed be judged LIVE or STALE.
 
-    LIVE is unreachable through this function whenever `replay_pinned` is
-    true, whatever the feed is doing.
+    LIVE is unreachable through this function unless `panels_follow_feed` is
+    true and `replay_pinned` is false, whatever the ticks are doing.
     """
-    if replay_pinned or feed_last_tick is None:
+    connected = feed_connection == "CONNECTED"
+    if replay_pinned or not panels_follow_feed or feed_last_tick is None:
         if cursor is None:
-            return no_data_status(now=now, detail=no_data_detail)
-        return replay_status(now=now, cursor=cursor, store_last_bar=store_last_bar)
-    return live_status(
-        now=now, feed_last_tick=feed_last_tick, freshness_seconds=freshness_seconds
-    )
+            status = no_data_status(now=now, detail=no_data_detail)
+        else:
+            status = replay_status(now=now, cursor=cursor, store_last_bar=store_last_bar)
+    else:
+        status = live_status(
+            now=now, feed_last_tick=feed_last_tick, freshness_seconds=freshness_seconds,
+            connected=connected,
+        )
+    return replace(status, feed_connection=feed_connection, feed_detail=feed_detail)
 
 
 def _humanize(seconds: float) -> str:

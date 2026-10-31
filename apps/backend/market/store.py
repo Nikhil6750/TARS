@@ -22,6 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import duckdb
+import pyarrow as pa
 
 from market import universe
 from market.ingest import DEFAULT_STORE_ROOT  # resolved from TARS_DATA_ROOT; see P1-C2
@@ -74,6 +75,14 @@ class CandleStore:
         self._lock = threading.Lock()
         self._con = duckdb.connect(database=":memory:")
         self._con.execute("SET TimeZone='UTC'")
+        # Bars from a live feed. Held in memory, apart from the recorded
+        # Parquet, because the feed can always resupply them and the recorded
+        # store must stay a pure record of what was imported.
+        self._con.execute(
+            "CREATE TABLE live_bars (symbol VARCHAR, timeframe VARCHAR, ts TIMESTAMP, open DOUBLE,"
+            " high DOUBLE, low DOUBLE, close DOUBLE, spread DOUBLE, volume DOUBLE,"
+            " PRIMARY KEY (symbol, timeframe, ts))"
+        )
         self.manifest = self._load_manifest()
 
     def _load_manifest(self) -> dict:
@@ -92,7 +101,40 @@ class CandleStore:
         return self.root / symbol.upper() / (timeframe.upper() + ".parquet")
 
     def has(self, symbol: str, timeframe: str) -> bool:
-        return self.path_for(symbol, timeframe).exists()
+        return self.path_for(symbol, timeframe).exists() or self._has_live(symbol, timeframe)
+
+    def _has_live(self, symbol: str, timeframe: str) -> bool:
+        rows = self._query(
+            "SELECT 1 FROM live_bars WHERE symbol = ? AND timeframe = ? LIMIT 1",
+            [symbol.upper(), timeframe.upper()],
+        )
+        return bool(rows)
+
+    def put_live_bars(self, symbol: str, timeframe: str, bars: list[Candle]) -> None:
+        """Add closed bars from a live feed, replacing any with the same open.
+        They never reach the Parquet store, and any overlapping a recorded bar
+        are ignored on read, so a feed cannot alter recorded history."""
+        if not bars:
+            return
+        # Through Arrow, because a backfill is many thousands of rows and
+        # `executemany` inserts them one at a time.
+        incoming = pa.table({
+            "symbol": [symbol.upper()] * len(bars),
+            "timeframe": [timeframe.upper()] * len(bars),
+            "ts": [_naive(b.ts) for b in bars],
+            "open": [b.open for b in bars],
+            "high": [b.high for b in bars],
+            "low": [b.low for b in bars],
+            "close": [b.close for b in bars],
+            "spread": [b.spread for b in bars],
+            "volume": [b.volume for b in bars],
+        })
+        with self._lock:
+            self._con.register("incoming_bars", incoming)
+            try:
+                self._con.execute("INSERT OR REPLACE INTO live_bars SELECT * FROM incoming_bars")
+            finally:
+                self._con.unregister("incoming_bars")
 
     @property
     def available_symbols(self) -> tuple[str, ...]:
@@ -104,10 +146,22 @@ class CandleStore:
         )
 
     def _scan(self, symbol: str, timeframe: str) -> str:
+        """Recorded bars, then any live bars after the recorded ones end. An
+        `as_of` inside recorded history therefore reads recorded data only,
+        which is what keeps REPLAY a replay of what was recorded."""
         path = self.path_for(symbol, timeframe)
+        key = "symbol = '" + symbol.upper() + "' AND timeframe = '" + timeframe.upper() + "'"
+        columns = "ts, open, high, low, close, spread, volume"
+        live = "SELECT " + columns + " FROM live_bars WHERE " + key
         if not path.exists():
-            raise FileNotFoundError("no candles for " + symbol + " " + timeframe)
-        return "read_parquet('" + str(path).replace("'", "''") + "')"
+            if not self._has_live(symbol, timeframe):
+                raise FileNotFoundError("no candles for " + symbol + " " + timeframe)
+            return "(" + live + ")"
+        recorded = "read_parquet('" + str(path).replace("'", "''") + "')"
+        return (
+            "(SELECT " + columns + " FROM " + recorded + " UNION ALL " + live
+            + " AND ts > (SELECT max(ts) FROM " + recorded + "))"
+        )
 
     def _query(self, sql: str, params: list | None = None) -> list[tuple]:
         with self._lock:
@@ -161,6 +215,22 @@ class CandleStore:
             last_bar=hi.replace(tzinfo=UTC) if hi else None,
         )
 
+    def _recorded_coverage(self, symbol: str, timeframe: str) -> Coverage:
+        path = str(self.path_for(symbol, timeframe)).replace("'", "''")
+        rows = self._query("SELECT count(*), min(ts), max(ts) FROM read_parquet('" + path + "')")
+        n, lo, hi = rows[0] if rows else (0, None, None)
+        return Coverage(
+            symbol=symbol, timeframe=timeframe, bars=n,
+            first_bar=lo.replace(tzinfo=UTC) if lo else None,
+            last_bar=hi.replace(tzinfo=UTC) if hi else None,
+        )
+
+    def recorded_symbols(self) -> tuple[str, ...]:
+        return tuple(
+            s for s in universe.SYMBOLS
+            if all(self.path_for(s, tf).exists() for tf in universe.TIMEFRAMES)
+        )
+
     def store_bounds(self, timeframe: str = "M5") -> tuple[datetime | None, datetime | None]:
         """The span of moments the dashboard can be asked about: from the
         earliest bar's open to the latest bar's *close*, because that is when
@@ -169,8 +239,8 @@ class CandleStore:
         cannot drag the dashboard's clock past its own coverage."""
         firsts: list[datetime] = []
         lasts: list[datetime] = []
-        for symbol in self.available_symbols:
-            cov = self.coverage(symbol, timeframe)
+        for symbol in self.recorded_symbols():
+            cov = self._recorded_coverage(symbol, timeframe)
             if cov.first_bar and cov.last_bar:
                 firsts.append(cov.first_bar)
                 lasts.append(cov.last_bar)

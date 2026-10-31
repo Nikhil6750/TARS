@@ -22,11 +22,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
-from market import universe
+from market import feed, ingest, setup, universe
 from market.service import MarketXRayService
+from market.store import CandleStore
 
 logger = logging.getLogger("tars.market.api")
 
@@ -55,7 +57,22 @@ def _service(request: Request) -> MarketXRayService:
             },
         ) from exc
     request.app.state.market_xray_service = service
+    _start_feed(request.app)
     return service
+
+
+def _start_feed(app) -> None:
+    """Bridge the existing MT5 monitor to the service, once. With MT5 disabled
+    there is simply no bridge, and the dashboard runs on recorded history."""
+    if getattr(app.state, "market_feed", None) is not None:
+        return
+    monitors = getattr(app.state, "monitors", None)
+    provider = getattr(monitors, "mt5", None)
+    if provider is None:
+        return
+    bridge = feed.FeedBridge(lambda: getattr(app.state, "market_xray_service", None), provider)
+    app.state.market_feed = bridge
+    bridge.start()
 
 
 def _timeframe(value: str) -> str:
@@ -80,6 +97,55 @@ def _symbol(service: MarketXRayService, value: str) -> str:
     return sym
 
 
+def _import_job(request: Request) -> setup.ImportJob:
+    job = getattr(request.app.state, "market_import_job", None)
+    if job is None:
+        def reload_service() -> None:
+            # The service reads its bounds at construction, so a fresh import
+            # needs a fresh service. Replaced, not mutated, so a request in
+            # flight finishes against the object it started with.
+            previous = _service(request)
+            replacement = MarketXRayService(
+                store=CandleStore(previous.store.root), state=previous.state
+            )
+            replacement.adopt_feed_from(previous)
+            request.app.state.market_xray_service = replacement
+
+        job = setup.ImportJob(on_complete=reload_service)
+        request.app.state.market_import_job = job
+    return job
+
+
+@router.get("/setup")
+def setup_status(request: Request, csv_root: str | None = Query(None)) -> dict:
+    """What the dashboard has to work with, for the first-run screen. Answers
+    with an empty store, which is the case every other route cannot serve."""
+    # In this order: an import that reports DONE has already swapped the
+    # service in, so the reverse could pair DONE with the old, empty store.
+    import_state = _import_job(request).status()
+    service = _service(request)
+    root = Path(csv_root) if csv_root else ingest.csv_root()
+    return {
+        "ready": service.bounds[1] is not None,
+        "store_root": str(service.store.root),
+        "symbols_in_store": len(service.store.available_symbols),
+        "sources": setup.discover_sources(root),
+        "import": import_state,
+        "status": service.market_status().as_dict(),
+        "trading_execution": "DISABLED",
+    }
+
+
+@router.post("/import")
+def start_import(request: Request, csv_root: str | None = Query(None)) -> dict:
+    """Build the candle store from local CSVs, in the background."""
+    root = Path(csv_root) if csv_root else ingest.csv_root()
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"{root} is not a folder on this machine")
+    service = _service(request)
+    return _import_job(request).start(csv_root=root, store_root=service.store.root)
+
+
 @router.get("/health")
 def health(request: Request) -> dict:
     """Feed health and store coverage. Reports the truth about staleness."""
@@ -88,6 +154,7 @@ def health(request: Request) -> dict:
     return {
         "ok": True,
         "status": service.market_status().as_dict(),
+        "feed": service.feed_state,
         "store": {
             "root": str(service.store.root),
             "symbols": len(service.store.available_symbols),

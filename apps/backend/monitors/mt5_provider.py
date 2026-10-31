@@ -2,7 +2,7 @@
 
 Only the official ``MetaTrader5`` package's read calls are used: initialize,
 terminal_info, account_info, symbol_select, symbol_info_tick, symbol_info,
-positions_get, orders_get, shutdown. There is deliberately no order placement,
+copy_rates_from_pos, positions_get, orders_get, shutdown. There is deliberately no order placement,
 check or modification call anywhere in this module (asserted by tests).
 
 Every failure degrades to a truthful state (NOT INSTALLED / DISCONNECTED /
@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -24,6 +25,9 @@ from events.core import EventSource, NormalizedEvent
 logger = logging.getLogger("tars.monitors.mt5")
 
 _MT5_PROCESS_NAMES = ("terminal64.exe", "terminal.exe")
+
+# Bar lengths the market feed reads, by minutes.
+_RATE_TIMEFRAMES = {5: "TIMEFRAME_M5", 15: "TIMEFRAME_M15", 60: "TIMEFRAME_H1"}
 
 
 class MT5State(str, Enum):
@@ -105,6 +109,11 @@ class MT5Provider:
         self._tickets: set[int] | None = None
         self._task: asyncio.Task | None = None
         self._last_state: MT5State | None = None
+        # The MetaTrader5 package is one process-wide connection, and the
+        # market feed reads rates from a different thread than this poller.
+        self._io_lock = threading.Lock()
+        self._server: str | None = None
+        self._points: dict[str, float] = {}
 
     # ---- lifecycle -------------------------------------------------------
     async def start(self):
@@ -141,8 +150,42 @@ class MT5Provider:
                     logger.warning("mt5 state callback failed", exc_info=True)
             await asyncio.sleep(delay)
 
+    # ---- market feed (read-only) ------------------------------------------
+    def watch(self, symbols: list[str]) -> None:
+        """Add symbols to the poll without disturbing the configured ones."""
+        with self._io_lock:
+            for symbol in symbols:
+                if symbol not in self.symbols:
+                    self.symbols.append(symbol)
+                    self._history.setdefault(symbol, deque())
+
+    def server_name(self) -> str | None:
+        return self._server
+
+    def point(self, symbol: str) -> float | None:
+        return self._points.get(symbol)
+
+    def read_rates(self, symbol: str, timeframe_minutes: int, count: int):
+        """The newest `count` rates, or None. Only while connected: this must
+        never become a way of starting or waking a terminal."""
+        if self.state is not MT5State.CONNECTED or self._mt5 is None:
+            return None
+        constant = _RATE_TIMEFRAMES.get(timeframe_minutes)
+        if constant is None:
+            return None
+        with self._io_lock:
+            try:
+                return self._mt5.copy_rates_from_pos(symbol, getattr(self._mt5, constant), 0, count)
+            except Exception as exc:
+                logger.warning("mt5 rates read failed: %s", type(exc).__name__)
+                return None
+
     # ---- synchronous read-only poll (worker thread) ----------------------
     def poll_once(self) -> dict:
+        with self._io_lock:
+            return self._poll_once()
+
+    def _poll_once(self) -> dict:
         mt5 = self._mt5 or self.module_loader()
         if mt5 is None:
             return {"state": MT5State.NOT_INSTALLED, "detail": "MetaTrader5 package is not installed"}
@@ -165,6 +208,7 @@ class MT5Provider:
             if terminal is not None and not getattr(terminal, "connected", True):
                 return {"state": MT5State.DISCONNECTED, "detail": "MT5 terminal is not connected to a broker"}
             info = mt5.account_info()
+            self._server = getattr(info, "server", None) or self._server
             quotes = {}
             for symbol in self.symbols:
                 mt5.symbol_select(symbol, True)
@@ -173,6 +217,8 @@ class MT5Provider:
                 if tick is None:
                     continue
                 point = getattr(sinfo, "point", 0) or 0
+                if point:
+                    self._points[symbol] = point
                 quotes[symbol] = {"bid": tick.bid, "ask": tick.ask,
                                   "spread": round((tick.ask - tick.bid) / point, 1) if point else None,
                                   "time": getattr(tick, "time", None)}

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
@@ -24,7 +25,42 @@ from pathlib import Path
 
 logger = logging.getLogger("tars.market.state")
 
-DEFAULT_DB = Path("apps/backend/storage/market_xray.db")
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+# This used to be a path relative to the working directory, which under the
+# supervisor (cwd apps/backend) landed in apps/backend/apps/backend/storage.
+_LEGACY_DB = _BACKEND_DIR / "apps" / "backend" / "storage" / "market_xray.db"
+
+
+def default_db() -> Path:
+    """The state database: in TARS_HOME when installed, so that an upgrade
+    cannot delete zone history, otherwise beside the backend."""
+    home = os.environ.get("TARS_HOME", "").strip()
+    return (Path(home) if home else _BACKEND_DIR) / "storage" / "market_xray.db"
+
+
+def migrate_legacy_db(target: Path, legacy: Path = _LEGACY_DB) -> bool:
+    """Move history out of the old accidental location without losing it.
+
+    Copies, never overwrites, and only when the new location has nothing, so
+    running this twice or with both files present cannot destroy either. The
+    old file is left in place: deleting a user's data is not this code's call.
+    """
+    if target.exists() or not legacy.exists():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source = sqlite3.connect(f"file:{legacy.as_posix()}?mode=ro", uri=True)
+    try:
+        # The backup API reads through the WAL, which a plain file copy of a
+        # live database would miss.
+        destination = sqlite3.connect(str(target))
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+    finally:
+        source.close()
+    logger.info("migrated market state from %s to %s", legacy, target)
+    return True
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS calc_config (
@@ -100,7 +136,10 @@ CREATE TABLE IF NOT EXISTS snapshots (
 
 
 class MarketState:
-    def __init__(self, db_path: Path | str = DEFAULT_DB):
+    def __init__(self, db_path: Path | str | None = None):
+        if db_path is None:
+            db_path = default_db()
+            migrate_legacy_db(Path(db_path))
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()

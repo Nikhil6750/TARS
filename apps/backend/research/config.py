@@ -27,7 +27,9 @@ def resolve_data_root() -> Path:
         drive = f"{letter}:"
         if drive != sysdrive and _drive_ok(drive):
             return Path(f"{drive}\\TARS_DATA")
-    return Path(__file__).resolve().parents[3] / "artifacts" / "research_data"
+    home = os.environ.get("TARS_HOME", "").strip()
+    base = Path(home) if home else Path(__file__).resolve().parents[3]
+    return base / "artifacts" / "research_data"
 
 
 def ensure_layout(root: Path | None = None) -> Path:

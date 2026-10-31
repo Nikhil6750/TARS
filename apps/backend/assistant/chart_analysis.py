@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -224,7 +225,10 @@ class ChartAnalysisError(RuntimeError):
 # depending on `--add-dir` to reach an OS temp path adds a failure mode
 # across environments/sandboxes for no benefit -- a location this backend
 # already controls end to end is simpler and more portable.
-_SCRATCH_DIR = Path(__file__).resolve().parent.parent / "storage" / "tmp"
+_SCRATCH_DIR = (
+    Path(os.environ["TARS_HOME"]) if os.environ.get("TARS_HOME", "").strip()
+    else Path(__file__).resolve().parent.parent
+) / "storage" / "tmp"
 
 
 class ChartAnalysisService:

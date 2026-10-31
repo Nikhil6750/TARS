@@ -81,6 +81,12 @@ class MarketXRayService:
         # no feed is authenticated, which is what keeps the status out of LIVE.
         self._feed_last_tick: datetime | None = None
         self._feed_provider: str = provenance.NO_PROVIDER
+        self._feed_state: dict | None = None
+        self._feed_connection: str = "NOT_CONFIGURED"
+        self._feed_detail: str = ""
+        # The close of the newest live bar every instrument has reached. Until
+        # this exists the panels are recorded history, whatever the ticks say.
+        self._live_edge: datetime | None = None
         # True once the cursor has been moved off the live edge on purpose.
         # While it is set, no status can be LIVE -- see `clock.resolve_status`.
         # It starts False: with no feed attached the status is REPLAY anyway,
@@ -91,7 +97,18 @@ class MarketXRayService:
 
     # ---- cursor ----------------------------------------------------------
     @property
+    def panels_follow_feed(self) -> bool:
+        """Whether the panels are being computed from the feed's own bars."""
+        return (
+            not self._replay_pinned
+            and self._live_edge is not None
+            and self._feed_last_tick is not None
+        )
+
+    @property
     def cursor(self) -> datetime:
+        if self.panels_follow_feed and self._live_edge is not None:
+            return self._live_edge
         if self._cursor is None:
             raise RuntimeError("candle store is empty; run `python -m market.ingest` first")
         return self._cursor
@@ -158,6 +175,38 @@ class MarketXRayService:
         with self._lock:
             self._feed_provider = provenance.NO_PROVIDER
             self._feed_last_tick = None
+            self._live_edge = None
+            self._feed_connection = "NOT_CONFIGURED"
+            self._feed_detail = ""
+            self._feed_state = None
+
+    def report_feed(self, state, *, last_tick: datetime | None, connected: bool) -> None:
+        """One pass of the feed bridge. A dropped connection keeps the last
+        tick, so the status ages into STALE and says so, rather than quietly
+        falling back to history as if no feed had ever been there."""
+        with self._lock:
+            self._feed_connection = state.connection.value
+            self._feed_detail = state.detail
+            self._feed_state = state.as_dict()
+        if connected and state.provider:
+            self.attach_feed(provider=state.provider, last_tick=last_tick)
+
+    def report_live_edge(self, edge: datetime) -> None:
+        with self._lock:
+            self._live_edge = edge.astimezone(UTC)
+
+    @property
+    def feed_state(self) -> dict | None:
+        return self._feed_state
+
+    def adopt_feed_from(self, previous: MarketXRayService) -> None:
+        """Carry the live side across a store reload after an import."""
+        with self._lock:
+            self._feed_provider = previous._feed_provider
+            self._feed_last_tick = previous._feed_last_tick
+            self._feed_state = previous._feed_state
+            self._feed_connection = previous._feed_connection
+            self._feed_detail = previous._feed_detail
 
     def data_provenance(self) -> provenance.Provenance:
         """Where the observations in the next payload come from.
@@ -168,13 +217,20 @@ class MarketXRayService:
         status = self._resolve_status()
         if status.source == provenance.DataSource.LIVE_FEED.value:
             return provenance.live(
-                provider=self._feed_provider, observed_at=status.data_as_of
+                provider=self._feed_provider,
+                observed_at=status.data_as_of,
+                fresh=status.status is clock.FeedStatus.LIVE,
             )
         detail = ""
         if self._feed_last_tick is not None and self._replay_pinned:
             detail = (
                 "A live feed is attached but the cursor is pinned to recorded "
                 "history, so these observations are replayed, not live."
+            )
+        elif self._feed_last_tick is not None:
+            detail = (
+                "A live feed is connected but has not delivered bars yet, so "
+                "these observations are recorded history, not live."
             )
         return provenance.recorded(observed_at=status.data_as_of, detail=detail)
 
@@ -196,8 +252,11 @@ class MarketXRayService:
             now=now,
             feed_last_tick=self._feed_last_tick,
             replay_pinned=self._replay_pinned,
+            panels_follow_feed=self.panels_follow_feed,
             cursor=self._cursor,
             store_last_bar=self._last_bar,
+            feed_connection=self._feed_connection,
+            feed_detail=self._feed_detail,
         )
         # Fail closed. The gate above cannot return LIVE while replay is
         # pinned, so this can only fire if that guarantee is ever broken --
@@ -407,4 +466,5 @@ class MarketXRayService:
             "config": self.config.as_dict(),
             "provenance": self.data_provenance().as_dict(),
             "replay_pinned": self._replay_pinned,
+            "feed": self._feed_state,
         }

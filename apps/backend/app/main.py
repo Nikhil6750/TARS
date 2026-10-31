@@ -450,6 +450,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        market_feed = getattr(app.state, "market_feed", None)
+        if market_feed is not None:
+            market_feed.stop()
         await market_watch_service.stop()
         correlation_engine.stop()
         await monitors.stop()
