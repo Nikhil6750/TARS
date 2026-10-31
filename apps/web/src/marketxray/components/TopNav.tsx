@@ -6,7 +6,7 @@
  * client: if the backend says REPLAY, this says REPLAY.
  */
 import React, { useEffect, useState } from 'react';
-import type { MarketStatus } from '../types';
+import type { MarketStatus, Provenance } from '../types';
 
 export type Section = 'xray' | 'blocks' | 'scanner' | 'journal';
 
@@ -24,12 +24,14 @@ const fmt = (iso: string | null | undefined): string =>
 
 export const TopNav: React.FC<{
   status: MarketStatus | null;
+  provenance?: Provenance | null;
+  replayPinned?: boolean;
   section: Section;
   onSection: (s: Section) => void;
   desktop?: boolean;
   fullscreen?: boolean;
   onToggleFullscreen?: () => void;
-}> = ({ status, section, onSection, desktop, fullscreen, onToggleFullscreen }) => {
+}> = ({ status, provenance, replayPinned, section, onSection, desktop, fullscreen, onToggleFullscreen }) => {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -38,6 +40,12 @@ export const TopNav: React.FC<{
   }, []);
 
   const active = new Set(status?.sessions_active ?? []);
+  const source = provenance?.source ?? (status?.status === 'LIVE' ? 'LIVE_FEED' : 'RECORDED_STORE');
+  const sourceLabel = source === 'LIVE_FEED'
+    ? `LIVE · ${provenance?.provider ?? 'feed'}`
+    : replayPinned
+    ? 'REPLAY PINNED'
+    : 'RECORDED STORE';
 
   return (
     <nav className="mx-nav">
@@ -69,6 +77,10 @@ export const TopNav: React.FC<{
           ))}
         </div>
 
+        <div className="mx-provenance-tag" data-source={source} title={provenance?.detail ?? status?.detail ?? ''}>
+          {sourceLabel}
+        </div>
+
         <div className="mx-status" data-status={status?.status ?? 'NO_DATA'} title={status?.detail}>
           <span className="mx-dot" />
           {status?.status ?? 'CONNECTING'}
@@ -95,12 +107,29 @@ export const TopNav: React.FC<{
   );
 };
 
-export const StatusBanner: React.FC<{ status: MarketStatus | null }> = ({ status }) => {
+export const StatusBanner: React.FC<{
+  status: MarketStatus | null;
+  provenance?: Provenance | null;
+  replayPinned?: boolean;
+}> = ({ status, provenance, replayPinned }) => {
   if (!status) return null;
   const tone =
     status.status === 'CLOSED' ? 'closed' : status.status === 'LIVE' ? 'live' : 'warn';
+  const source = provenance?.source ?? (status.status === 'LIVE' ? 'LIVE_FEED' : 'RECORDED_STORE');
+  const sourceLabel = source === 'LIVE_FEED'
+    ? `LIVE FEED (${provenance?.provider ?? 'provider'})`
+    : 'RECORDED STORE (HISTORICAL)';
+
   return (
     <div className="mx-banner" data-tone={tone}>
+      <span className="mx-provenance-badge" data-source={source}>
+        {sourceLabel}
+      </span>
+      {replayPinned && (
+        <span className="mx-pinned-badge" title="Replay cursor is pinned to historical bar">
+          REPLAY PINNED
+        </span>
+      )}
       <strong>{status.market_open ? 'MARKET OPEN' : 'MARKET CLOSED'}</strong>
       <span>{status.detail}</span>
       {status.next_transition && (

@@ -25,6 +25,7 @@ import type {
   LeadersSnapshot,
   MarketStatus,
   OrderBlocksPayload,
+  Provenance,
   StrengthSnapshot,
   XRaySnapshot
 } from './types';
@@ -57,6 +58,8 @@ export const MarketXRayApp: React.FC = () => {
   const [chart, setChart] = useState<ChartPayload | null>(null);
   const [blocks, setBlocks] = useState<OrderBlocksPayload | null>(null);
   const [events, setEvents] = useState<EventsPayload | null>(null);
+  const [provenance, setProvenance] = useState<Provenance | null>(null);
+  const [replayPinned, setReplayPinned] = useState(false);
 
   const [fatal, setFatal] = useState<Fatal | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -77,6 +80,8 @@ export const MarketXRayApp: React.FC = () => {
     setChart(data.chart);
     setBlocks(data.order_blocks);
     setEvents(data.events);
+    setProvenance(data.provenance ?? null);
+    setReplayPinned(data.replay_pinned ?? false);
     setSymbol((current) => current ?? data.selected_symbol);
     setTimeframe(data.timeframe);
   }, []);
@@ -251,6 +256,12 @@ export const MarketXRayApp: React.FC = () => {
           if (frame.type === 'market.frame') {
             setStatus(frame.status);
             setCursor(frame.cursor);
+            if (frame.provenance) {
+              setProvenance(frame.provenance);
+            }
+            if (typeof frame.replay_pinned === 'boolean') {
+              setReplayPinned(frame.replay_pinned);
+            }
             if (frame.timeframe === timeframe) {
               setXray(frame.xray);
               setLeaders(frame.leaders);
@@ -365,13 +376,15 @@ export const MarketXRayApp: React.FC = () => {
       <div className="mx-shell">
         <TopNav
           status={status}
+          provenance={provenance}
+          replayPinned={replayPinned}
           section={section}
           onSection={setSection}
           desktop={isDesktop()}
           fullscreen={fullscreen}
           onToggleFullscreen={handleFullscreen}
         />
-        <StatusBanner status={status} />
+        <StatusBanner status={status} provenance={provenance} replayPinned={replayPinned} />
 
         {notice && (
           <div className="mx-banner" data-tone="warn">
@@ -385,6 +398,16 @@ export const MarketXRayApp: React.FC = () => {
             >
               dismiss
             </button>
+          </div>
+        )}
+
+        {instruments.length === 0 && !busy && (
+          <div className="mx-empty-store-banner">
+            <strong>No market history in local store</strong>
+            <p>
+              The candle store currently contains no completed bars. Run historical ingestion or attach an active feed.
+            </p>
+            <code>python -m market.ingest</code>
           </div>
         )}
 

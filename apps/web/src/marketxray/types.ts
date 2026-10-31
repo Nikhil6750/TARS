@@ -8,6 +8,15 @@
 
 export type FeedStatusName = 'LIVE' | 'STALE' | 'REPLAY' | 'CLOSED' | 'NO_DATA';
 
+export interface Provenance {
+  source: 'RECORDED_STORE' | 'LIVE_FEED';
+  provider: string;
+  observed_at: string | null;
+  replay: boolean;
+  detail: string;
+  is_live: boolean;
+}
+
 export interface MarketStatus {
   status: FeedStatusName;
   market_open: boolean;
@@ -18,6 +27,9 @@ export interface MarketStatus {
   next_transition: string | null;
   detail: string;
   replay: boolean;
+  source?: 'RECORDED_STORE' | 'LIVE_FEED';
+  provider?: string;
+  is_live?: boolean;
 }
 
 export interface Cursor {
@@ -222,6 +234,7 @@ export interface Instrument {
   asset_class: string;
   base: string;
   quote: string;
+  backing?: 'RECORDED_CSV' | 'LIVE_ACCRUED' | string;
   price_precision: number;
   pip_size: number;
   bars_m5: number;
@@ -243,4 +256,6 @@ export interface Dashboard {
   order_blocks: OrderBlocksPayload;
   events: EventsPayload;
   config: Record<string, unknown>;
+  provenance?: Provenance;
+  replay_pinned?: boolean;
 }
