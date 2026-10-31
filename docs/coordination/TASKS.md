@@ -291,9 +291,13 @@ deliberately set before the shutdown POST.
   floor in constraint 3 above is named rather than averaged away.
 
 - [ ] READY: **P1-X3 — Make fullscreen verification DPI-safe, and say when
-  it could not run.** `verify_market_desktop.py`'s fullscreen check fails
-  today for a harness reason, not an app one, and its failure message is
-  actively misleading: it prints the pass-condition wording
+  it could not run.** Note first what is *not* broken: fullscreen itself is
+  **verified working** -- a clean run reported `1920x1080 exactly matches
+  monitor 1920x1080`. The problem is that the check is unreliable across
+  runs and reports its own failures as app failures. Of four runs today, two
+  failed because the harness could not get the foreground and one because
+  the window was minimized; only one measured anything. Its failure message
+  is also actively misleading: it prints the pass-condition wording
   ("1942x1102 exactly matches monitor 1920x1080") over numbers that plainly
   do not match. Two defects behind it:
   (a) **The keystroke never arrives.** `SetForegroundWindow` on the Market
@@ -309,7 +313,8 @@ deliberately set before the shutdown POST.
   primary metrics.
   *Done when*: the check either verifies fullscreen or reports that it could
   not, never a bare FAIL for a harness limitation, and the numbers it prints
-  support the verdict it gives.
+  support the verdict it gives. A flaky check that cries wolf is worse than
+  no check, because it teaches people to ignore the summary.
 
 - [ ] READY: **P1-X4 — Investigate the intermittent minimized window.**
   Observed once: the Market window appeared at `-32000,-32000` sized

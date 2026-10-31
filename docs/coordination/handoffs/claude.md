@@ -294,6 +294,66 @@ on the base commit and in files this integration does not modify, so they
 were left alone rather than mixed into this work. Every file this branch
 does change is clean under `ruff` and `mypy`.
 
+### Combined regression on the integrated branch
+
+| Suite | Result |
+|---|---|
+| Backend pytest | **1759 passed, 8 skipped, 0 failed** |
+| Frontend (vitest) | **207 passed**, 29 files |
+| API + Chromium acceptance | **27/27** |
+| Native desktop verification | **18/18** |
+| `tsc` | clean |
+| `ruff` / `mypy` on all 14 changed files | clean |
+
+1759 is 1681 baseline + 13 (P1-C1) + 9 (P1-C2) + 28 (P2-C3) + 15 (P2-C5) +
+13 (compatibility), which accounts for every test added and leaves none of
+the baseline unexplained.
+
+**F11 fullscreen is now verified**, correcting what the previous entry
+recorded as unverified: the desktop run reported `1920x1080 exactly matches
+monitor 1920x1080`. The mechanism was always fine; two earlier runs failed
+because the harness could not get the foreground, and one because the window
+was minimized. So fullscreen works, and the harness is unreliable across
+runs -- which is why P1-X3 and P1-X4 still stand as Codex tasks.
+
+The acceptance run also confirms the Phase 2 work did not disturb what was
+already true: currency strength still ranks all eight, `thin=['NZD', 'CHF']`
+is still flagged, and the leave-one-pair-out diagnostic is still present on
+every currency.
+
+Pre-existing lint, left alone rather than mixed into this work: 3 `ruff`
+errors (`app/main.py`, `app/routers/realtime.py`, `app/routers/voice.py`)
+and 1 `eslint` error (`src/test/orb-native.test.ts`). All are present on the
+base commit, in files this branch does not modify. This also corrects an
+over-broad claim in the previous entry: "eslint clean" was true of the
+`marketxray` subtree, not of all of `src`.
+
+### The adoption risk, observed rather than theorised
+
+Worth recording because it is the exact failure coordinator point 5 is
+about, and it happened by accident. On the first desktop launch of this
+verification the shell reported a healthy backend -- but the process serving
+port 8000 was a `python -m uvicorn` instance left over from the browser
+acceptance run, **not** the shell's own `python run.py` child. The shell
+adopted it purely because it answered 200 on the port, and inherited that
+process's replay cursor, so the dashboard opened at 08:55 instead of the
+newest recorded bar.
+
+It looked like a cursor bug. It was not: `store_bounds("M5")` returns
+20:55, and after killing the stray listener a shell-spawned backend started
+at 20:55 as designed. The real defect is that nothing distinguished the two
+processes.
+
+Note what the new fields would and would not have changed here. That
+leftover *was* a TARS backend on the same contract, so `is_compatible`
+would have adopted it too -- correctly, since adopting a compatible backend
+is the documented behaviour. What `service` and `contract_version` prevent
+is adopting a process that is **not** a compatible TARS backend, which is
+the case that silently runs a new frontend against old code or takes
+ownership of something belonging to somebody else. Distinguishing two
+compatible TARS backends is what `instance_id` is for, and using it to
+notice "this is not the child I started" is P1-A1's call to make.
+
 ### Assignments prepared on this branch
 
 The task board now carries an "Implementation status" table naming the exact
