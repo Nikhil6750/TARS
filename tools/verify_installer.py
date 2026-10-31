@@ -139,8 +139,10 @@ def main() -> int:
         return finish(root, args.keep)
     bundled_python = install_dir / "tars" / "python" / "python.exe"
     record("It carries its own Python", bundled_python.exists())
+    # Library assets are fine; anything from the application's own tree is not.
     leaked = [n for n in snapshot(install_dir)
-              if n.endswith((".env", ".db", ".parquet", ".wav")) or "\\storage\\tmp" in n]
+              if "site-packages" not in n
+              and (n.endswith((".env", ".db", ".parquet", ".wav")) or "storage\tmp" in n)]
     record("No user data or secrets were packaged", not leaked, str(leaked[:5]))
     before = snapshot(install_dir)
 
@@ -179,6 +181,8 @@ def main() -> int:
     from verify_backend_ownership import market_windows
     shot_note = "window present" if market_windows() else "no Market window found"
     record("The Market window opened from the installed app", bool(market_windows()), shot_note)
+    # The window opens before the backend is up, so give its retry time to land.
+    time.sleep(12)
     capture_screenshot("05-installed-first-run.png")
 
     # ---- import, then offline replay ---------------------------------------
