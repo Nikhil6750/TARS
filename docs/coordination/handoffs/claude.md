@@ -15,7 +15,8 @@ for that).
 
 **Branch**: `feature/market-xray-dashboard`
 **Base SHA**: `db49310` (Phase 3E, `feature/tars-desktop-demo-20260920`)
-**Final SHA**: `26de505`
+**Final SHA**: `9417161` (engine + dashboard: `26de505`; docs: `f87d62a`;
+desktop integration and the three defects below: `9417161`)
 
 Branched from `db49310` rather than `integration/v1` because the feature
 reuses Phase 3E backend infrastructure that only exists on that line. No
@@ -38,12 +39,58 @@ displays is computed from recorded bid/ask candles on this machine.
   `/api/v1/market`, registered in `app/main.py`.
 * `apps/web/src/marketxray/` + `apps/web/market.html` — the dashboard, built
   as a second Vite entry so the companion app at `index.html` is untouched.
-* `apps/web/src-tauri/src/lib.rs` — a `market` window, tray item, and the
-  `open_market_intelligence` / `market_toggle_fullscreen` commands.
+* `apps/web/src-tauri/src/lib.rs` — a `market` window, tray item, the
+  `open_market_intelligence` / `market_toggle_fullscreen` commands, and
+  `--market` / `--quit` routed through the single-instance plugin.
 * `scripts/start-market-xray.{ps1,cmd}` (browser) and
-  `scripts/start-market-desktop.{ps1,cmd}` (Tauri desktop).
+  `scripts/start-market-desktop.{ps1,cmd}` (Tauri desktop; builds the
+  release binary on first run, `-Dev` for the Vite workflow).
 * `tools/verify_market_xray.py` — API + Chromium acceptance verification.
+* `tools/verify_market_desktop.py` — native desktop verification.
 * `apps/backend/tests/test_market_xray.py` — 42 unit tests.
+
+### Two defects found by running the desktop app, and fixed
+
+Both were found only by launching the real application; neither showed up
+in any unit test or in the browser build.
+
+1. **The market endpoints blocked the event loop** (mine, a regression).
+   Every handler in `app/routers/market_xray.py` was `async def` while
+   doing synchronous DuckDB scans and order-block detection — roughly two
+   seconds of CPU for an 18-instrument `leaders()` call. On the event loop
+   that stalled every other request, including the desktop shell's backend
+   health poll. The supervisor concluded the backend had died and restarted
+   it; the replacement could not bind port 8000 because the original was
+   still serving, so it exited, which looked like another crash — an
+   endless 2-second respawn loop, visible in the console as repeated
+   `[Errno 10048] only one usage of each socket address`. Fixed by
+   declaring the handlers `def` (Starlette then runs them in its
+   threadpool) and offloading the WebSocket frame with
+   `asyncio.to_thread`; the push interval also went 5s → 10s, since each
+   frame is real CPU.
+2. **Close-to-tray applied to every window** (pre-existing, exposed by
+   adding a second window). `on_window_event` in `lib.rs` called
+   `api.prevent_close()` unconditionally, so closing the Market window
+   left it alive-but-hidden *and* collapsed the companion into its orb as
+   a side effect. Now scoped: the market window closes normally, the
+   companion keeps its close-to-tray behaviour.
+3. **The window parked on an error panel at cold start** (mine). The shell
+   opens the Market window and starts the backend at the same moment, so
+   the first fetch reliably lost that race and the dashboard sat on
+   "Cannot reach the TARS backend" until someone pressed retry — found by
+   looking at a verification screenshot, not by any assertion, which is
+   why the desktop verifier now requires a *populated* dashboard (measured
+   by distinct colours: ~450 for the error panel, ~3000 once painted)
+   rather than merely a non-blank window. The dashboard now retries on its
+   own with backoff and says so.
+
+Also hardened, in `supervisor.rs`: the poll loop treated "our child handle
+exited" as "backend down" even when the health check was passing, which is
+what turned one transient blip into the respawn loop above. It now adopts
+the healthy backend and clears the stale handle — exactly the
+adopt-or-spawn rule the module already applies at startup. This is a
+change in Antigravity's lane; it is small, matches the module's documented
+intent, and is flagged below for review.
 
 ### Interfaces exposed
 
@@ -56,24 +103,43 @@ config,events}`, `GET /api/v1/market/{candles,order-blocks}/{symbol}`,
 ### Tests run
 
 * 42 new unit tests pass (`tests/test_market_xray.py`).
-* 27/27 acceptance checks pass (`tools/verify_market_xray.py`), covering
-  real candles, X-Ray pixels, replay determinism, event dedupe, hover,
-  symbol selection, timeframe switching and backend-loss handling.
+* 27/27 acceptance checks pass (`tools/verify_market_xray.py`) against the
+  supervised backend on port 8000, covering real candles, X-Ray pixels,
+  replay determinism, event dedupe, hover, symbol selection, timeframe
+  switching and backend-loss handling.
+* **16/16 desktop checks pass against the real release binary**
+  (`tools/verify_market_desktop.py`): the Market window exists inside
+  `tars-companion.exe` at 1942x1102, its pixels captured with
+  `PrintWindow`; F11 enters fullscreen (exactly 1920x1080, the monitor)
+  and restores; the window resizes; closing it leaves the companion and
+  the backend running; `--market` reopens it without a second instance;
+  exactly one supervised backend runs as a child of the shell; and the
+  status reads REPLAY, never LIVE.
+* Cooperative shutdown verified: `tars-companion.exe --quit` leaves no
+  shell process and nothing listening on port 8000. (A hard
+  `TerminateProcess` on the shell *does* orphan the backend — expected,
+  and the reason `--quit` exists and is what the test drives.)
 * Currency strength cross-checked against an independent NumPy/pandas
   implementation — identical to 3 decimals.
-* Regression: backend `1681 passed, 8 skipped`; frontend `207 passed`;
-  ruff + mypy + tsc + eslint clean on all new code.
+* Build: `cargo check` clean; `npm run tauri build` produced
+  `target/release/tars-companion.exe` (13.4 MB) and
+  `bundle/nsis/TARS_1.0.0_x64-setup.exe`.
+* Regression after the fixes: backend `1681 passed, 8 skipped, 0 failed`;
+  frontend `207 passed`. ruff + mypy + tsc + eslint clean on all new code.
+* Toolchain installed this session: VS Build Tools (VCTools workload) →
+  `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools`, MSVC
+  14.51.36231, Windows SDK 10.0.26100. Note the path is `18`, not `2022` —
+  the launcher resolves it via `vswhere -requires`, not a hardcoded year.
 
 ### Known limitations
 
-1. **The Tauri desktop shell is NOT built or verified.** This machine has no
-   MSVC C++ build tools (`C:\Program Files\Microsoft Visual Studio\2022`
-   exists but is empty; no `link.exe`, no `cl.exe`, and `rustfmt` is not
-   installed either), so `cargo check` fails at the link step for dependency
-   proc-macros — my Rust additions were never compiled or even parsed. They
-   are reviewed by inspection only. Install the "Desktop development with
-   C++" workload, then run `scripts\start-market-desktop.cmd`, which
-   preflights for the linker and reports this exact blocker.
+1. **Tray-icon click is not automated.** Windows 11's tray overflow is an
+   XAML island that resists UI Automation, which is the same gap ADR-022
+   already records for this repo. The tray item is registered and its handler
+   calls `open_market_impl` — the identical function exercised by the two
+   verified entry points (`TARS_OPEN_MARKET=1` at startup, and `--market`
+   through the single-instance plugin) — but the click itself was not driven
+   by a test.
 2. **No live feed.** MT5 returns `-6 Authorization failed` (no logged-in
    account) and the market is closed. The dashboard runs in REPLAY off
    recorded history ending 2026-09-14 (XAUUSD 2026-09-11). The MT5 adapter
@@ -98,14 +164,18 @@ config,events}`, `GET /api/v1/market/{candles,order-blocks}/{symbol}`,
 
 ### Dependencies required from other agents
 
-* **Coordinator**: a decision on whether MSVC build tools get installed so
-  the desktop shell can be built and verified; and sign-off on the
-  `apps/web/` ownership exception recorded below.
+* **Coordinator**: sign-off on the `apps/web/` ownership exception
+  recorded below.
 * **Antigravity** (`apps/web/` owner): the dashboard lives in its own
-  `src/marketxray/` subtree and a separate `market.html` entry, so it should
-  not conflict with companion-shell work. The only shared-file edits are
-  `vite.config.ts` (added `build.rollupOptions.input` for the second entry)
-  and `src-tauri/` (the market window + capability).
+  `src/marketxray/` subtree and a separate `market.html` entry, so it
+  should not conflict with companion-shell work. Shared-file edits needing
+  review: `vite.config.ts` (added `build.rollupOptions.input` for the
+  second entry), `src-tauri/capabilities/default.json` (the `market`
+  window label), `src-tauri/src/lib.rs` (market window, tray item,
+  commands, `--market`/`--quit`, and the scoped close handler) and
+  `src-tauri/src/supervisor.rs` (the adopt-when-healthy fix). The last two
+  change existing behaviour rather than only adding to it, so they deserve
+  a closer look than the rest.
 * **Codex**: no contract under `contracts/` was added or changed — the market
   API is additive and outside the trading-event contract.
 
@@ -119,11 +189,18 @@ keep working in that lane. Nothing outside `src/marketxray/`, `market.html`,
 
 ### Next recommended action
 
-Install the MSVC C++ build tools and run `scripts\start-market-desktop.cmd`
-to build and verify the desktop window, which is the one acceptance item
-that could not be demonstrated here. After that, wire `MT5Provider` into
-`MarketXRayService` so `_feed_last_tick` is fed by a real session and the
-LIVE/STALE path can be exercised during market hours.
+Wire `MT5Provider` into `MarketXRayService` so `_feed_last_tick` is fed by
+a real authenticated session. That is the only part of the feed-status
+machinery never exercised against a live feed: REPLAY, CLOSED and the
+no-feed path are all verified, but LIVE and STALE have only been proven by
+unit test, because MT5 has no logged-in account on this machine and the
+market was closed all session.
+
+Worth doing alongside it: the per-WebSocket-frame cost is real
+(`_build_frame` recomputes the X-Ray, strength and leaders for every
+connected client every 10s). A short-lived cache keyed on the cursor would
+make that near-free, since the underlying data only changes when the
+cursor moves.
 
 ## Previous handoff — Alexa-speed hot-state, Phases E-H: deep verification, provider health, benchmark harness (2026-08-21)
 

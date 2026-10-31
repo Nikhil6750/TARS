@@ -158,7 +158,24 @@ impl BackendSupervisor {
             };
             let healthy = health_check_once();
 
-            if !healthy || child_exited {
+            if healthy && child_exited {
+                // Our own child handle is stale but a backend IS serving the
+                // port -- adopt it instead of spawning a duplicate that could
+                // never bind. Without this, one transient health blip starts
+                // an endless 2s respawn loop: every replacement fails with
+                // "only one usage of each socket address", which looks like
+                // another crash, which triggers another restart. Matches this
+                // module's adopt-or-spawn rule at startup.
+                let mut guard = self.child.lock().unwrap();
+                *guard = None;
+                drop(guard);
+                self.adopted.store(true, Ordering::SeqCst);
+                self.consecutive_failures.store(0, Ordering::SeqCst);
+                self.set_health(&app, BackendHealth::Ready);
+                continue;
+            }
+
+            if !healthy {
                 if self.intentional_stop.swap(false, Ordering::SeqCst) {
                     // A stop was requested between the checks above and here.
                     continue;

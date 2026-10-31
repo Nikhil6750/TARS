@@ -13,10 +13,35 @@ the existing Tauri app:
 scripts\start-market-desktop.cmd
 ```
 
-This needs the MSVC C++ build tools, because Tauri compiles a native binary.
-The script checks for them first and tells you what to install if they are
-missing. Once running, the window is also reachable any time from the tray
-menu (**Market Intelligence**).
+On first run this builds the release binary (several minutes) and then
+launches it; afterwards it starts immediately. The Tauri shell's own
+`BackendSupervisor` starts and supervises the Python backend, so nothing else
+needs to be running.
+
+Building needs the MSVC C++ build tools, because Tauri compiles a native
+binary. The script checks for them first and prints exactly what to install
+if they are missing.
+
+Other ways in and out, once TARS is running:
+
+```
+tars-companion.exe --market                 # open (or focus) Market Intelligence
+tars-companion.exe --quit                   # cooperative stop, backend included
+scripts\start-market-desktop.cmd -Dev       # Vite dev server + debug binary
+scripts\start-market-desktop.cmd -Rebuild   # force a fresh release build
+```
+
+The window is also in the tray menu as **Market Intelligence**. A second
+launch never starts a second copy: the single-instance plugin routes it to the
+running app.
+
+An installer is produced alongside the binary at
+`apps/web/src-tauri/target/release/bundle/nsis/TARS_1.0.0_x64-setup.exe`.
+
+**Window behaviour.** An ordinary resizable desktop window with native
+decorations and a taskbar entry, minimum 1024x680. F11 toggles fullscreen.
+Closing it closes only it — the companion and the backend keep running — and
+it reopens from the tray or `--market`.
 
 **Browser (development and verification).** Same dashboard, same backend,
 served by Vite:
@@ -140,12 +165,25 @@ D1 bars are UTC-midnight bins, not the 17:00 New York convention described in
 ```
 python tools/verify_market_xray.py --api http://127.0.0.1:8000 \
                                    --web http://127.0.0.1:5173
+python tools/verify_market_desktop.py            # the native desktop app
+python tools/verify_market_desktop.py --quit-after
 cd apps\backend && python -m pytest tests/test_market_xray.py -q
 ```
 
-The first drives the real dashboard in Chromium — including reading canvas
-pixels to confirm the X-Ray actually paints green and red curves — and writes
-screenshots to `artifacts/market-xray/`.
+`verify_market_xray.py` drives the dashboard in Chromium — including reading
+canvas pixels to confirm the X-Ray actually paints green and red curves — and
+writes screenshots to `artifacts/market-xray/`.
+
+`verify_market_desktop.py` targets the *native* application, not a browser. It
+finds the Market window inside `tars-companion.exe`, captures it with
+`PrintWindow`, drives fullscreen with a real F11 keystroke, resizes, closes and
+reopens it, and checks that exactly one supervised backend runs as a child of
+the shell. Evidence lands in `artifacts/market-desktop/`.
+
+Not automated: clicking the tray icon itself. Windows 11's tray overflow is an
+XAML island that resists UI Automation — a pre-existing gap in this repo
+(ADR-022). The tray item's handler calls the same `open_market_impl` as the
+verified `--market` and startup paths.
 
 ## Storage
 

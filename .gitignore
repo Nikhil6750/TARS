@@ -68,3 +68,7 @@ coverage/
 # Market X-Ray local state + verification output (data, not source)
 apps/backend/storage/market_xray.db*
 artifacts/market-xray/
+
+# Desktop verification evidence (screenshots, not source)
+artifacts/market-desktop/
+@AutomationLog.txt

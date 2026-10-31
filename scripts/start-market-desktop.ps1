@@ -15,8 +15,12 @@
 
     Trading execution is disabled. No API key is required.
 
-.PARAMETER Release
-    Build an optimised release binary instead of the faster debug build.
+.PARAMETER Dev
+    Run through `tauri dev` (Vite dev server + debug binary) instead of the
+    built application. For frontend iteration, not for normal use.
+
+.PARAMETER Rebuild
+    Force a fresh release build even if a binary already exists.
 
 .PARAMETER SkipIngest
     Do not build the candle store even if it is missing.
@@ -26,8 +30,12 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$Release,
-    [switch]$SkipIngest
+    [switch]$Dev,
+    [switch]$Rebuild,
+    [switch]$SkipIngest,
+    # The port the Tauri shell's BackendSupervisor uses. Changing it here does
+    # not move the backend -- it only changes where this script looks.
+    [int]$BackendPort = 8000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,7 +87,7 @@ if (-not $msvcLink) {
     Write-Host '  Rust and Node are present, but the C++ toolchain is not.'
     Write-Host ''
     Write-Host '  Install ONE of these, then re-run this script:' -ForegroundColor Yellow
-    Write-Host '    * Visual Studio Build Tools 2022, selecting the'
+    Write-Host '    * Visual Studio Build Tools, selecting the'
     Write-Host '      "Desktop development with C++" workload:'
     Write-Host '      https://visualstudio.microsoft.com/visual-cpp-build-tools/'
     Write-Host '    * or, via winget:'
@@ -123,20 +131,79 @@ if (-not (Test-Path (Join-Path $webDir 'node_modules'))) {
 }
 
 # ---- 4. launch the desktop app --------------------------------------------
-Write-Step 'Building and launching the desktop application'
-Write-Host '   The first build compiles the Rust shell and can take several minutes.' -ForegroundColor DarkGray
-
 # Tells the shell to open the Market Intelligence window at startup rather
 # than waiting for the tray menu.
 $env:TARS_OPEN_MARKET = '1'
+$healthUrl = "http://127.0.0.1:$BackendPort/api/v1/market/health"
+$exe = Join-Path $webDir 'src-tauri\target\release\tars-companion.exe'
 
-Push-Location $webDir
-try {
-    $tauriArgs = @('run', 'tauri', 'dev')
-    if ($Release) { $tauriArgs += @('--', '--release') }
-    & npm @tauriArgs
-    if ($LASTEXITCODE -ne 0) { throw "The desktop application exited with code $LASTEXITCODE." }
-} finally {
-    Pop-Location
-    Remove-Item Env:\TARS_OPEN_MARKET -ErrorAction SilentlyContinue
+if ($Dev) {
+    # Dev mode serves the UI from Vite. Note that tauri.conf.json points the
+    # webview at a fixed port: if Vite finds it busy it silently moves to the
+    # next one, and the app then loads whatever is still sitting on the
+    # original port -- possibly a stale server from an earlier run. Stop any
+    # leftover `vite` before using this.
+    Write-Step 'Starting in DEV mode (Vite dev server + debug binary)'
+    Push-Location $webDir
+    try {
+        & npm run tauri dev
+        if ($LASTEXITCODE -ne 0) { throw "The desktop application exited with code $LASTEXITCODE." }
+    } finally {
+        Pop-Location
+        Remove-Item Env:\TARS_OPEN_MARKET -ErrorAction SilentlyContinue
+    }
+    return
 }
+
+if ($Rebuild -or -not (Test-Path $exe)) {
+    Write-Step 'Building the desktop application (release)'
+    Write-Host '   The first build compiles the Rust shell and takes several minutes.' -ForegroundColor DarkGray
+    Push-Location $webDir
+    try {
+        & npm run tauri build
+        if ($LASTEXITCODE -ne 0) { throw "The desktop build failed with exit code $LASTEXITCODE." }
+    } finally {
+        Pop-Location
+    }
+}
+if (-not (Test-Path $exe)) { throw "Build reported success but $exe is missing." }
+Write-Ok "binary $exe"
+
+Write-Step 'Launching Market Intelligence'
+# A second launch of an already-running TARS is handled by the single-instance
+# plugin, which opens the Market window on the existing instance instead of
+# starting a duplicate.
+$running = Get-Process -Name 'tars-companion' -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Warn2 "TARS is already running (pid $($running.Id -join ', ')); opening its Market window."
+    & $exe --market
+} else {
+    Start-Process -FilePath $exe | Out-Null
+}
+
+$deadline = (Get-Date).AddMinutes(3)
+$health = $null
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 2
+    try {
+        $probe = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 5
+        if ($probe.ok) { $health = $probe; break }
+    } catch {
+        # Not up yet; keep waiting.
+    }
+}
+Remove-Item Env:\TARS_OPEN_MARKET -ErrorAction SilentlyContinue
+
+if ($health) {
+    Write-Ok "Backend healthy. Feed status: $($health.status.status) - $($health.status.detail)"
+} else {
+    Write-Warn2 'The app launched but its backend did not report healthy within 3 minutes.'
+}
+
+Write-Host ''
+Write-Host '  Market Intelligence is open as a desktop window.' -ForegroundColor Cyan
+Write-Host '  Reopen it any time from the tray menu, or with:' -ForegroundColor DarkGray
+Write-Host "    `"$exe`" --market" -ForegroundColor DarkGray
+Write-Host '  Quit cleanly (this also stops the Python backend) with:' -ForegroundColor DarkGray
+Write-Host "    `"$exe`" --quit" -ForegroundColor DarkGray
+Write-Host '  Trading execution is DISABLED.' -ForegroundColor DarkGray

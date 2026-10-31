@@ -1671,7 +1671,29 @@ pub fn run() {
         // Must be the first plugin registered (per tauri-plugin-single-instance docs): a second
         // launch hands its args/cwd to this callback on the ALREADY-RUNNING instance and then exits
         // immediately on its own, instead of spawning a second process/window/tray icon.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A second launch focuses the running instance rather than
+            // starting a duplicate. `--market` additionally brings up the
+            // Market Intelligence window, so `TARS.exe --market` is a
+            // reliable way to (re)open it from a shortcut or a script
+            // without going through the tray.
+            if args.iter().any(|a| a == "--market") {
+                if let Err(err) = open_market_impl(app) {
+                    eprintln!("[TARS][market] {err}");
+                }
+                return;
+            }
+            // `TARS.exe --quit` performs the same cooperative shutdown as the
+            // tray's Quit item: the backend is asked to exit first, so no
+            // orphan Python process is left holding the port. Exposed because
+            // hard-killing the shell cannot do this, and a scriptable clean
+            // stop is what makes shutdown verifiable.
+            if args.iter().any(|a| a == "--quit") {
+                let sup = app.state::<Arc<BackendSupervisor>>().inner().clone();
+                sup.stop(app);
+                app.exit(0);
+                return;
+            }
             let _ = summon_smart(app);
         }))
         .plugin(tauri_plugin_notification::init())
@@ -1739,6 +1761,16 @@ pub fn run() {
         .on_window_event(|window, event| {
             // M2A/M2B Background persistence (Close-to-tray)
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // The Market Intelligence workspace is an ordinary desktop
+                // window: closing it closes it. Close-to-tray exists so the
+                // *companion* survives being dismissed, and applying it here
+                // would both leave an invisible market window around and
+                // collapse the companion into its orb as a side effect of
+                // closing an unrelated window. Reopen from the tray or with
+                // `TARS.exe --market`.
+                if window.label() == MARKET_WINDOW {
+                    return;
+                }
                 api.prevent_close();
                 if !ORB_MODE.load(Ordering::SeqCst) {
                     // Closing the workspace returns to the orb; TARS keeps running.

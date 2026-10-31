@@ -59,6 +59,7 @@ export const MarketXRayApp: React.FC = () => {
   const [events, setEvents] = useState<EventsPayload | null>(null);
 
   const [fatal, setFatal] = useState<Fatal | null>(null);
+  const [retrying, setRetrying] = useState(false);
   const [busy, setBusy] = useState(true);
   const [wsLive, setWsLive] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -113,6 +114,49 @@ export const MarketXRayApp: React.FC = () => {
   useEffect(() => {
     savePreferences({ timeframe, symbol, strengthWindow, showInvalidated });
   }, [timeframe, symbol, strengthWindow, showInvalidated]);
+
+  // Retry automatically while the backend is unreachable.
+  //
+  // This matters most on a cold desktop start: the Tauri shell opens this
+  // window and starts the Python backend at the same time, so the first
+  // fetch regularly lands before the backend is accepting connections.
+  // Without this the window would sit on a dead-end error panel until
+  // someone pressed retry, even though the backend came up a second later.
+  useEffect(() => {
+    if (!fatal) {
+      setRetrying(false);
+      return;
+    }
+    let cancelled = false;
+    let attempt = 0;
+    let timer = 0;
+
+    const tick = () => {
+      if (cancelled) return;
+      attempt += 1;
+      setRetrying(true);
+      void api
+        .dashboard(timeframe, symbol ?? undefined, strengthWindow)
+        .then((data) => {
+          if (cancelled) return;
+          applyDashboard(data);
+          setFatal(null);
+          setRetrying(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          // Back off to 8s so a genuinely absent backend is not hammered,
+          // while a backend that is merely still starting is picked up fast.
+          timer = window.setTimeout(tick, Math.min(1000 * 2 ** (attempt - 1), 8000));
+        });
+    };
+
+    timer = window.setTimeout(tick, 1200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [fatal, timeframe, symbol, strengthWindow, applyDashboard]);
 
   /** Refetch only the per-instrument panels. */
   const loadInstrument = useCallback(async (sym: string, tf: string) => {
@@ -288,13 +332,25 @@ export const MarketXRayApp: React.FC = () => {
               </>
             )}
             <br />
+            <span
+              style={{
+                display: 'block',
+                marginTop: 10,
+                color: 'var(--mx-text-faint)',
+                fontSize: 11
+              }}
+            >
+              {retrying
+                ? 'Retrying — if TARS has just started, its backend is probably still coming up.'
+                : 'Will keep retrying automatically.'}
+            </span>
             <button
               type="button"
               className="mx-btn"
               style={{ marginTop: 14 }}
               onClick={() => void loadAll(timeframe, symbol, strengthWindow)}
             >
-              retry
+              retry now
             </button>
           </div>
         </div>

@@ -7,6 +7,15 @@ without recalculating anything.
 The service is created lazily on first use and cached on ``app.state`` so a
 missing candle store degrades to a truthful 503 describing how to build it,
 rather than preventing the whole backend from starting.
+
+**Why these handlers are `def` and not `async def`.** Every one of them does
+synchronous, CPU-bound work: DuckDB scans, ATR passes, order-block detection
+across the universe. On the event loop that would block *every* other request
+for the duration -- including the desktop shell's backend health poll, which
+then concludes the backend has died and restarts it. Declaring them `def`
+makes Starlette run each in its threadpool, so the loop stays responsive. The
+WebSocket handler must stay `async`, so it offloads the same work with
+``asyncio.to_thread``.
 """
 from __future__ import annotations
 
@@ -24,7 +33,9 @@ logger = logging.getLogger("tars.market.api")
 router = APIRouter(prefix="/api/v1/market", tags=["market-xray"])
 
 # How often a connected dashboard is pushed a fresh status/x-ray frame.
-PUSH_INTERVAL_SECONDS = 5.0
+# Each frame costs real CPU (see `_build_frame`), so this is deliberately
+# unhurried: the underlying data is recorded history, not a ticking feed.
+PUSH_INTERVAL_SECONDS = 10.0
 
 
 def _service(request: Request) -> MarketXRayService:
@@ -70,7 +81,7 @@ def _symbol(service: MarketXRayService, value: str) -> str:
 
 
 @router.get("/health")
-async def health(request: Request) -> dict:
+def health(request: Request) -> dict:
     """Feed health and store coverage. Reports the truth about staleness."""
     service = _service(request)
     first, last = service.bounds
@@ -95,7 +106,7 @@ async def health(request: Request) -> dict:
 
 
 @router.get("/instruments")
-async def instruments(request: Request) -> dict:
+def instruments(request: Request) -> dict:
     service = _service(request)
     return {
         "instruments": service.instruments(),
@@ -111,7 +122,7 @@ async def instruments(request: Request) -> dict:
 
 
 @router.get("/dashboard")
-async def dashboard(
+def dashboard(
     request: Request,
     timeframe: str = Query(universe.DEFAULT_TIMEFRAME),
     symbol: str | None = Query(None),
@@ -124,13 +135,13 @@ async def dashboard(
 
 
 @router.get("/xray")
-async def xray(request: Request, timeframe: str = Query(universe.DEFAULT_TIMEFRAME)) -> dict:
+def xray(request: Request, timeframe: str = Query(universe.DEFAULT_TIMEFRAME)) -> dict:
     service = _service(request)
     return service.xray(timeframe=_timeframe(timeframe))
 
 
 @router.get("/strength")
-async def strength(request: Request, window: str | None = Query(None)) -> dict:
+def strength(request: Request, window: str | None = Query(None)) -> dict:
     service = _service(request)
     try:
         return service.strength(window=window)
@@ -139,7 +150,7 @@ async def strength(request: Request, window: str | None = Query(None)) -> dict:
 
 
 @router.get("/strength/{currency}/history")
-async def strength_history(
+def strength_history(
     request: Request, currency: str, window: str = Query("1D"), limit: int = Query(200, le=1000)
 ) -> dict:
     service = _service(request)
@@ -154,7 +165,7 @@ async def strength_history(
 
 
 @router.get("/leaders")
-async def leaders(
+def leaders(
     request: Request,
     timeframe: str = Query(universe.DEFAULT_TIMEFRAME),
     limit: int = Query(6, ge=1, le=20),
@@ -164,7 +175,7 @@ async def leaders(
 
 
 @router.get("/candles/{symbol}")
-async def candles(
+def candles(
     request: Request,
     symbol: str,
     timeframe: str = Query(universe.DEFAULT_TIMEFRAME),
@@ -177,7 +188,7 @@ async def candles(
 
 
 @router.get("/order-blocks/{symbol}")
-async def order_blocks(
+def order_blocks(
     request: Request, symbol: str, timeframe: str = Query(universe.DEFAULT_TIMEFRAME)
 ) -> dict:
     service = _service(request)
@@ -187,7 +198,7 @@ async def order_blocks(
 
 
 @router.get("/events")
-async def events(
+def events(
     request: Request, symbol: str | None = Query(None), limit: int = Query(100, ge=1, le=1000)
 ) -> dict:
     service = _service(request)
@@ -195,13 +206,13 @@ async def events(
 
 
 @router.get("/config")
-async def config(request: Request) -> dict:
+def config(request: Request) -> dict:
     return _service(request).config.as_dict()
 
 
 # ---- replay control -----------------------------------------------------
 @router.post("/replay/seek")
-async def replay_seek(request: Request, to: str = Query(..., description="ISO-8601 UTC")) -> dict:
+def replay_seek(request: Request, to: str = Query(..., description="ISO-8601 UTC")) -> dict:
     """Point the dashboard at a specific recorded moment."""
     service = _service(request)
     try:
@@ -215,7 +226,7 @@ async def replay_seek(request: Request, to: str = Query(..., description="ISO-86
 
 
 @router.post("/replay/step")
-async def replay_step(
+def replay_step(
     request: Request,
     timeframe: str = Query(universe.DEFAULT_TIMEFRAME),
     bars: int = Query(1, ge=-5000, le=5000),
@@ -227,10 +238,25 @@ async def replay_step(
 
 
 @router.post("/replay/reset")
-async def replay_reset(request: Request) -> dict:
+def replay_reset(request: Request) -> dict:
     service = _service(request)
     cursor = service.reset_cursor()
     return {"cursor": cursor.isoformat(), "status": service.market_status().as_dict()}
+
+
+def _build_frame(service: MarketXRayService, timeframe: str) -> dict:
+    """One WebSocket frame. Synchronous by design -- callers run it in a
+    thread so the event loop stays free."""
+    return {
+        "type": "market.frame",
+        "sent_at": datetime.now(UTC).isoformat(),
+        "cursor": service.cursor.isoformat(),
+        "timeframe": timeframe,
+        "status": service.market_status().as_dict(),
+        "xray": service.xray(timeframe=timeframe),
+        "strength": service.strength(),
+        "leaders": service.leaders(timeframe=timeframe),
+    }
 
 
 # ---- websocket ----------------------------------------------------------
@@ -245,7 +271,7 @@ async def market_ws(websocket: WebSocket) -> None:
     """
     await websocket.accept()
     try:
-        service = MarketXRayService()
+        service = await asyncio.to_thread(MarketXRayService)
     except Exception as exc:  # noqa: BLE001
         await websocket.send_json({
             "type": "market.error",
@@ -277,9 +303,11 @@ async def market_ws(websocket: WebSocket) -> None:
                     if requested in universe.TIMEFRAMES:
                         timeframe = requested
                 elif kind == "replay.step":
-                    service.step_cursor(timeframe=timeframe, bars=int(msg.get("bars", 1)))
+                    await asyncio.to_thread(
+                        service.step_cursor, timeframe=timeframe, bars=int(msg.get("bars", 1))
+                    )
                 elif kind == "replay.reset":
-                    service.reset_cursor()
+                    await asyncio.to_thread(service.reset_cursor)
         except (WebSocketDisconnect, RuntimeError):
             stop.set()
         except Exception as exc:  # noqa: BLE001
@@ -290,16 +318,10 @@ async def market_ws(websocket: WebSocket) -> None:
     try:
         while not stop.is_set():
             try:
-                frame = {
-                    "type": "market.frame",
-                    "sent_at": datetime.now(UTC).isoformat(),
-                    "cursor": service.cursor.isoformat(),
-                    "timeframe": timeframe,
-                    "status": service.market_status().as_dict(),
-                    "xray": service.xray(timeframe=timeframe),
-                    "strength": service.strength(),
-                    "leaders": service.leaders(timeframe=timeframe),
-                }
+                # Built in a worker thread: this is seconds of DuckDB and
+                # order-block work, and on the event loop it would stall every
+                # other request between frames.
+                frame = await asyncio.to_thread(_build_frame, service, timeframe)
             except Exception as exc:  # noqa: BLE001
                 frame = {
                     "type": "market.error",
