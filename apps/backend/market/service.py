@@ -222,6 +222,7 @@ class MarketXRayService:
                 "asset_class": meta.asset_class,
                 "base": meta.base,
                 "quote": meta.quote,
+                "backing": meta.backing,
                 "price_precision": meta.price_precision,
                 "pip_size": meta.pip_size,
                 "bars_m5": cov.bars,
