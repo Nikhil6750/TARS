@@ -15,9 +15,13 @@ for that).
 
 **Branch**: `feature/market-xray-dashboard`
 **Base SHA**: `db49310` (Phase 3E, `feature/tars-desktop-demo-20260920`)
-**Final SHA**: `f796e1d` (engine + dashboard: `26de505`; docs: `f87d62a`;
-desktop integration and the three defects below: `f796e1d`; this SHA
-itself is recorded by the small docs commit that follows it)
+**Final SHA**: engine + dashboard `26de505`; docs `f87d62a`; desktop
+integration and the three defects below `f796e1d`; SHA record `b34cacf`;
+release-readiness review and pending-verification records: the commit that
+adds the section below.
+
+**Pushed**: to `origin/feature/market-xray-dashboard`. Not merged into
+`main` or `integration/v1`.
 
 Branched from `db49310` rather than `integration/v1` because the feature
 reuses Phase 3E backend infrastructure that only exists on that line. No
@@ -202,6 +206,137 @@ Worth doing alongside it: the per-WebSocket-frame cost is real
 connected client every 10s). A short-lived cache keyed on the cursor would
 make that near-free, since the underlying data only changes when the
 cursor moves.
+
+### Release-readiness review (before the push)
+
+The complete `db49310..HEAD` diff was read before pushing: 38 files,
++7911/-5.
+
+**Secrets and unintended files: clean.** No API key, token, password or
+private key appears in any added line; the one `authoriz` hit is the
+documented MT5 error string `-6 Authorization failed`. No high-entropy
+literals, no email addresses, no `.env`. Nothing generated is tracked --
+the SQLite state file, `artifacts/market-xray/` and
+`artifacts/market-desktop/` are all confirmed ignored via
+`git check-ignore`.
+
+One stray untracked file predates this work and was deliberately left
+alone: `artifacts/pocket-trial.wav`, from an earlier voice session. It is
+not ignored, so a future `git add -A` would commit what may be a recording
+of the user's voice. Flagged rather than silently ignored, because an
+ignore rule could equally hide a sample someone intends to commit.
+
+#### BackendSupervisor ownership and shutdown -- reviewed
+
+Correct as it stands:
+
+* `stop()` is **ownership-agnostic**. It POSTs `/api/v1/runtime/shutdown`
+  regardless of how the backend came to exist, and `child.take()` is simply
+  a no-op when the backend was adopted. That is what makes the new
+  adopt-when-healthy branch safe: adopting does **not** create a backend
+  that Quit can no longer stop. Confirmed empirically -- `--quit` leaves no
+  listener on :8000.
+* `intentional_stop` is set *before* the shutdown POST, so the supervising
+  loop cannot mistake a commanded stop for a crash and auto-restart after
+  it.
+* The adopt branch clears the stale `Child` only after `try_wait()` has
+  already reaped it, so there is no zombie and no handle leak, and it
+  resets `consecutive_failures` so a later genuine crash starts from a
+  clean count.
+* `--quit` is byte-identical to the tray's Quit handler
+  (`sup.stop(app); app.exit(0);`), so the scriptable path and the human
+  path cannot diverge.
+* The market window's close handler returns early only within
+  `CloseRequested`; the closure handles no other event, so nothing is
+  skipped for that window.
+
+Accepted risks, recorded rather than fixed -- all of them in
+`apps/web/src-tauri/`, which is **Antigravity's lane**:
+
+1. **Adoption has no identity or version check.** `health_check_once()`
+   only requires HTTP 200 from `:8000/api/v1/health`, so the shell will
+   adopt *any* backend answering there -- including an orphan left by a
+   previous, older build. After an upgrade the new UI would then run
+   silently against old backend code. This is the strongest reason
+   clean-install verification matters, and why that check is recorded as
+   pending rather than assumed.
+2. **A hard kill orphans the backend.** The child is not in a Windows Job
+   Object with `KILL_ON_JOB_CLOSE`, so `TerminateProcess`, a crash or power
+   loss leaves Python holding the port. It self-heals on the next launch
+   via adoption -- which runs straight into risk 1. `--quit` is the
+   cooperative path and is verified.
+3. **Port 8000 is a compile-time constant** in `supervisor.rs`, while
+   `chart_watcher.rs` honours `TARS_BACKEND_URL`. The inconsistency
+   predates this work. Consequence introduced here: the desktop launcher's
+   `-BackendPort` can only move where the *script* polls, never where the
+   shell supervises. The parameter's own comment says so, but it is a knob
+   that cannot do what its name suggests.
+4. **Adoption can now claim a foreign backend mid-session** -- one started
+   by `start-market-xray.cmd`, say -- and will shut it down on Quit.
+   Consistent with the module's documented adopt-or-spawn contract, but
+   previously reachable only at startup.
+5. `stop()` leaves health reported as `Degraded`; there is no `Stopped`
+   variant. Cosmetic, pre-existing.
+
+### Verification still pending -- do not describe these as done
+
+1. **Manual tray-icon click** (same item as "Known limitations" 1 above).
+   Needs a human to click the tray item once and confirm the window opens.
+2. **Clean-install verification.** Every check ran against this
+   development tree, with its toolchain, `node_modules`, a built candle
+   store and a warm data root. `TARS_1.0.0_x64-setup.exe` was produced but
+   never installed on a machine lacking those. Needs: install on a clean
+   Windows profile, open Market Intelligence from the installed app,
+   confirm the backend starts and the dashboard paints. Risk 1 above makes
+   this a real check, not a formality.
+
+### Proposed next phase -- live connectivity, coverage, feed integrity
+
+Not started. Recorded here for a coordinator to assign via `TASKS.md`,
+per the Git workflow rule. Scope bounds carried forward from the user:
+**no new trading indicators, trading execution stays disabled, existing
+desktop behaviour and regression coverage preserved.**
+
+**A. Reliable live market connectivity.** Wire `monitors/mt5_provider.py`
+into `MarketXRayService` behind the existing provider seam, so
+`_feed_last_tick` is fed by a real authenticated session. This needs a
+logged-in MT5 account, which does not exist on this machine yet (`-6
+Authorization failed`) -- clearing that is a credential/environment task,
+not a code one, and it is the first blocker. The adapter must leave the
+no-feed path intact so the app still runs with nothing connected, and must
+not become a hard dependency: the core runtime stays free of any paid API.
+
+**B. Strict LIVE / STALE / REPLAY separation.** The invariant to preserve
+is the one already built: only a real feed can produce LIVE, and stored
+candles never reach that code path. Work: exercise LIVE and STALE against
+a real session during market hours (today both are proven only by unit
+test); add a test that a feed whose last tick ages past the freshness
+window transitions LIVE -> STALE without intervention; assert at the
+service boundary that an active replay cursor can never emit LIVE even
+when a live provider is attached. Carrying a provider-identity field on
+every observation, so a payload states which source produced it, is the
+cleanest way to make this checkable rather than merely intended.
+
+**C. Coverage from 18 toward 26.** The ceiling is source data, not code:
+nine pairs (USDCHF, NZDJPY, NZDCAD, NZDCHF, EURNZD, GBPNZD, AUDNZD,
+CADJPY, CADCHF) have no CSVs under `C:\Trade Data`. Either obtain history
+for them, or derive the missing legs from a live feed going forward and
+accept a short history. Until then NZD rests on one pair and CHF on two,
+and both must keep their `thin_coverage` flag -- closing the gap silently
+would be worse than the gap itself. New instruments must not weaken the
+leave-one-pair-out diagnostic that makes thin coverage visible.
+
+**D. Prerequisite hygiene this review surfaced.** Two items in
+`apps/backend/` (Claude's own lane) that A-C will touch anyway:
+`market/ingest.py` hardcodes `CSV_ROOT = C:/Trade Data` and
+`DEFAULT_STORE_ROOT = D:/TARS_DATA/...` instead of reusing
+`research/config.py`'s `resolve_data_root()`, which already implements this
+repo's `TARS_DATA_ROOT` convention -- on this machine the resolver returns
+the same path, so the switch is behaviour-preserving here while making the
+module portable. `scripts/start-market-desktop.ps1` hardcodes the same
+store root. Risks 1-3 above are the matching items in Antigravity's lane;
+risk 1 (an adoption identity check) is worth raising with that owner
+before any packaged release.
 
 ## Previous handoff — Alexa-speed hot-state, Phases E-H: deep verification, provider health, benchmark harness (2026-08-21)
 
