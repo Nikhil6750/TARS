@@ -266,6 +266,30 @@ def ingest_all(
             logger.warning("ingest failed for %s: %s", symbol, exc)
     con.close()
 
+    # A targeted import must not silently remove every untouched symbol.
+    # Link immutable files from the previous published generation into the
+    # new generation; fall back to a copy on filesystems without hardlinks.
+    if symbols is not None:
+        old_manifest = store_root / "manifest.json"
+        if old_manifest.exists():
+            previous = json.loads(old_manifest.read_text(encoding="utf-8"))
+            old_root = store_root / previous.get("generation", "")
+            for prior in previous.get("datasets", []):
+                symbol = prior.get("symbol")
+                tf = prior.get("timeframe")
+                if symbol in targets or not symbol or not tf:
+                    continue
+                source = old_root / symbol / (tf + ".parquet")
+                if not source.is_file():
+                    continue
+                destination = generation_root / symbol / (tf + ".parquet")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.link(source, destination)
+                except OSError:
+                    shutil.copy2(source, destination)
+                rows.append({**prior, "path": str(destination)})
+
     if not rows:
         shutil.rmtree(generation_root)
         raise ValueError("import produced no usable candle datasets; active data unchanged")
