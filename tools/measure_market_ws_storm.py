@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import json
 import os
 import sys
@@ -263,15 +264,20 @@ async def soak(ctx: Context) -> dict[str, Any]:
         errors += await _storm(ctx.ws, ctx.args.clients, ctx.args.abort_delay, every)
         during = ctx.resources()
         settle = await ctx.idle()
+        before_collection = ctx.process.memory_info().rss / 1_048_576
+        # Each storm's sockets are garbage until a collection happens to run,
+        # in this process's clients as well as its server. Collecting before
+        # every sample removes that sawtooth, so a leak would show as a slope.
+        gc.collect()
         samples.append({"storm": storm, "settle_seconds": settle, "during": during,
+                        "rss_before_collection_mb": round(before_collection, 1),
                         **ctx.resources()})
+    half = len(samples) // 2
     return {
         "client_errors": errors,
         "samples": samples,
         "rss_growth_mb": round(samples[-1]["rss_mb"] - samples[0]["rss_mb"], 1),
-        "rss_growth_second_half_mb": round(
-            samples[-1]["rss_mb"] - samples[len(samples) // 2]["rss_mb"], 1
-        ),
+        "rss_growth_second_half_mb": round(samples[-1]["rss_mb"] - samples[half]["rss_mb"], 1),
         "thread_growth": samples[-1]["threads"] - samples[0]["threads"],
     }
 
