@@ -285,3 +285,23 @@ def test_frame_panels_all_observe_one_live_revision(tmp_path):
             worker.join(timeout=4)
         store.close()
     assert committed.is_set()
+
+
+def test_targeted_import_retains_unmodified_symbols(tmp_path, monkeypatch):
+    root = tmp_path / "store"
+
+    def make_one(_con, symbol, *, store_root, start, csv_root):
+        folder = store_root / symbol
+        folder.mkdir(parents=True)
+        path = folder / "M5.parquet"
+        path.write_bytes(symbol.encode())
+        return [ingest.IngestResult(symbol, "M5", 1, None, None, None, str(path))]
+
+    monkeypatch.setattr(ingest, "ingest_symbol", make_one)
+    initial = ingest.ingest_all(["EURUSD"], store_root=root)
+    updated = ingest.ingest_all(["GBPUSD"], store_root=root)
+    files = root / updated["generation"]
+    assert (files / "EURUSD" / "M5.parquet").read_bytes() == b"EURUSD"
+    assert (files / "GBPUSD" / "M5.parquet").read_bytes() == b"GBPUSD"
+    assert initial["dataset_revision"] != updated["dataset_revision"]
+    assert set(updated["symbols_ok"]) == {"EURUSD", "GBPUSD"}
