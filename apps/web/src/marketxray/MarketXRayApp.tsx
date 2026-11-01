@@ -17,6 +17,7 @@ import { CurrencyStrengthPanel, EventHistory, Panel, Segmented, ZoneTable, Leade
 import { StatusBanner, TopNav, type Section } from './components/TopNav';
 import { backendStatus, isDesktop, loadPreferences, savePreferences, toggleFullscreen } from './desktop';
 import { FirstRun } from './components/FirstRun';
+import { REPLAY_WINDOW, ReplayControls } from './components/ReplayControls';
 import { XRayCanvas } from './components/XRayCanvas';
 import type {
   ChartPayload,
@@ -34,6 +35,24 @@ import type {
 
 const TIMEFRAMES = ['M5', 'M15', 'H1', 'H4', 'D1'];
 const STRENGTH_WINDOWS = ['1H', '4H', '1D'];
+export const PLAY_STEP_MS = 1500;
+
+// Preferences can outlive a change of candle store. Let the backend choose an
+// available instrument when that saved symbol no longer exists in this store.
+async function dashboardForStore(tf: string, sym: string | null, win: string): Promise<Dashboard> {
+  try {
+    return await api.dashboard(tf, sym ?? undefined, win);
+  } catch (error) {
+    if (!sym || !(error instanceof ApiError) || error.status !== 404) throw error;
+    return api.dashboard(tf, undefined, win);
+  }
+}
+
+const isInReplayWindow = (moment: string | null): boolean => {
+  if (!moment) return false;
+  const at = Date.parse(moment);
+  return at >= Date.parse(REPLAY_WINDOW.start) && at < Date.parse(REPLAY_WINDOW.end);
+};
 
 interface Fatal {
   message: string;
@@ -53,6 +72,7 @@ export const MarketXRayApp: React.FC = () => {
 
   const [status, setStatus] = useState<MarketStatus | null>(null);
   const [cursor, setCursor] = useState<string | null>(null);
+  const [coverage, setCoverage] = useState<{ first: string | null; last: string | null } | null>(null);
   const [instruments, setInstruments] = useState<Instrument[]>([]);
   const [xray, setXray] = useState<XRaySnapshot | null>(null);
   const [strength, setStrength] = useState<StrengthSnapshot | null>(null);
@@ -76,6 +96,7 @@ export const MarketXRayApp: React.FC = () => {
   const applyDashboard = useCallback((data: Dashboard) => {
     setStatus(data.status);
     setCursor(data.cursor.as_of);
+    setCoverage({ first: data.cursor.first_bar, last: data.cursor.last_bar });
     setInstruments(data.instruments);
     setXray(data.xray);
     setStrength(data.strength);
@@ -85,7 +106,11 @@ export const MarketXRayApp: React.FC = () => {
     setEvents(data.events);
     setProvenance(data.provenance ?? null);
     setReplayPinned(data.replay_pinned ?? false);
-    setSymbol((current) => current ?? data.selected_symbol);
+    setSymbol((current) =>
+      data.instruments.some((instrument) => instrument.symbol === current)
+        ? current
+        : data.selected_symbol
+    );
     setTimeframe(data.timeframe);
   }, []);
 
@@ -101,7 +126,7 @@ export const MarketXRayApp: React.FC = () => {
           setFatal(null);
           return;
         }
-        const data = await api.dashboard(tf, sym ?? undefined, win);
+        const data = await dashboardForStore(tf, sym, win);
         if (seq !== requestSeq.current) return;
         applyDashboard(data);
         setSetup(null);
@@ -163,7 +188,7 @@ export const MarketXRayApp: React.FC = () => {
           if (!state.ready) {
             setSetup(state);
           } else {
-            applyDashboard(await api.dashboard(timeframe, symbol ?? undefined, strengthWindow));
+            applyDashboard(await dashboardForStore(timeframe, symbol, strengthWindow));
           }
           if (cancelled) return;
           setFatal(null);
@@ -251,21 +276,100 @@ export const MarketXRayApp: React.FC = () => {
 
   // ---- replay controls ----
   const [stepping, setStepping] = useState(false);
-  const replay = useCallback(
-    async (action: 'back' | 'forward' | 'reset', bars = 1) => {
+  const [playing, setPlaying] = useState(false);
+
+  /** Move the backend's cursor, then redraw everything at the new moment. */
+  const moveCursor = useCallback(
+    async (move: () => Promise<unknown>, tf: string, sym: string | null) => {
       setStepping(true);
       try {
-        if (action === 'reset') await api.reset();
-        else await api.step(timeframe, action === 'forward' ? bars : -bars);
-        await loadAll(timeframe, symbol, strengthWindow);
+        await move();
+        await loadAll(tf, sym, strengthWindow);
       } catch (error) {
+        setPlaying(false);
         setNotice(error instanceof ApiError ? error.message : 'Replay step failed.');
       } finally {
         setStepping(false);
       }
     },
-    [timeframe, symbol, strengthWindow, loadAll]
+    [strengthWindow, loadAll]
   );
+
+  const handleStep = useCallback(
+    (bars: number) => void moveCursor(() => api.step(timeframe, bars), timeframe, symbol),
+    [moveCursor, timeframe, symbol]
+  );
+
+  const handleLatest = useCallback(
+    () => void moveCursor(() => api.reset(), timeframe, symbol),
+    [moveCursor, timeframe, symbol]
+  );
+
+  const handleSeek = useCallback(
+    (iso: string) =>
+      void moveCursor(
+        async () => {
+          const moved = await api.seek(iso);
+          // The backend clamps to what the store covers, which is worth saying.
+          setNotice(
+            Date.parse(moved.cursor) === Date.parse(iso)
+              ? null
+              : `The store has no data at that moment, so the cursor moved to ${moved.cursor
+                  .slice(0, 16)
+                  .replace('T', ' ')} UTC.`
+          );
+        },
+        timeframe,
+        symbol
+      ),
+    [moveCursor, timeframe, symbol]
+  );
+
+  const handleOpenWindow = useCallback(() => {
+    setSymbol(REPLAY_WINDOW.symbol);
+    setTimeframe(REPLAY_WINDOW.timeframe);
+    void moveCursor(() => api.seek(REPLAY_WINDOW.start), REPLAY_WINDOW.timeframe, REPLAY_WINDOW.symbol);
+  }, [moveCursor]);
+
+  const cursorRef = useRef(cursor);
+  cursorRef.current = cursor;
+
+  // Play is the next-candle step on a timer. Each waits for the last to finish
+  // drawing, so a slow machine plays slower rather than queueing steps up.
+  useEffect(() => {
+    if (!playing) return;
+    let cancelled = false;
+    let timer = 0;
+    const tick = async () => {
+      const before = cursorRef.current;
+      try {
+        const moved = await api.step(timeframe, 1);
+        if (cancelled) return;
+        await loadAll(timeframe, symbol, strengthWindow);
+        if (cancelled) return;
+        const leftWindow = isInReplayWindow(before) && !isInReplayWindow(moved.cursor);
+        if (moved.cursor === before || leftWindow) {
+          setPlaying(false);
+          return;
+        }
+        timer = window.setTimeout(() => void tick(), PLAY_STEP_MS);
+      } catch (error) {
+        if (cancelled) return;
+        setPlaying(false);
+        setNotice(error instanceof ApiError ? error.message : 'Replay step failed.');
+      }
+    };
+    timer = window.setTimeout(() => void tick(), PLAY_STEP_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [playing, timeframe, symbol, strengthWindow, loadAll]);
+
+  const handleSection = useCallback((next: Section) => {
+    setSection(next);
+    document.getElementById(`mx-section-${next}`)?.scrollIntoView?.({ behavior: 'smooth' });
+  }, []);
 
   // ---- websocket: keeps status/x-ray/strength/leaders current ----
   useEffect(() => {
@@ -371,6 +475,13 @@ export const MarketXRayApp: React.FC = () => {
     [chart, symbol, precisionFor]
   );
 
+  const windowCovered = Boolean(
+    coverage?.first &&
+      coverage.last &&
+      Date.parse(coverage.first) <= Date.parse(REPLAY_WINDOW.start) &&
+      Date.parse(coverage.last) >= Date.parse(REPLAY_WINDOW.end)
+  );
+
   if (setup) {
     return (
       <div className="mx">
@@ -432,7 +543,7 @@ export const MarketXRayApp: React.FC = () => {
           provenance={provenance}
           replayPinned={replayPinned}
           section={section}
-          onSection={setSection}
+          onSection={handleSection}
           desktop={isDesktop()}
           fullscreen={fullscreen}
           onToggleFullscreen={handleFullscreen}
@@ -463,67 +574,29 @@ export const MarketXRayApp: React.FC = () => {
               windows={STRENGTH_WINDOWS}
               onWindow={handleStrengthWindow}
             />
-            <Panel title="Replay" meta={wsLive ? 'ws connected' : 'ws retrying'}>
-              <div className="mx-replay">
-                <button
-                  type="button"
-                  className="mx-btn"
-                  disabled={stepping}
-                  onClick={() => void replay('back', 12)}
-                >
-                  ⏴⏴ 12
-                </button>
-                <button
-                  type="button"
-                  className="mx-btn"
-                  disabled={stepping}
-                  onClick={() => void replay('back')}
-                >
-                  ⏴ 1
-                </button>
-                <button
-                  type="button"
-                  className="mx-btn"
-                  disabled={stepping}
-                  onClick={() => void replay('forward')}
-                >
-                  1 ⏵
-                </button>
-                <button
-                  type="button"
-                  className="mx-btn"
-                  disabled={stepping}
-                  onClick={() => void replay('forward', 12)}
-                >
-                  12 ⏵⏵
-                </button>
-                <button
-                  type="button"
-                  className="mx-btn"
-                  disabled={stepping}
-                  onClick={() => void replay('reset')}
-                >
-                  latest
-                </button>
-              </div>
-              <p style={{ marginTop: 9, fontSize: 10.5, color: 'var(--mx-text-faint)' }}>
-                Cursor{' '}
-                <span className="mx-num" style={{ color: 'var(--mx-text-dim)' }}>
-                  {cursor ? `${cursor.slice(0, 10)} ${cursor.slice(11, 16)}` : '—'}
-                </span>{' '}
-                UTC · steps move by whole {timeframe} bars.
-              </p>
-            </Panel>
+            <ReplayControls
+              cursor={cursor}
+              timeframe={timeframe}
+              wsLive={wsLive}
+              stepping={stepping}
+              playing={playing}
+              windowCovered={windowCovered}
+              onStep={handleStep}
+              onLatest={handleLatest}
+              onTogglePlay={() => setPlaying((value) => !value)}
+              onSeek={handleSeek}
+              onOpenWindow={handleOpenWindow}
+            />
           </div>
 
           {/* ---- centre: the X-Ray ---- */}
           <div className="mx-col">
-            <section className="mx-panel">
+            <section className="mx-panel mx-anchor" id="mx-section-xray">
               <header className="mx-panel-head">
                 <span className="mx-panel-title">Market X-Ray</span>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
                   <span className="mx-panel-meta">
-                    {xray ? `${xray.series.length} instruments` : '—'}
+                    {xray ? `${xray.series.length} instrument${xray.series.length === 1 ? '' : 's'}` : '—'}
                   </span>
                   <Segmented
                     options={TIMEFRAMES}
@@ -596,22 +669,26 @@ export const MarketXRayApp: React.FC = () => {
               </div>
             </section>
 
-            <ZoneTable
-              zones={blocks?.zones ?? []}
-              precision={selectedPrecision}
-              showInvalidated={showInvalidated}
-              onToggleInvalidated={() => setShowInvalidated((v) => !v)}
-            />
+            <div className="mx-anchor" id="mx-section-blocks">
+              <ZoneTable
+                zones={blocks?.zones ?? []}
+                precision={selectedPrecision}
+                showInvalidated={showInvalidated}
+                onToggleInvalidated={() => setShowInvalidated((v) => !v)}
+              />
+            </div>
 
-            <EventHistory
-              events={events?.events ?? []}
-              total={events?.total_stored ?? 0}
-              zonesStored={events?.zones_stored ?? 0}
-            />
+            <div className="mx-anchor" id="mx-section-journal">
+              <EventHistory
+                events={events?.events ?? []}
+                total={events?.total_stored ?? 0}
+                zonesStored={events?.zones_stored ?? 0}
+              />
+            </div>
           </div>
 
           {/* ---- right: leaders ---- */}
-          <div className="mx-col">
+          <div className="mx-col mx-anchor" id="mx-section-scanner">
             <LeaderBoard
               title="Bullish Leaders"
               cards={leaders?.bullish ?? []}
@@ -628,7 +705,10 @@ export const MarketXRayApp: React.FC = () => {
               precisionFor={precisionFor}
               meta={timeframe}
             />
-            <Panel title="Coverage" meta={`${instruments.length} instruments`}>
+            <Panel
+              title="Coverage"
+              meta={`${instruments.length} instrument${instruments.length === 1 ? '' : 's'}`}
+            >
               <div style={{ fontSize: 10.5, color: 'var(--mx-text-faint)', lineHeight: 1.65 }}>
                 <div>
                   Store{' '}
@@ -641,7 +721,17 @@ export const MarketXRayApp: React.FC = () => {
                   </span>
                 </div>
                 <div style={{ marginTop: 6 }}>
-                  17 FX pairs + XAUUSD are backed by recorded bid/ask data on this machine.
+                  {instruments.length === 1 ? (
+                    <>
+                      Only {instruments[0].symbol} is in this store. Cross-instrument rankings are
+                      unavailable.
+                    </>
+                  ) : (
+                    <>
+                      {instruments.filter((i) => i.asset_class === 'FX').length} FX pairs + XAUUSD
+                      are backed by recorded bid/ask data on this machine.
+                    </>
+                  )}
                 </div>
                 <div style={{ marginTop: 6 }}>
                   Trading execution <strong style={{ color: 'var(--mx-down)' }}>DISABLED</strong>.

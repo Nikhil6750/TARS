@@ -82,6 +82,7 @@ export interface XRaySnapshot {
   series: XRaySeries[];
   skipped: Record<string, string>;
   measures: string;
+  provenance?: Provenance;
 }
 
 export interface Contribution {

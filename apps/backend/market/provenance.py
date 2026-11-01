@@ -65,11 +65,14 @@ class Provenance:
         }
 
 
-def recorded(*, observed_at: datetime | None, detail: str = "") -> Provenance:
-    """Provenance for anything computed from the candle store."""
+def recorded(
+    *, observed_at: datetime | None, detail: str = "", provider: str = STORE_PROVIDER
+) -> Provenance:
+    """Provenance for anything computed from the candle store. `provider` names
+    the vendor when the import recorded one, and otherwise claims none."""
     return Provenance(
         source=DataSource.RECORDED_STORE,
-        provider=STORE_PROVIDER,
+        provider=provider,
         observed_at=observed_at,
         replay=True,
         detail=detail or "Computed from recorded candles on this machine. Not a live feed.",

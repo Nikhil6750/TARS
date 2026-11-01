@@ -23,13 +23,14 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { XRaySeries, XRaySnapshot } from '../types';
+import { sourceName } from './TopNav';
+import { PAD, RAIL_CONNECTOR, xrayLayout, xrayPeak, xrayY } from './xrayLabels';
 
-const PAD = { top: 20, right: 68, bottom: 24, left: 46 };
 const TRANSITION_MS = 600;
 const PARTICLE_PERIOD_MS = 5200;
-// z is clamped by the backend at 6; the axis keeps a little headroom so a
-// clamped curve does not sit flush against the frame.
-const MIN_AXIS = 2.4;
+// The tooltip is sized in CSS; these keep it inside the plot on every side.
+const TOOLTIP_WIDTH = 232;
+const TOOLTIP_HEIGHT = 150;
 
 interface Hover {
   symbol: string;
@@ -89,8 +90,31 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   // Screen-space geometry of the last painted frame, for hit testing.
   const geomRef = useRef<Map<string, Array<[number, number]>>>(new Map());
+  const labelHoverRef = useRef<string | null>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
 
   const series = useMemo<XRaySeries[]>(() => snapshot?.series ?? [], [snapshot]);
+  // Follows the real end values, not the eased frames between two snapshots.
+  const layout = useMemo(() => xrayLayout(series, size.width, size.height), [series, size]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const measure = () => {
+      const { clientWidth: width, clientHeight: height } = canvas;
+      setSize((current) =>
+        current.width === width && current.height === height ? current : { width, height }
+      );
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(canvas);
+    return () => {
+      window.removeEventListener('resize', measure);
+      observer?.disconnect();
+    };
+  }, []);
 
   // A new snapshot starts a transition from whatever was last painted.
   useEffect(() => {
@@ -120,7 +144,7 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, cssW, cssH);
 
-      const plotW = cssW - PAD.left - PAD.right;
+      const plotW = cssW - PAD.left - layout.padRight;
       const plotH = cssH - PAD.top - PAD.bottom;
       const midY = PAD.top + plotH / 2;
 
@@ -145,22 +169,18 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
       const eased = easeInOut(progress);
 
       // Shared symmetric axis so every curve is directly comparable.
-      let peak = MIN_AXIS;
-      series.forEach((s) => s.points.forEach((p) => {
-        peak = Math.max(peak, Math.abs(p.z));
-      }));
-      const scale = plotH / 2 / (peak * 1.08);
+      const peak = xrayPeak(series);
 
       const xAt = (i: number, len: number): number =>
         PAD.left + (len <= 1 ? plotW : (i / (len - 1)) * plotW);
-      const yAt = (z: number): number => midY - z * scale;
+      const yAt = (z: number): number => xrayY(z, cssH, peak);
 
       // --- grid + zero reference line ---
       ctx.lineWidth = 1;
       const steps = 4;
       for (let k = -steps; k <= steps; k += 1) {
         if (k === 0) continue;
-        const z = (peak * 1.08 * k) / steps;
+        const z = (peak * k) / steps;
         const y = yAt(z);
         ctx.strokeStyle = 'rgba(34, 48, 82, 0.4)';
         ctx.beginPath();
@@ -213,6 +233,11 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
       });
       geomRef.current = geom;
 
+      const labelled = labelHoverRef.current ? geom.get(labelHoverRef.current) : undefined;
+      if (labelHoverRef.current && labelled?.length) {
+        best = { symbol: labelHoverRef.current, dist: 0, idx: labelled.length - 1 };
+      }
+
       const hoveredSymbol =
         best && (best as { dist: number }).dist < 26 ? (best as { symbol: string }).symbol : null;
 
@@ -255,7 +280,8 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
         ctx.fill();
         ctx.restore();
 
-        // End marker + label at the current (most recent) observation.
+        // End marker at the current (most recent) observation. Its label is a
+        // real button in the rail, tied back to this point by a connector.
         const [ex, ey] = pts[pts.length - 1];
         ctx.save();
         ctx.shadowColor = `rgba(${hue}, 0.9)`;
@@ -266,11 +292,16 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
         ctx.fill();
         ctx.restore();
 
-        if (emphasis || magnitude > 0.26) {
-          ctx.fillStyle = emphasis ? '#dbe6f5' : `rgba(${hue}, 0.82)`;
-          ctx.font = `${emphasis ? '650 ' : ''}9.5px ui-monospace, monospace`;
-          ctx.textAlign = 'left';
-          ctx.fillText(s.symbol, ex + 7, ey + 3);
+        const placed = layout.labels.find((label) => label.symbol === s.symbol);
+        if (placed) {
+          ctx.strokeStyle = `rgba(${hue}, ${emphasis ? 0.95 : 0.4})`;
+          ctx.lineWidth = emphasis ? 1.25 : 1;
+          ctx.beginPath();
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex + 8, ey);
+          ctx.lineTo(ex + RAIL_CONNECTOR - 8, placed.labelY);
+          ctx.lineTo(ex + RAIL_CONNECTOR - 2, placed.labelY);
+          ctx.stroke();
         }
       });
 
@@ -320,12 +351,15 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
       ctx.fillText(`${maxPoints} bars ago`, PAD.left, cssH - 8);
       ctx.textAlign = 'right';
       ctx.fillText('now', PAD.left + plotW, cssH - 8);
-      ctx.textAlign = 'center';
-      ctx.fillText(
-        `normalised return · ${snapshot?.timeframe ?? ''} · window ${snapshot?.return_window ?? ''} bars`,
-        PAD.left + plotW / 2,
-        cssH - 8
-      );
+      // Dropped before it can run into the captions either side of it.
+      if (plotW >= 320) {
+        ctx.textAlign = 'center';
+        ctx.fillText(
+          `normalised return · ${snapshot?.timeframe ?? ''} · window ${snapshot?.return_window ?? ''} bars`,
+          PAD.left + plotW / 2,
+          cssH - 8
+        );
+      }
 
       ctx.save();
       ctx.translate(13, midY);
@@ -336,7 +370,7 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
       ctx.fillText('← bearish        bullish →', 0, 0);
       ctx.restore();
     },
-    [series, selected, loading, snapshot]
+    [series, selected, loading, snapshot, layout]
   );
 
   // Single rAF loop drives the transition and the particles.
@@ -365,13 +399,60 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
 
   const tooltipStyle: React.CSSProperties = hover
     ? {
-        left: Math.min(Math.max(hover.x + 14, 8), (wrapRef.current?.clientWidth ?? 600) - 190),
-        top: Math.max(hover.y - 62, 6)
+        left: Math.max(6, Math.min(hover.x + 14, size.width - TOOLTIP_WIDTH)),
+        top: Math.max(6, Math.min(hover.y - 62, size.height - TOOLTIP_HEIGHT))
       }
     : {};
 
+  const label = (s: XRaySeries, style?: React.CSSProperties) => {
+    const value = `${s.current_z >= 0 ? '+' : ''}${s.current_z.toFixed(2)}`;
+    return (
+      <button
+        key={s.symbol}
+        type="button"
+        className="mx-xray-label"
+        data-symbol={s.symbol}
+        data-dir={s.current_z >= 0 ? 'up' : 'down'}
+        aria-pressed={s.symbol === selected}
+        aria-label={`${s.symbol} ${value} sigma`}
+        style={style}
+        onClick={() => onSelect(s.symbol)}
+        onMouseEnter={() => {
+          labelHoverRef.current = s.symbol;
+        }}
+        onMouseLeave={() => {
+          labelHoverRef.current = null;
+        }}
+        onFocus={() => {
+          labelHoverRef.current = s.symbol;
+        }}
+        onBlur={() => {
+          labelHoverRef.current = null;
+        }}
+      >
+        <span>{s.symbol}</span>
+        <b>{value}σ</b>
+      </button>
+    );
+  };
+
+  const bySymbol = new Map(series.map((s) => [s.symbol, s]));
+
   return (
     <div className="mx-xray-wrap" ref={wrapRef}>
+      {layout.mode === 'rail' && (
+        <div
+          className="mx-xray-rail"
+          role="group"
+          aria-label="Instruments"
+          style={{ left: size.width - layout.padRight + RAIL_CONNECTOR }}
+        >
+          {layout.labels.map((placed) => {
+            const s = bySymbol.get(placed.symbol);
+            return s ? label(s, { top: placed.labelY }) : null;
+          })}
+        </div>
+      )}
       <canvas
         ref={canvasRef}
         className="mx-xray-canvas"
@@ -410,8 +491,14 @@ export const XRayCanvas: React.FC<Props> = ({ snapshot, selected, onSelect, load
             <b>{snapshot?.timeframe}</b>
           </div>
           <div className="mx-tooltip-foot">
-            Source: recorded bid/ask mid candles · price displacement, not money flow
+            Source: {sourceName(snapshot?.provenance) ?? 'recorded'} bid/ask mid candles · price
+            displacement, not money flow
           </div>
+        </div>
+      )}
+      {layout.mode === 'legend' && series.length > 0 && (
+        <div className="mx-xray-legend" role="group" aria-label="Instruments">
+          {series.map((s) => label(s))}
         </div>
       )}
     </div>

@@ -355,9 +355,13 @@ def ingest_all(
     store_root: Path = DEFAULT_STORE_ROOT,
     start: str = DEFAULT_START,
     csv_root: Path | None = None,
+    source: dict | None = None,
 ) -> dict:
     """Ingest every requested instrument, recording per-symbol failures rather
-    than aborting the run, so partial coverage is reported and never hidden."""
+    than aborting the run, so partial coverage is reported and never hidden.
+
+    `source` names where the CSVs came from, for an import that knows. It goes
+    into the manifest, so everything computed from this store can say so."""
     targets = symbols or list(universe.SYMBOLS)
     store_root.mkdir(parents=True, exist_ok=True)
     # Immutable generations make publishing an import atomic for all
@@ -413,6 +417,8 @@ def ingest_all(
                 "symbols_failed": failures,
                 "datasets": rows,
             }
+            if source:
+                manifest["source"] = source
             # Publish a single pointer only after every successful dataset is
             # written. A failed import leaves the previous generation and
             # manifest untouched.

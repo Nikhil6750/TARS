@@ -11,7 +11,71 @@ for that).
 
 ---
 
-## Latest handoff — Windows reliability fixes (2026-11-01)
+## Latest handoff — Dashboard labels and October 27 replay (2026-11-01)
+
+For Codex, to integrate into the RC. Branch `feature/dashboard-labels-oct27-replay`,
+one commit on top of RC `928bee9`. Not pushed, not merged. The RC branch was not
+touched.
+
+**Label cause.** `XRayCanvas` drew each pair at its raw end point with no collision
+handling and dropped any with `|z| / 3 <= 0.26`, so the 18-instrument view drew 10
+labels, two of them on top of each other. Plotted values are unchanged.
+
+**Changes:**
+- `components/xrayLabels.ts` (new): least-movement label placement, plus the choice
+  between the rail and a scrollable legend. Labels are real buttons.
+- `components/ReplayControls.tsx` (new): Play, Pause, Seek and the 27 Oct window.
+- `market/state.py`, `market/service.py`: `/events` and its counts stop at the cursor.
+  This was a real future-data leak.
+- `market/ingest.py`, `market/provenance.py`, `market/service.py`: an optional manifest
+  `source` reaches `provenance.provider` and `detail`. Stores without one report
+  `parquet_store`, as before.
+- `Panels.tsx`: strength with no pairs says unavailable. The backend still returns all
+  8 currencies scored 0.00 from nothing, which the panel used to render as data.
+- `CandleChart.tsx`: zone labels use the same placement and are drawn over the candles.
+- `styles.css`: the `.mx button` reset was beating `.mx-btn`, so it is now `:where`.
+  Controls regain their borders, and nav tabs their intended colour and size. Panel
+  heads and the banner wrap, and the nav no longer overflows a fixed 50px.
+- `MarketXRayApp.tsx`: the section tabs only moved a highlight; they now scroll to
+  their panels. Coverage no longer hard-codes "17 FX pairs".
+
+**Data.** `D:\TARS_REPLAY_20261027`, revision `0629cb94da264bdea83de23a7928a7f0`:
+genuine Dukascopy XAUUSD, 2026-01-01 to 2026-10-28, 240 of 240 window minutes, 0
+invalid OHLC, 0 crossed quotes. `D:\TARS_DATA` was not modified. Partial raw data for
+six FX pairs is cached there for the separate multi-instrument task.
+
+**Run it (as tested):** from `apps/backend`, with `TARS_DATA_ROOT` set to that folder,
+`TARS_HOME` set to any scratch folder, and monitors off:
+`python -m uvicorn app.main:app --port 8796`. Then from `apps/web`, with
+`VITE_TARS_API_URL=http://127.0.0.1:8796`: `npx vite`, and open `/market.html`. The
+backend's `CORS_ALLOW_ORIGINS` must include that origin.
+
+**Verified in Chromium, real UI against the real backend:** at 7 window sizes from
+1920x1080 to 480x520, 18 of 18 labels, 0 overlaps, 0 clipped, 0 console errors. Next,
+Play, Pause, Seek, step back and timeframe change all worked; Play stopped by itself
+at 14:00 UTC. Each H1 candle matched an independent aggregation of the raw M1 CSVs,
+and none appeared before it closed.
+
+**Tests:** new `test_market_replay_window.py` (15) and two web files (35). Market,
+monitor and replay backend selection 419 passed, excluding `tests/integration`. Web
+252 passed. The complete backend suite was not run, as directed. The Rust shell was
+not changed.
+
+**Not done or not verified:**
+- Not seen in the real desktop WebView2. A release build compiled before the last
+  frontend edits, but was never launched. Please check this in the RC build.
+- No TradingView data. No official MCP is available here. The installed
+  `tradesdontlie/tradingview-mcp` is unofficial and reports `CDP connection failed`,
+  because TradingView Desktop has no debug port. No OANDA credentials exist.
+- A backend restart loses the replay position (see the runtime guide).
+- Play moves about one candle per 5.5s, because each step reloads `/dashboard` (3-4s).
+- `compute_strength` still returns zeros for no pairs; only the panel guards it.
+
+Evidence (local, untracked): `artifacts/dashboard-replay-oct27/` in this worktree.
+
+---
+
+## Previous handoff — Windows reliability fixes (2026-11-01)
 
 **Branch**: `fix/market-publication-stabilization`, worktree
 `C:\TARS-Market-Stabilize`, pushed to origin.
