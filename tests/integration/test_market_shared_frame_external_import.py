@@ -16,10 +16,11 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app.routers import market_xray
+from market import universe
 from market.frames import SharedFrames
 from market.service import MarketXRayService
 from market.state import MarketState
-from market.store import CandleStore
+from market.store import Candle, CandleStore
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
@@ -79,4 +80,42 @@ def test_standalone_import_invalidates_retained_replay(tmp_path, monkeypatch):
             )
     finally:
         shared._executor.shutdown(wait=True, cancel_futures=True)
+        service.store.close()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="confirmed: live store revision can change between frame panel reads")
+def test_a_feed_revision_during_build_does_not_mix_panel_prices(tmp_path, monkeypatch):
+    """Schedule a genuine live-store correction between two real panel reads."""
+    service = MarketXRayService(CandleStore(tmp_path / "live"), MarketState(tmp_path / "live.db"))
+    edge = datetime(2026, 6, 3, 12, tzinfo=UTC)
+    for tf, minutes in universe.TIMEFRAMES.items():
+        service.store.put_live_bars("EURUSD", tf, [
+            Candle(edge - timedelta(minutes=minutes * (180-i)),
+                   1.1, 1.12, 1.08, 1.1 + (i % 7) * .001, .0001, 1)
+            for i in range(180)
+        ])
+    service.attach_feed(provider="test:controlled", last_tick=edge)
+    service.report_live_edge(edge)
+    real_xray = service.xray
+
+    def xray_then_feed_write(**kwargs):
+        panel = real_xray(**kwargs)
+        service.store.put_live_bars("EURUSD", "H1", [
+            Candle(edge - timedelta(hours=1), 1.5, 1.51, 1.49, 1.5, .0001, 1)
+        ])
+        return panel
+
+    monkeypatch.setattr(service, "xray", xray_then_feed_write)
+    try:
+        inputs = service.frame_inputs("H1")
+        frame = market_xray._build_frame(inputs, "H1")
+        xray_price = frame["xray"]["series"][0]["current_close"]
+        cards = frame["leaders"]["bullish"] + frame["leaders"]["bearish"]
+        leader_price = next(c["close"] for c in cards if c["symbol"] == "EURUSD")
+        assert xray_price == leader_price, (
+            f"mixed revisions: xray={xray_price}, leaders={leader_price}, "
+            f"captured revision={inputs.data_revision}, current={service.store.data_revision}"
+        )
+    finally:
         service.store.close()
