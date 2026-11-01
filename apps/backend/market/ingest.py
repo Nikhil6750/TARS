@@ -38,7 +38,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import time
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -238,6 +240,13 @@ def ingest_all(
     than aborting the run, so partial coverage is reported and never hidden."""
     targets = symbols or list(universe.SYMBOLS)
     store_root.mkdir(parents=True, exist_ok=True)
+    # Immutable generations make publishing an import atomic for all
+    # timeframes/symbols, including readers in another process. Never replace
+    # the Parquet files referenced by the active manifest.
+    revision = uuid.uuid4().hex
+    generation_name = f"generations/{revision}"
+    generation_root = store_root / generation_name
+    generation_root.mkdir(parents=True)
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
 
@@ -248,7 +257,7 @@ def ingest_all(
         t0 = time.time()
         try:
             for r in ingest_symbol(
-                con, symbol, store_root=store_root, start=start, csv_root=csv_root
+                con, symbol, store_root=generation_root, start=start, csv_root=csv_root
             ):
                 rows.append(asdict(r))
             logger.info("ingested %s in %.1fs", symbol, time.time() - t0)
@@ -257,7 +266,13 @@ def ingest_all(
             logger.warning("ingest failed for %s: %s", symbol, exc)
     con.close()
 
+    if not rows:
+        shutil.rmtree(generation_root)
+        raise ValueError("import produced no usable candle datasets; active data unchanged")
+
     manifest = {
+        "dataset_revision": revision,
+        "generation": generation_name,
         "generated_at": datetime.now(UTC).isoformat(),
         "csv_root": str(csv_root or CSV_ROOT),
         "store_root": str(store_root),
@@ -268,7 +283,19 @@ def ingest_all(
         "symbols_failed": failures,
         "datasets": rows,
     }
-    (store_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    # Publish a single pointer only after every successful dataset is written.
+    # A failed import leaves the previous generation and manifest untouched.
+    staged_manifest = store_root / f".manifest-{revision}.tmp"
+    try:
+        with staged_manifest.open("w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged_manifest, store_root / "manifest.json")
+    finally:
+        staged_manifest.unlink(missing_ok=True)
+    # Keep previous immutable generations: in-flight readers may still be
+    # using them. Reclamation needs a separate, explicitly safe policy.
     return manifest
 
 
