@@ -103,8 +103,8 @@ class CandleStore:
             " PRIMARY KEY (symbol, timeframe, ts))"
         )
         # Counts writes to `live_bars`, so results read from the store can be
-        # told apart from ones read before a write. The Parquet is not covered:
-        # an import rewrites it, then replaces the service and this store.
+        # told apart from ones read before a write. Recorded Parquet has a
+        # separate immutable generation/revision published by the importer.
         self.data_revision = 0
         self.manifest = self._load_manifest()
         self.recorded_revision = str(self.manifest.get("dataset_revision") or "legacy")
