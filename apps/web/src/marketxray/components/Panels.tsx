@@ -78,6 +78,11 @@ export const CurrencyStrengthPanel: React.FC<{
             <div key={i} className="mx-skeleton" style={{ margin: '9px 0' }} />
           ))}
         </div>
+      ) : snapshot.pairs_evaluated.length === 0 ? (
+        // The backend still lists every currency, each scored from nothing.
+        <div className="mx-empty">
+          Currency strength unavailable: this data store has no FX pairs to compare.
+        </div>
       ) : (
         <>
           <div className="mx-ccy">

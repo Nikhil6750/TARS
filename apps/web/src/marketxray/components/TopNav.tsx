@@ -22,6 +22,13 @@ const ALL_SESSIONS = ['SYDNEY', 'TOKYO', 'LONDON', 'NEW_YORK'];
 const fmt = (iso: string | null | undefined): string =>
   iso ? `${iso.slice(0, 10)} ${iso.slice(11, 16)}` : '—';
 
+/** The vendor named on the data, or nothing when the store does not name one. */
+export const sourceName = (provenance?: Provenance | null): string | null => {
+  const provider = provenance?.provider;
+  if (!provider || provider === 'parquet_store' || provider === 'none') return null;
+  return provider[0].toUpperCase() + provider.slice(1);
+};
+
 export const TopNav: React.FC<{
   status: MarketStatus | null;
   provenance?: Provenance | null;
@@ -41,11 +48,12 @@ export const TopNav: React.FC<{
 
   const active = new Set(status?.sessions_active ?? []);
   const source = provenance?.source ?? (status?.status === 'LIVE' ? 'LIVE_FEED' : 'RECORDED_STORE');
+  const vendor = sourceName(provenance)?.toUpperCase();
   const sourceLabel = source === 'LIVE_FEED'
     ? `LIVE · ${provenance?.provider ?? 'feed'}`
     : replayPinned
-    ? 'REPLAY PINNED'
-    : 'RECORDED STORE';
+    ? vendor ? `REPLAY PINNED · ${vendor}` : 'REPLAY PINNED'
+    : vendor ? `RECORDED · ${vendor}` : 'RECORDED STORE';
 
   return (
     <nav className="mx-nav">
@@ -116,9 +124,10 @@ export const StatusBanner: React.FC<{
   const tone =
     status.status === 'CLOSED' ? 'closed' : status.status === 'LIVE' ? 'live' : 'warn';
   const source = provenance?.source ?? (status.status === 'LIVE' ? 'LIVE_FEED' : 'RECORDED_STORE');
+  const vendor = sourceName(provenance)?.toUpperCase();
   const sourceLabel = source === 'LIVE_FEED'
     ? `LIVE FEED (${provenance?.provider ?? 'provider'})`
-    : 'RECORDED STORE (HISTORICAL)';
+    : `${vendor ?? 'RECORDED STORE'} (HISTORICAL)`;
 
   return (
     <div className="mx-banner" data-tone={tone}>
@@ -126,8 +135,8 @@ export const StatusBanner: React.FC<{
         {sourceLabel}
       </span>
       {replayPinned && (
-        <span className="mx-pinned-badge" title="Replay cursor is pinned to historical bar">
-          REPLAY PINNED
+        <span className="mx-pinned-badge" title={provenance?.detail}>
+          RECONSTRUCTED ANALYSIS · NOT A RECORDED PREDICTION
         </span>
       )}
       <strong>{status.market_open ? 'MARKET OPEN' : 'MARKET CLOSED'}</strong>

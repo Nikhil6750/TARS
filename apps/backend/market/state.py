@@ -20,8 +20,10 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from market import universe
 
 logger = logging.getLogger("tars.market.state")
 
@@ -29,6 +31,20 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 # This used to be a path relative to the working directory, which under the
 # supervisor (cwd apps/backend) landed in apps/backend/apps/backend/storage.
 _LEGACY_DB = _BACKEND_DIR / "apps" / "backend" / "storage" / "market_xray.db"
+
+
+def _closed_by(as_of: datetime | None, column: str) -> tuple[str, list]:
+    """SQL keeping rows whose bar had closed by `as_of`. A row is stamped with its
+    bar's open, the same rule `market.store` applies to candles. Stamps compare as
+    text because they are all written by `isoformat()` in UTC."""
+    if as_of is None:
+        return "1 = 1", []
+    moment = as_of.astimezone(UTC)
+    clauses, params = [], []
+    for timeframe, minutes in universe.TIMEFRAMES.items():
+        clauses.append("(timeframe = ? AND " + column + " <= ?)")
+        params += [timeframe, (moment - timedelta(minutes=minutes)).isoformat()]
+    return "(" + " OR ".join(clauses) + ")", params
 
 
 def default_db() -> Path:
@@ -210,24 +226,34 @@ class MarketState:
             after = self._conn.execute("SELECT count(*) FROM zone_events").fetchone()[0]
         return after - before
 
-    def recent_events(self, *, symbol: str | None = None, limit: int = 100) -> list[dict]:
-        sql = "SELECT * FROM zone_events"
-        params: list = []
+    def recent_events(
+        self, *, symbol: str | None = None, limit: int = 100, as_of: datetime | None = None
+    ) -> list[dict]:
+        """Stored events, newest first. With `as_of`, only those that had
+        happened by then: rows stay stored when a replay rewinds past them."""
+        visible, params = _closed_by(as_of, "ts")
+        sql = "SELECT * FROM zone_events WHERE " + visible
         if symbol:
-            sql += " WHERE symbol = ?"
+            sql += " AND symbol = ?"
             params.append(symbol.upper())
         sql += " ORDER BY ts DESC, kind ASC LIMIT ?"
         params.append(int(limit))
         with self._lock:
             return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
-    def event_count(self) -> int:
+    def event_count(self, as_of: datetime | None = None) -> int:
+        visible, params = _closed_by(as_of, "ts")
         with self._lock:
-            return self._conn.execute("SELECT count(*) FROM zone_events").fetchone()[0]
+            return self._conn.execute(
+                "SELECT count(*) FROM zone_events WHERE " + visible, params
+            ).fetchone()[0]
 
-    def zone_count(self) -> int:
+    def zone_count(self, as_of: datetime | None = None) -> int:
+        visible, params = _closed_by(as_of, "confirmed_ts")
         with self._lock:
-            return self._conn.execute("SELECT count(*) FROM zones").fetchone()[0]
+            return self._conn.execute(
+                "SELECT count(*) FROM zones WHERE " + visible, params
+            ).fetchone()[0]
 
     # ---- strength history ------------------------------------------------
     def record_strength(self, snapshot) -> None:

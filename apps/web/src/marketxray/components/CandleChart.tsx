@@ -12,8 +12,10 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { Candle, OrderBlock } from '../types';
+import { placeLabels } from './xrayLabels';
 
 const PAD = { top: 14, right: 66, bottom: 22, left: 8 };
+const ZONE_LABEL_GAP = 11;
 
 interface Props {
   candles: Candle[];
@@ -91,6 +93,8 @@ export const CandleChart: React.FC<Props> = ({
     const bodyW = Math.max(1, Math.min(slot * 0.68, 11));
     const xAt = (i: number): number => PAD.left + i * slot + slot / 2;
 
+    const lastClose = candles[candles.length - 1].close;
+
     // --- price gridlines ---
     ctx.font = '9px ui-monospace, monospace';
     for (let k = 0; k <= 4; k += 1) {
@@ -104,7 +108,10 @@ export const CandleChart: React.FC<Props> = ({
       ctx.stroke();
       ctx.fillStyle = '#44536c';
       ctx.textAlign = 'left';
-      ctx.fillText(price.toFixed(precision), PAD.left + plotW + 6, y + 3);
+      // The last-price tag owns its row of the axis.
+      if (Math.abs(y - yAt(lastClose)) > 12) {
+        ctx.fillText(price.toFixed(precision), PAD.left + plotW + 6, y + 3);
+      }
     }
 
     // --- order-block zones, behind the candles ---
@@ -129,15 +136,6 @@ export const CandleChart: React.FC<Props> = ({
       ctx.setLineDash(live ? [] : [4, 3]);
       ctx.strokeRect(startX, top, PAD.left + plotW - startX, height);
       ctx.setLineDash([]);
-
-      // Zone label: side, state and age, right-aligned in the gutter.
-      ctx.fillStyle = `rgba(${hue}, ${live ? 0.95 : 0.5})`;
-      ctx.font = '8.5px ui-monospace, monospace';
-      ctx.textAlign = 'right';
-      const label = `${up ? 'OB+' : 'OB-'} ${z.status[0]}${z.status.slice(1, 4).toLowerCase()} ${z.age_bars}b`;
-      if (height > 9) {
-        ctx.fillText(label, PAD.left + plotW - 4, top + height / 2 + 3);
-      }
 
       // Break-of-structure level that qualified the zone.
       const bosY = yAt(z.bos_level);
@@ -173,6 +171,34 @@ export const CandleChart: React.FC<Props> = ({
       const h = Math.max(1, Math.abs(yClose - yOpen));
       ctx.fillStyle = colour;
       ctx.fillRect(x - bodyW / 2, top, bodyW, h);
+    });
+
+    // --- zone labels: side, state and age, above the candles and clear of each
+    // other. The table below lists every zone if the plot cannot hold them all.
+    const zoneAnchor = (z: OrderBlock) => ({
+      symbol: z.zone_id,
+      y: (yAt(z.zone_high) + yAt(z.zone_low)) / 2
+    });
+    const zoneLabels = (rows: OrderBlock[]) =>
+      placeLabels(rows.map(zoneAnchor), PAD.top + 6, PAD.top + plotH - 6, ZONE_LABEL_GAP);
+    const everyZone = zoneLabels(visible);
+    const placedZones = everyZone.fits
+      ? everyZone.labels
+      : zoneLabels(visible.filter((z) => LIVE_STATES.has(z.status))).labels;
+    const zoneById = new Map(visible.map((z) => [z.zone_id, z]));
+    ctx.font = '8.5px ui-monospace, monospace';
+    ctx.textAlign = 'right';
+    placedZones.forEach((placed) => {
+      const z = zoneById.get(placed.symbol);
+      if (!z) return;
+      const up = z.side === 'BULLISH';
+      const hue = up ? '25, 230, 160' : '255, 77, 126';
+      const label = `${up ? 'OB+' : 'OB-'} ${z.status[0]}${z.status.slice(1, 4).toLowerCase()} ${z.age_bars}b`;
+      const right = PAD.left + plotW - 4;
+      ctx.fillStyle = 'rgba(6, 10, 19, 0.86)';
+      ctx.fillRect(right - ctx.measureText(label).width - 3, placed.labelY - 5, ctx.measureText(label).width + 6, 10);
+      ctx.fillStyle = `rgba(${hue}, ${LIVE_STATES.has(z.status) ? 0.95 : 0.6})`;
+      ctx.fillText(label, right, placed.labelY + 3);
     });
 
     // --- last price marker ---
@@ -219,8 +245,11 @@ export const CandleChart: React.FC<Props> = ({
     ctx.fillText(candles[0].ts.slice(0, 16).replace('T', ' '), PAD.left, cssH - 7);
     ctx.textAlign = 'right';
     ctx.fillText(`${last.ts.slice(0, 16).replace('T', ' ')} UTC`, PAD.left + plotW, cssH - 7);
-    ctx.textAlign = 'center';
-    ctx.fillText(`${symbol} · ${candles.length} completed bars`, PAD.left + plotW / 2, cssH - 7);
+    // Dropped before it can run into the dates either side of it.
+    if (plotW >= 420) {
+      ctx.textAlign = 'center';
+      ctx.fillText(`${symbol} · ${candles.length} completed bars`, PAD.left + plotW / 2, cssH - 7);
+    }
   }, [candles, zones, precision, symbol, showInvalidated]);
 
   useEffect(() => {

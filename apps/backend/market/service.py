@@ -282,6 +282,8 @@ class MarketXRayService:
                 observed_at=status.data_as_of,
                 fresh=status.status is clock.FeedStatus.LIVE,
             )
+        origin = getattr(self.store, "manifest", {}).get("source") or {}
+        name = origin.get("label") or "recorded"
         detail = ""
         if self._feed_last_tick is not None and self._replay_pinned:
             detail = (
@@ -293,7 +295,20 @@ class MarketXRayService:
                 "A live feed is connected but has not delivered bars yet, so "
                 "these observations are recorded history, not live."
             )
-        return provenance.recorded(observed_at=status.data_as_of, detail=detail)
+        elif self._replay_pinned:
+            detail = (
+                "Reconstructed analysis, computed now from " + name + " candles up to "
+                "the cursor: not a prediction recorded at the time, and not a live feed."
+            )
+        elif origin:
+            detail = "Computed from " + name + " candles on this machine. Not a live feed."
+        if origin.get("caveat"):
+            detail = (detail + " " + origin["caveat"]).strip()
+        return provenance.recorded(
+            observed_at=status.data_as_of,
+            detail=detail,
+            provider=origin.get("provider") or provenance.STORE_PROVIDER,
+        )
 
     # ---- status ----------------------------------------------------------
     def market_status(self) -> clock.MarketStatus:
@@ -501,10 +516,13 @@ class MarketXRayService:
         }
 
     def events(self, *, symbol: str | None = None, limit: int = 100) -> dict:
+        # The store's rule applied to what was recorded from it: a later moment
+        # viewed earlier must not show through after rewinding.
+        as_of = self.cursor if self.panels_follow_feed or self._cursor else None
         return {
-            "events": self.state.recent_events(symbol=symbol, limit=limit),
-            "total_stored": self.state.event_count(),
-            "zones_stored": self.state.zone_count(),
+            "events": self.state.recent_events(symbol=symbol, limit=limit, as_of=as_of),
+            "total_stored": self.state.event_count(as_of),
+            "zones_stored": self.state.zone_count(as_of),
             "provenance": self.data_provenance().as_dict(),
         }
 

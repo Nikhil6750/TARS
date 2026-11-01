@@ -200,6 +200,33 @@ POST /api/v1/market/replay/seek?to=2026-06-02T12:00:00+00:00
 POST /api/v1/market/replay/reset
 ```
 
+Stored zone events follow the same rule: a later moment viewed earlier leaves its
+events in the database, and `/events` hides them again after rewinding.
+
+The cursor is held in memory, so restarting the backend returns it to the newest
+bar and lifts the replay pin. The dashboard reconnects and shows that position.
+
+### A replay from a separate store
+
+`tools/build_replay_store.py` builds a candle store from Dukascopy's public feed
+under its own data root, and never writes to the default one. A store that names
+its source reports it on every payload (`provenance.provider`), and the dashboard
+shows it. While the cursor is pinned the dashboard also says the view is a
+reconstruction, not a prediction recorded at the time.
+
+```
+python tools/build_replay_store.py --data-root D:/TARS_REPLAY_20261027 --symbols XAUUSD
+```
+
+Then point the backend at it with `TARS_DATA_ROOT=D:\TARS_REPLAY_20261027`. **XAUUSD
+27 Oct 2026** in the Replay panel opens 10:00 to 14:00 UTC (15:30 to 19:30 IST) on
+H1. It is disabled when the active store has no data for that date.
+
+This is Dukascopy data, not OANDA data, and their prices differ. A store holding
+only XAUUSD has no cross-instrument rankings: Currency Strength says it is
+unavailable, and the Coverage panel says why. Omitting `--symbols` builds all 18
+instruments, which takes about 90 minutes; a rerun resumes from the raw cache.
+
 ## API
 
 | Endpoint | Returns |
