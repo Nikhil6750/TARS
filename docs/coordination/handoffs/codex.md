@@ -6,6 +6,58 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Final backend acceptance — 2026-11-01
+
+**Branch**: `verify/backend-final-acceptance`
+**Reviewed SHA**: `1ed0388b1ecfa8a73eb7cd19f8011d11231ce340`
+**Measured production code SHA**: `cfc529ae894210fabc9148019ff8743030123b51`.
+The difference is documentation only. Independent worktree:
+`C:\TARS-Backend-Final-Acceptance`.
+
+**Completed / files changed / interfaces**: reviewed monitor timeout/cancel
+handling, bounded stop behavior, sharing retries and corrupt-manifest rejection;
+reran independent prior defect tests and real Uvicorn storms over the actual
+historical store. Only this handoff and `tools/backend_final_acceptance.md`
+changed. No production/test edits, Tauri build or merge.
+
+**Focused tests**: 88 monitor/publication/revision/isolation passed; 7 independent
+original regressions passed with `--runxfail` (no expected-failure masking);
+75 existing WS lifecycle/sharing passed. Exact invocations and logs are in the
+report. One complete backend run is recorded there; no overlapping complete
+suite or prolonged exploratory stress sweep was launched.
+
+**Measured performance**: standard 120-abort probe 0.12794s, normal cold first
+connection 2.44211s. Harder `--abort-delay 0.15`, 120 clients, two repetitions:
+cold 1.97403/0.79309s; mixed-timeframe cold probes 0.94949/1.00963s. Peak one
+build, all builds finished, no server errors/frame problems, settled handlers
+and connections zero. Provenance remained REPLAY/RECORDED_STORE/is_live=false;
+trading DISABLED. Report links the complete measured samples.
+
+**Limitations / dependencies**: monitor helper waits 5s per stuck task then logs
+and abandons it after a second cancel; an arbitrary cancellation-resistant
+provider can outlive db.close and affect eventual loop/process shutdown. Tested
+real HTTP timeout races finish without abandonment. Preserve this exceptional
+provider limitation. The reported 39.5s under four continuous external imports
+was not remeasured: concurrent publication integrity is supported, but that
+load is outside the one-import-job dashboard's interactive latency envelope.
+Document/schedule bulk ingestion separately; do not promise <5s under it.
+Generations remain unreclaimed, persistent sharing refusals fail safely, and
+corrupt-manifest recovery requires full CLI import. Authenticated MT5 and clean
+Windows installation remain separate RC gates.
+
+**Complete backend run**: 1,953 passed, 8 skipped, zero failures, exit 0 in
+802.57s (13m22s). No shutdown hang recurred. `complete-backend.log` preserves
+the complete output and warnings.
+
+**Recommendation**: PASS for the defined backend acceptance gates. Freeze
+backend scope and integrate the reviewed branch into the release candidate.
+No genuinely release-blocking defect remains in the tested backend workload;
+retain the explicit overload and uncooperative-provider limitations above.
+No new development phase is needed. Final report:
+`tools/backend_final_acceptance.md`. No merge was performed by this review.
+
+---
+
 ## Data revision consistency verification — 2026-11-01
 
 **Branch**: `verify/market-data-consistency-final`
