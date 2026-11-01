@@ -6,6 +6,71 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## October 27 final desktop integration — 2026-11-01
+
+**Branch**: `release/market-xray-final-rc`.
+**Application / merge SHA**: `4211f70de1f8027348fcc0f07f8d2ac02ccd08b7`,
+parents RC `928bee9` and Claude implementation `5f63cec`. Isolated worktree:
+`C:\TARS-Market-XRay-Release-RC`. Main and integration/v1 untouched.
+
+**Completed / files changed**: independently reviewed and integrated Claude's
+chart labels, replay controls, cursor-bounded stored events, and Dukascopy source
+provenance. Found a reproducible saved-CHFJPY startup 404 after switching to the
+gold-only store. The user explicitly authorized the narrow frontend ownership
+exception: `MarketXRayApp.tsx` now falls back once to the backend's available
+selection on a missing-symbol 404, persists it, and preserves other errors.
+Three tests added in `market-replay-controls.test.tsx`. No independent backend
+production edits or contract changes. Added repeatable API/WebView2 verification
+tools and demo/release guides under `tools/`; extended the installer verifier to
+check the installed executable and critical backend module hashes.
+
+**Interfaces exposed**: existing HTTP/WebSocket/Tauri contracts unchanged.
+Test-only local CDP listener; verifier checks that msedgewebview2 is owned by the
+exact package. Production launcher does not enable that diagnostic listener.
+
+**Evidence / tests**: `tools/market_oct27_desktop_release.md` and local artifacts
+`artifacts/desktop-labels-oct27/`. Backend 135 passed; frontend typecheck and
+255 tests passed; Rust 33 passed/1 hardware ignored; 558 native imports resolve.
+Actual WebView2: 18 labels at four native sizes, 72 successful selections,
+zero collisions/clipped text; native fullscreen 1920×1080 physical and restoration.
+12 desktop replay checks passed. Real Dukascopy validation: 26 checks, 4,365
+closed-candle OHLC comparisons, 480 independently decoded BID/ASK BI5 minutes.
+Black-box API 15/15. Final package lifecycle 9/9, recovery 16.21s, clean quit.
+Native OS-framed screenshots captured. Full backend intentionally not repeated.
+Real NSIS installed verification **26/26 passed** (not clean Windows): install
+95s, backend 15s, real import 41s, exact binary/six backend module hash matches,
+empty store, coexistence, shutdown and uninstall. Installer (208,036,799 bytes):
+`D:\TARS-Releases\market-xray-oct27-5f63cec\TARS_1.0.0_x64-setup.exe`, SHA-256
+`29EB21BA87436D1A915093AD21078C33DDB5D615F10F0B696BAA9E49FBBC0903`.
+
+**New confirmed release blocker**: switching from the multi-instrument store to
+gold-only replay retains old journal rows in the shared SQLite state. At Jan 2,
+the real package returned 39 AUDCHF rows under Dukascopy provenance, despite only
+XAUUSD being in the active store. Both focused cases in
+`tests/integration/test_market_journal_store_isolation.py` fail on the intended
+dataset isolation assertion, including same-symbol legacy history. Complete real
+API response is in `artifacts/desktop-labels-oct27/cross-store-events.json`.
+Backend correction belongs to Claude: scope journal reads/counts and provenance
+to dataset identity, preserve user history and the existing closed-candle rule.
+No backend production correction made by Codex. See the full release report.
+
+**Demo**: `D:\TARS-Releases\market-xray-oct27-5f63cec`, with bundled runtime,
+default `data` (Oct 27 gold) and `data-universe` (17 FX plus gold). The copied
+relative-generation stores need no original developer-machine source path.
+Original stores untouched. Trading execution DISABLED.
+
+**Known limitations / dependencies**: no provisioned genuinely clean Windows
+test environment; manual human tray and authenticated MT5 LIVE/STALE unverified.
+Gold-only replay cannot supply FX strength or market-wide comparisons and says
+so. Backend restart resets cursor. Playback waits for completed panel loads.
+The precise remaining code dependency is Claude's journal/store isolation fix;
+real-world checks require a clean Windows machine/operator and authenticated
+broker session respectively.
+
+**Next action**: keep unconditional release **NO-GO** until the focused journal correctness fix passes
+the two independent regressions. Preserve this desktop implementation and avoid
+another feature phase.
+
 ## Final desktop RC and offline demo — 2026-11-01
 
 **Branch**: `release/market-xray-final-rc`

@@ -18,6 +18,7 @@ exists briefly. It refuses to run while TARS is running.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -112,6 +113,10 @@ def main() -> int:
     parser.add_argument("--installer", type=Path, default=INSTALLER,
                         help="exact NSIS artifact to verify (supports external Cargo targets)")
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--expected-executable", type=Path,
+                        help="require the installed executable to match this verified package")
+    parser.add_argument("--expected-backend", type=Path,
+                        help="compare critical installed Market source with this backend checkout")
     parser.add_argument("--csvs", type=Path, default=Path("C:/Trade Data"),
                         help="real CSV folder for the import step")
     args = parser.parse_args()
@@ -141,6 +146,21 @@ def main() -> int:
     wait_for(exe.exists, 60)
     if not record("The application is installed", exe.exists(), str(exe)):
         return finish(root, args.keep)
+    if args.expected_executable:
+        actual = hashlib.sha256(exe.read_bytes()).hexdigest()
+        expected = hashlib.sha256(args.expected_executable.read_bytes()).hexdigest()
+        record("Installed executable matches the independently verified desktop", actual == expected, actual)
+    if args.expected_backend:
+        paths = ("market/service.py", "market/state.py", "market/provenance.py",
+                 "market/ingest.py", "market/store.py", "app/routers/market_xray.py")
+        mismatches = []
+        for relative in paths:
+            installed = install_dir / "tars" / "apps" / "backend" / relative
+            source = args.expected_backend / relative
+            if not installed.is_file() or hashlib.sha256(installed.read_bytes()).digest() != hashlib.sha256(source.read_bytes()).digest():
+                mismatches.append(relative)
+        record("Installed Market backend matches reviewed source", not mismatches,
+               f"{len(paths)} critical modules; mismatches={mismatches}")
     bundled_python = install_dir / "tars" / "python" / "python.exe"
     record("It carries its own Python", bundled_python.exists())
     # Library assets are fine; anything from the application's own tree is not.
