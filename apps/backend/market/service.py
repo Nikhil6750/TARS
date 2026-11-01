@@ -82,6 +82,7 @@ class FrameInputs:
     data_revision: int
     replay_pinned: bool
     follows_feed: bool
+    dataset_revision: str = "legacy"
 
 
 class MarketXRayService:
@@ -243,6 +244,7 @@ class MarketXRayService:
                 data_revision=self.store.data_revision,
                 replay_pinned=self._replay_pinned,
                 follows_feed=follows_feed,
+                dataset_revision=self.store.recorded_revision,
             )
 
     def frame_labels(self, inputs: FrameInputs) -> dict:
