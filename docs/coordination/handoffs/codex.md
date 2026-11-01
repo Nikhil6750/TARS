@@ -6,6 +6,59 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Final reconnect-storm verification — 2026-11-01
+
+**Branch**: `verify/market-ws-reconnect-final`
+**Implementation commit SHA**: `e62d30b760339c11e4f9723daea49e70ad56b213`
+(real disconnect/external-import regression: `c04ba145ed7eec939c64cd4ae10f02f5f1856dc4`).
+**Reviewed source**: `fix/market-ws-reconnect-storm` at
+`a3a27e8d636a02af42097057c26497f822184cff`, measured implementation `ae917ae`.
+**Worktree**: `C:\TARS-Market-WS-Verify`.
+
+**Completed / files / interfaces**: reviewed sharing/cache keys, fresh labels,
+and revised lifecycle tests. Repaired `tests/integration/test_market_ws_disconnect.py`
+to complete a real DuckDB-backed panel build after disconnect, assert zero sends
+and no remaining flights. Added `tests/integration/test_market_shared_frame_external_import.py`
+with two confirmed, strict-xfailed correctness regressions. Full evidence and
+commands: `tools/market_ws_final_verification.md`. Only tests, this report and
+the Codex handoff were edited; no Tauri build.
+
+**Results**: real Uvicorn / real historical store / 120 aborts: cold probes
+2.5484, 0.7530, 0.7434 seconds; mixed-timeframe cold probes 1.5021, 1.4071,
+1.5634 seconds. All below 5s. Peak one build, one build per identical storm;
+30 soak storms settle with zero connections/handlers/flights/builds, retained
+frames bounded at 16, 61 threads throughout, second-half RSS growth 1.6MB.
+Zero server ERROR/frame problems; bystander gets normal 10-second pushes.
+Trading DISABLED. Backend Market/identity/lifecycle: 306 passed, 1595 deselected;
+focused lifecycle/sharing/feed/first-run: 144 passed; HTTP API 15/15 and API-only
+acceptance 16/16. Ruff/diff checks passed. Final root results are in the report.
+
+**Confirmed blockers / exact Claude dependencies**:
+
+- A standalone `python -m market.ingest` during backend lifetime changes HTTP
+  prices but leaves WebSocket replay cached under an unchanged revision key.
+  Run the external-import regression with `--runxfail`. Make successful external
+  generations observable and invalidate/reload consistently, or prevent such
+  writes while the backend reads the store. The in-app import callback already
+  replaces the service; the standalone path does not.
+- A real feed write between panel reads yields X-Ray EURUSD close 1.104 and
+  leaders close 1.5 at the same cursor; captured revision 5, current revision 6.
+  Run the same file with `-k feed_revision --runxfail`. Ensure a frame spanning
+  revisions cannot be published/retained; preserve performance and socket safety.
+- Non-default subscriptions return H1 first, then M5/H4/D1 after 10.6–12.5s.
+  Existing behavior is preserved, but requested-timeframe-first does not work.
+  Consider an optional explicit initial timeframe retaining the H1 default;
+  backend owner must implement/test any protocol change.
+
+**Limitations / next action**: overall FAIL / NO-GO pending correctness fixes;
+performance and socket safety pass in this environment. No authenticated broker
+verification or long-term memory guarantee is claimed. RC remains at `1939dc2`;
+no integration was prepared because the user's critical-check condition failed.
+Rerun the documented regressions, cold storm, provenance and lifecycle checks
+after focused Claude corrections, then prepare RC integration. No main/v1 merge.
+
+---
+
 ## Integrated release candidate validation — 2026-11-01
 
 **Branch**: `release/market-xray-final-rc`
