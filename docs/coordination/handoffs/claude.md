@@ -11,7 +11,77 @@ for that).
 
 ---
 
-## Latest handoff — Market publication stabilization (2026-11-01)
+## Latest handoff — Windows reliability fixes (2026-11-01)
+
+**Branch**: `fix/market-publication-stabilization`, worktree
+`C:\TARS-Market-Stabilize`, pushed to origin.
+**Fix SHA**: `cfc529a`, on top of `5ad32e8`. Later commits are documentation only.
+**Status**: Awaiting Codex verification. Not merged. No Tauri build.
+
+### Fixes
+
+- **Monitor shutdown hang.** `NewsMonitor.stop()` and `CalendarMonitor.stop()` set a
+  flag before cancelling, and `_run` checks it before sleeping, so a cancellation
+  that came back as a timeout still ends the task. `stop_monitor_task` waits at most
+  `MONITOR_STOP_SECONDS` (5s). A task that outlasts it gets exactly one more cancel,
+  is logged, and is left behind rather than awaited. `MT5Provider` is unchanged: it
+  uses no httpx, so it has no such race. Nor does `MarketWatchService`.
+- **Manifest contention.** `with_sharing_retry` in `market/ingest.py` retries
+  sharing violations only: WinError 5, 32, 33, and `open()`'s bare EACCES. Publish
+  bound 5s, read bound 0.25s, backoff 2ms to 50ms. The lock and atomic replace are
+  unchanged. No effect off Windows.
+- **Corrupt manifests.** Not in the brief as a defect, but required by it:
+  `CandleStore._load_manifest` caught everything and returned `{}`, so a transient
+  refusal or a corrupt file made a new store read as legacy from the flat root.
+  `read_manifest` now returns None only for a missing file. Anything unreadable,
+  non-object, or with only one of `generation` and `dataset_revision` raises.
+
+### Evidence
+
+On `cfc529a`, in `artifacts/market-windows-reliability/`, untracked.
+
+- Complete backend: 1953 passed, 8 skipped, 0 failed, in one run of 1038.93s. Slow
+  because the machine was busy: a pandas-only test took 171s against 71s earlier.
+- Root: 82 passed, 24 skipped. 72 focused monitor and publication tests passed.
+- On unfixed code: 16 publication tests and 8 monitor tests failed, and a ninth case
+  blocked the run forever, which is the stall itself.
+- 22 of 22 protections caught when removed. Two first survived because the restart
+  test was weak; it was rewritten and both were rerun.
+- The race is deterministic in `test_stop_survives_the_race_through_a_real_timeout_scope`
+  through the real anyio scope, with no timers. Real 10s trials: 0 hung in 72, against
+  5 hung in 79 before, but only one cancel lost the race in those 72, so they are
+  weak evidence alone.
+- Three tight-loop readers against a publisher: 306 publishes, 0 gave up, worst
+  0.37s, 26,766 reads, 0 errors, 0 legacy. Before: 2,984 attempts refused, 128 read
+  errors. 12 of 12 repeats of the real multi-process test passed.
+- Imports during a 120-client storm: 44 of 44 succeeded, against 44 of 48 before.
+- Reconnect, `--abort-delay 0.15`: cold 1.48, 0.42, 0.39s; mixed 1.34, 1.63, 1.27s.
+  Peak 1 build, 0 server errors, 0 frame problems, trading `DISABLED`.
+
+### Open items
+
+- **Frames under continuous imports.** With 4 imports at once in a loop, first frames
+  still reached 39.5s while they ran. No frame problems this run, and it was 37.8s
+  before, so this is unchanged by these fixes. The storm tool exits 1 for it.
+- **A corrupt manifest now stops market routes** until a clean full import replaces
+  it, from a terminal: `/setup` and `POST /import` need the service too. This is the
+  fail-closed behaviour asked for.
+- **Stuck monitor.** If a task outlasts the bound it is abandoned and logged, and
+  can outlive `db.close()`. Nothing observed does this.
+- **Retry on the event loop.** The WebSocket `replay.step` and `replay.reset` paths
+  call `service()` synchronously, so a persistent refusal can block the loop for up
+  to 0.25s per call. Transient ones clear in milliseconds.
+- `--abort-delay` still defaults to 0.02. Generations are never reclaimed. MT5
+  LIVE/STALE remains unproven (AUTH_REQUIRED). Stall in Codex's own run: this was the
+  only hang mechanism found, but that run captured no task chain.
+
+### Next recommended action
+
+Codex verifies `cfc529a` independently, on its own run of the complete backend suite.
+
+---
+
+## Previous handoff — Market publication stabilization (2026-11-01)
 
 **Branch**: `fix/market-publication-stabilization`, worktree
 `C:\TARS-Market-Stabilize`, from Codex's `463df40`, which is

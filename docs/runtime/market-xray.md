@@ -93,9 +93,15 @@ several: reading the active manifest and replacing it happen under
 holder dies. An import that cannot publish removes its generation and leaves
 the active data alone.
 
-On Windows a publish can be refused with `WinError 5` while a running backend
-has the manifest open, and a read can fail the same way during the replacement.
-Nothing is lost when this happens, and running the import again publishes it.
+On Windows a publish is refused while another process has the manifest open, and
+a read is refused during the replacement. Both clear in moments, so a publish
+retries for up to 5s and a read for up to 0.25s, for sharing violations only. A
+publish that stays refused fails, removes its generation and leaves the active
+data alone, and running the import again publishes it.
+
+Only a missing manifest means an older store with no generations. A manifest that
+cannot be read, or is malformed, is an error: the market routes fail rather than
+read candles from the wrong place. A clean `python -m market.ingest` replaces it.
 
 | Variable | Effect |
 |---|---|
