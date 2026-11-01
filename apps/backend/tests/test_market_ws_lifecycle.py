@@ -351,7 +351,8 @@ async def test_an_unknown_timeframe_is_ignored_as_before(service, monkeypatch):
     monkeypatch.setattr(market_xray, "PUSH_INTERVAL_SECONDS", 0.01)
     socket_ = FakeSocket([{"type": "subscribe", "timeframe": "W1"}])
     task = asyncio.create_task(market_xray.market_ws(socket_))
-    await asyncio.sleep(0.06)
+    while not socket_.sent:
+        await asyncio.sleep(0.005)
     socket_.script.append(WebSocketDisconnect(code=1000))
     await asyncio.wait_for(task, 5)
     assert socket_.sent[-1]["timeframe"] == universe_default()
@@ -485,12 +486,37 @@ def assert_clean(errors, server, active) -> None:
     assert active["builds"] == 0, "a frame build is still running"
 
 
+async def test_cancelling_during_the_first_subscription_wait_stops_the_receiver(service):
+    receiving = asyncio.Event()
+
+    class Waiting(FakeSocket):
+        async def receive_json(self):
+            receiving.set()
+            await asyncio.Event().wait()
+
+    before = asyncio.all_tasks()
+    handler = asyncio.create_task(market_xray.market_ws(Waiting()))
+    await asyncio.wait_for(receiving.wait(), 3)
+    handler.cancel()
+    outcome = (await asyncio.gather(handler, return_exceptions=True))[0]
+    await asyncio.sleep(0)
+    left = asyncio.all_tasks() - before
+    for task in left:
+        task.cancel()
+    await asyncio.gather(*left, return_exceptions=True)
+    assert not left
+    assert isinstance(outcome, asyncio.CancelledError), "the cancellation must still propagate"
+
+
 async def test_stress_aborting_at_every_phase_of_a_frame(live_server):
-    """Delays straddle the 30ms build and the 10ms wait, so aborts land before,
-    during and after a build, and during a large write."""
+    """Delays straddle the first subscription wait, the 30ms build and the 10ms
+    wait, so aborts land before, during and after a build, and during a large
+    write."""
     url, server, errors, active = live_server
+    delays = [0.002 * i for i in range(40)]
+    delays += [market_xray.INITIAL_SUBSCRIPTION_SECONDS + delay for delay in delays]
     for _ in range(4):
-        await asyncio.gather(*[_abort_at(url, 0.002 * i) for i in range(40)])
+        await asyncio.gather(*[_abort_at(url, delay) for delay in delays])
     await _settle(server, active)
     assert active["total"] > 0, "nothing was exercised"
     assert_clean(errors, server, active)
@@ -504,8 +530,10 @@ async def test_stress_a_clean_close_during_a_build(live_server):
         await asyncio.sleep(delay)
         await connection.close()
 
-    await asyncio.gather(*[polite(0.003 * i) for i in range(40)])
+    wait = market_xray.INITIAL_SUBSCRIPTION_SECONDS
+    await asyncio.gather(*[polite(wait + 0.003 * i) for i in range(40)])
     await _settle(server, active)
+    assert active["total"] > 0, "nothing was exercised"
     assert_clean(errors, server, active)
 
 

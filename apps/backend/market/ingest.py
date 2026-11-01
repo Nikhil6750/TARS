@@ -39,8 +39,11 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import time
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -81,6 +84,8 @@ DEFAULT_STORE_ROOT = default_store_root()
 # Everything before this is recorded history the dashboard does not need;
 # keeping the window bounded is what makes a full ingest take seconds.
 DEFAULT_START = "2024-01-01"
+# Publishing takes moments, so a wait this long means something is wrong.
+PUBLICATION_LOCK_SECONDS = 60.0
 
 _CSV_COLUMNS = {
     "Time (UTC)": "TIMESTAMP",
@@ -229,6 +234,66 @@ def ingest_symbol(
     return results
 
 
+@contextmanager
+def _publication_lock(store_root: Path) -> Generator[None]:
+    """One publisher at a time, across processes, from reading the active
+    manifest to replacing it.
+
+    An atomic rename prevents a torn manifest, not a lost update: two imports
+    extending the same manifest would each discard what the other added. The
+    operating system drops SQLite's file lock when its holder dies, so a killed
+    import cannot block the next one, as a marker file would.
+    """
+    con = sqlite3.connect(
+        store_root / ".publication.lock",
+        timeout=PUBLICATION_LOCK_SECONDS,
+        isolation_level=None,
+    )
+    try:
+        try:
+            con.execute("BEGIN EXCLUSIVE")
+        except sqlite3.OperationalError as exc:
+            raise TimeoutError(
+                "another import is still publishing; active data unchanged"
+            ) from exc
+        yield
+    finally:
+        con.close()
+
+
+def _carried_datasets(
+    store_root: Path, generation_root: Path, rebuilt: set[str], failures: dict[str, str]
+) -> list[dict]:
+    """Bring everything active that this import did not rebuild into its new
+    generation: symbols it was not asked for, and ones it failed to replace,
+    whose old data is still the best there is. Files are immutable, so linking
+    is safe; a copy covers filesystems without hardlinks."""
+    old_manifest = store_root / "manifest.json"
+    if not old_manifest.exists():
+        return []
+    previous = json.loads(old_manifest.read_text(encoding="utf-8"))
+    old_root = store_root / previous.get("generation", "")
+    carried: list[dict] = []
+    for prior in previous.get("datasets", []):
+        symbol = prior.get("symbol")
+        tf = prior.get("timeframe")
+        if symbol in rebuilt or not symbol or not tf:
+            continue
+        source = old_root / symbol / (tf + ".parquet")
+        if not source.is_file():
+            continue
+        destination = generation_root / symbol / (tf + ".parquet")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+        carried.append({**prior, "path": str(destination)})
+    for symbol in failures.keys() & {row["symbol"] for row in carried}:
+        failures[symbol] += "; previous data kept"
+    return carried
+
+
 def ingest_all(
     symbols: list[str] | None = None,
     *,
@@ -264,60 +329,52 @@ def ingest_all(
         except Exception as exc:  # noqa: BLE001 - recorded in the manifest, not swallowed
             failures[symbol] = type(exc).__name__ + ": " + str(exc)
             logger.warning("ingest failed for %s: %s", symbol, exc)
+            # Whatever it wrote before failing must not reach the generation.
+            shutil.rmtree(generation_root / symbol, ignore_errors=True)
     con.close()
-
-    # A targeted import must not silently remove every untouched symbol.
-    # Link immutable files from the previous published generation into the
-    # new generation; fall back to a copy on filesystems without hardlinks.
-    if symbols is not None:
-        old_manifest = store_root / "manifest.json"
-        if old_manifest.exists():
-            previous = json.loads(old_manifest.read_text(encoding="utf-8"))
-            old_root = store_root / previous.get("generation", "")
-            for prior in previous.get("datasets", []):
-                symbol = prior.get("symbol")
-                tf = prior.get("timeframe")
-                if symbol in targets or not symbol or not tf:
-                    continue
-                source = old_root / symbol / (tf + ".parquet")
-                if not source.is_file():
-                    continue
-                destination = generation_root / symbol / (tf + ".parquet")
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.link(source, destination)
-                except OSError:
-                    shutil.copy2(source, destination)
-                rows.append({**prior, "path": str(destination)})
 
     if not rows:
         shutil.rmtree(generation_root)
         raise ValueError("import produced no usable candle datasets; active data unchanged")
 
-    manifest = {
-        "dataset_revision": revision,
-        "generation": generation_name,
-        "generated_at": datetime.now(UTC).isoformat(),
-        "csv_root": str(csv_root or CSV_ROOT),
-        "store_root": str(store_root),
-        "window_start": start,
-        "timeframes": universe.TIMEFRAMES,
-        "elapsed_seconds": round(time.time() - started, 2),
-        "symbols_ok": sorted({r["symbol"] for r in rows}),
-        "symbols_failed": failures,
-        "datasets": rows,
-    }
-    # Publish a single pointer only after every successful dataset is written.
-    # A failed import leaves the previous generation and manifest untouched.
-    staged_manifest = store_root / f".manifest-{revision}.tmp"
+    rebuilt = {r["symbol"] for r in rows}
+    published = False
     try:
-        with staged_manifest.open("w", encoding="utf-8") as stream:
-            json.dump(manifest, stream, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(staged_manifest, store_root / "manifest.json")
-    finally:
-        staged_manifest.unlink(missing_ok=True)
+        with _publication_lock(store_root):
+            # A clean full import replaces everything, and needs nothing from
+            # the active generation, which is what lets it repair a bad manifest.
+            if symbols is not None or failures:
+                rows += _carried_datasets(store_root, generation_root, rebuilt, failures)
+            manifest = {
+                "dataset_revision": revision,
+                "generation": generation_name,
+                "generated_at": datetime.now(UTC).isoformat(),
+                "csv_root": str(csv_root or CSV_ROOT),
+                "store_root": str(store_root),
+                "window_start": start,
+                "timeframes": universe.TIMEFRAMES,
+                "elapsed_seconds": round(time.time() - started, 2),
+                "symbols_ok": sorted({r["symbol"] for r in rows} - failures.keys()),
+                "symbols_failed": failures,
+                "datasets": rows,
+            }
+            # Publish a single pointer only after every successful dataset is
+            # written. A failed import leaves the previous generation and
+            # manifest untouched.
+            staged_manifest = store_root / f".manifest-{revision}.tmp"
+            try:
+                with staged_manifest.open("w", encoding="utf-8") as stream:
+                    json.dump(manifest, stream, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(staged_manifest, store_root / "manifest.json")
+                published = True
+            finally:
+                staged_manifest.unlink(missing_ok=True)
+    except BaseException:
+        if not published:
+            shutil.rmtree(generation_root, ignore_errors=True)
+        raise
     # Keep previous immutable generations: in-flight readers may still be
     # using them. Reclamation needs a separate, explicitly safe policy.
     return manifest

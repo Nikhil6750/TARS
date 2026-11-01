@@ -14,7 +14,6 @@ from app.routers import market_xray
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="confirmed: receiver leaks during initial wait cancellation")
 async def test_cancellation_during_initial_subscription_wait_cleans_receiver(monkeypatch):
     receiving = asyncio.Event()
 

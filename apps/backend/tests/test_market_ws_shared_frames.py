@@ -21,6 +21,7 @@ import threading
 import time
 from concurrent.futures import CancelledError
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import duckdb
 import pytest
@@ -553,13 +554,14 @@ def test_feed_health_is_recorded_by_the_feed_not_by_frames(service, wall_clock):
 # ---- a fresh backend ----------------------------------------------------
 
 
-def test_clients_arriving_together_build_one_service(monkeypatch):
+def test_clients_arriving_together_build_one_service(monkeypatch, tmp_path):
     class Stub:
         count = 0
 
         def __init__(self):
             time.sleep(0.05)
             Stub.count += 1
+            self.store = SimpleNamespace(recorded_revision="legacy", root=tmp_path)
 
     monkeypatch.setattr(market_xray, "MarketXRayService", Stub)
     monkeypatch.setattr(market_xray, "_start_feed", lambda _app: None)
@@ -570,12 +572,23 @@ def test_clients_arriving_together_build_one_service(monkeypatch):
     class App:
         state = State()
 
-    threads = [threading.Thread(target=market_xray._app_service, args=(App,)) for _ in range(20)]
+    served = []
+    failures = []
+
+    def arrive():
+        try:
+            served.append(market_xray._app_service(App))
+        except Exception as exc:  # noqa: BLE001 - a thread's failure ends the thread silently
+            failures.append(exc)
+
+    threads = [threading.Thread(target=arrive) for _ in range(20)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
+    assert failures == []
     assert Stub.count == 1
+    assert len(served) == 20 and len({id(service) for service in served}) == 1
 
 
 def test_a_failed_service_is_retried_by_the_next_client(monkeypatch):
@@ -667,7 +680,9 @@ async def test_each_subscription_gets_its_own_timeframe(counted, monkeypatch):
     plain, subscribed = Client(), Client([{"type": "subscribe", "timeframe": "H4"}])
     tasks = [asyncio.create_task(market_xray.market_ws(c)) for c in (plain, subscribed)]
     deadline = time.time() + 15
-    while time.time() < deadline and not any(f["timeframe"] == "H4" for f in subscribed.sent):
+    while time.time() < deadline and not (
+        plain.sent and any(f["timeframe"] == "H4" for f in subscribed.sent)
+    ):
         await asyncio.sleep(0.01)
     await _finish(*tasks)
     assert {f["timeframe"] for f in plain.sent} == {universe.DEFAULT_TIMEFRAME}
@@ -822,7 +837,9 @@ async def _settle(uv, active) -> None:
 
 async def test_a_fresh_client_after_a_storm_waits_for_nothing_abandoned(server):
     url, uv, errors, active = server
-    await asyncio.gather(*[_abort_after(url, 0.02) for _ in range(120)])
+    # Past the first subscription wait, or the storm never starts a build.
+    delay = market_xray.INITIAL_SUBSCRIPTION_SECONDS + 0.02
+    await asyncio.gather(*[_abort_after(url, delay) for _ in range(120)])
 
     async with websockets.connect(url, max_size=None) as connection:
         frame = json.loads(await asyncio.wait_for(connection.recv(), 5))
@@ -852,9 +869,11 @@ async def test_a_storm_across_every_timeframe_stays_bounded(server):
 
 async def test_repeated_storms_leave_nothing_behind(server):
     url, uv, errors, active = server
+    wait = market_xray.INITIAL_SUBSCRIPTION_SECONDS
     for _ in range(4):
-        await asyncio.gather(*[_abort_after(url, 0.002 * i) for i in range(40)])
+        await asyncio.gather(*[_abort_after(url, wait + 0.002 * i) for i in range(40)])
     await _settle(uv, active)
+    assert active["total"] > 0, "nothing was exercised"
     counts = market_xray._frames.counts()
     assert counts["flights"] == 0
     assert counts["retained"] <= 8

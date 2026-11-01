@@ -41,6 +41,8 @@ router = APIRouter(prefix="/api/v1/market", tags=["market-xray"])
 # Each frame costs real CPU (see `_build_frame`), so this is deliberately
 # unhurried: the underlying data is recorded history, not a ticking feed.
 PUSH_INTERVAL_SECONDS = 10.0
+# How long a new connection waits for its first subscribe before defaulting.
+INITIAL_SUBSCRIPTION_SECONDS = 0.1
 # How long a disconnect waits for a frame already being built before giving up.
 FRAME_DRAIN_SECONDS = 60.0
 # Finished frames kept. Enough for every timeframe at the current cursor and a
@@ -610,14 +612,16 @@ async def market_ws(websocket: WebSocket) -> None:
     receiver = asyncio.create_task(receive_loop())
     # However it ends, a finished receiver means nothing is listening.
     receiver.add_done_callback(lambda _task: connection.stopped.set())
-    # Give the immediate on-open subscribe command priority over a default
-    # H1 frame. If a subscription arrives while building, next_frame retries
-    # under its timeframe rather than publishing a wrongly selected H1 frame.
     try:
-        await asyncio.wait_for(initial_subscription.wait(), timeout=0.1)
-    except TimeoutError:
-        pass
-    try:
+        # Give the immediate on-open subscribe command priority over a default
+        # H1 frame. If a subscription arrives while building, next_frame retries
+        # under its timeframe rather than publishing a wrongly selected H1 frame.
+        try:
+            await asyncio.wait_for(
+                initial_subscription.wait(), timeout=INITIAL_SUBSCRIPTION_SECONDS
+            )
+        except TimeoutError:
+            pass
         while not connection.stopped.is_set():
             try:
                 frame = await next_frame()

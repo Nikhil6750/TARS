@@ -9,8 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 BACKEND = Path(__file__).resolve().parents[2] / "apps" / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -34,7 +32,6 @@ def sources(root, symbols):
             )
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="confirmed: failed replacement drops active symbol")
 def test_failed_target_keeps_previously_available_symbol(tmp_path):
     csvs, root = tmp_path / "csv", tmp_path / "store"
     sources(csvs, ["EURUSD", "GBPUSD"])
@@ -53,7 +50,6 @@ def test_failed_target_keeps_previously_available_symbol(tmp_path):
         store.close()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="confirmed: concurrent imports lose a committed target")
 def test_concurrent_targeted_imports_preserve_both_commits(tmp_path, monkeypatch):
     csvs, root = tmp_path / "csv", tmp_path / "store"
     sources(csvs, ["EURUSD", "GBPUSD", "AUDUSD"])
@@ -64,7 +60,13 @@ def test_concurrent_targeted_imports_preserve_both_commits(tmp_path, monkeypatch
 
     def synchronized_publish(source, destination):
         if Path(destination) == root / "manifest.json":
-            barrier.wait(timeout=15)
+            # Forces the overlap when publication is unserialized. A correct
+            # lock never lets the second publisher reach this point while the
+            # first is here, so waiting for it has to be able to give up.
+            try:
+                barrier.wait(timeout=3)
+            except threading.BrokenBarrierError:
+                pass
         # Serialize only the final OS rename, after both generations have
         # read their base. This avoids Windows simultaneous-handle noise and
         # exposes whether successful publications preserve both updates.
