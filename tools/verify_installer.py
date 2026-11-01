@@ -107,11 +107,15 @@ def isolated_env(data_root: Path, csv_root: Path) -> dict:
 
 
 def main() -> int:
+    global INSTALLER
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--installer", type=Path, default=INSTALLER,
+                        help="exact NSIS artifact to verify (supports external Cargo targets)")
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--csvs", type=Path, default=Path("C:/Trade Data"),
                         help="real CSV folder for the import step")
     args = parser.parse_args()
+    INSTALLER = args.installer.resolve()
 
     if shells():
         print("TARS is already running; quit it first.")
