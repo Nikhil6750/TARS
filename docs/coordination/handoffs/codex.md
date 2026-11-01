@@ -6,6 +6,59 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Final desktop RC and offline demo — 2026-11-01
+
+**Branch**: `release/market-xray-final-rc`
+**Build source SHA**: `cb83b6af20a73cd049280c74bb79433cb6eb5db2`.
+Accepted backend `1ed0388b1ecfa8a73eb7cd19f8011d11231ce340` integrated at
+`8572f58`; independent acceptance `3b747dd` integrated at `edca51f`, in the
+isolated `C:\TARS-Market-XRay-Release-RC` worktree. Subsequent edits are test/
+reporting tools only. No dashboard or contract edits, main/v1 merge, or research.
+
+**Completed / files / interfaces**: built production desktop and real NSIS with
+fresh accepted backend source and cached pinned runtime dependencies. Added
+`tools/start_offline_demo.ps1`, `tools/verify_packaged_market.py`, and exact
+`--installer` selection in `tools/verify_installer.py`. Full handoff/evidence:
+`tools/final_desktop_release.md`. Only Codex-owned files changed outside the
+explicitly authorized backend integration merges.
+
+**Tests**: frontend typecheck/build passed, Vitest 217 passed; Rust 33 passed /
+1 hardware ignored; root 82 passed / 24 skipped; 558 bundled native modules have
+no unresolved non-Windows imports. Packaged API 15/15, production assets Chromium
+27/27, packaged lifecycle/recovery 9/9. Owned bundled backend recovered in 15.32s;
+frontend reconnected without reload in 22.01s. Offline browser run blocked all
+external requests, showed 8 currency rows / 12 leaders and stepped replay by 12
+hours. All facts are genuine recorded history, REPLAY, execution DISABLED.
+Full backend 1,953/8 accepted evidence remains applicable to unchanged code;
+that suite was not redundantly rerun for packaging.
+
+**Installer**: `D:\TARS-Releases\market-xray-rc-cb83b6a\TARS_1.0.0_x64-setup.exe`,
+208,033,181 bytes, SHA-256
+`B13F982B1C370F2336BA47E8DB9322EE4395328CFC1006FBC717B0C3FCCA4AAB`.
+Exact real installer developer-host test: 24/24 passed, zero failures. No
+developer PATH; own Python; empty-store onboarding; real in-app import; companion
+coexistence; no-orphan quit; no install-directory writes; uninstall and user-data
+retention verified. Temporary test installation removed; retained installer and
+portable demo executable are byte-identical for their application binary.
+
+**Demo**: `D:\TARS-Releases\market-xray-rc-cb83b6a\start_offline_demo.ps1`.
+Run it from PowerShell; append `-Quit` for cooperative shutdown. Port 8775,
+copied genuine 18-instrument store, bundled runtime, external adapters and mock
+trading events disabled. No build/import/download on launch.
+
+**Limitations / dependencies / decision**: GO for offline demo/RC handoff;
+NO-GO for unrestricted public-release certification until clean Windows install
+and human tray checks are completed. No suitable clean VM/Sandbox was available.
+Computer Use was stopped by physical Escape; no further mouse/keyboard input was
+issued and native fullscreen/resize/manual interaction was not re-certified.
+MT5 LIVE/STALE stays unverified pending actual authentication/open session.
+18 instruments do not satisfy the earlier 26-instrument target; no coverage
+warning/data was manufactured or removed. WebView2 is required on the target
+machine. Next action: coordinator/human completes remaining release gates and
+confirms permitted coverage; the historical offline demo is ready now.
+
+---
+
 ## Final backend acceptance — 2026-11-01
 
 **Branch**: `verify/backend-final-acceptance`
