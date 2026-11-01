@@ -6,6 +6,55 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Integrated release candidate validation — 2026-11-01
+
+**Branch**: `release/market-xray-final-rc`
+
+**Implementation commit SHA**: `cb72d21efee0ec3155ec8938d9e8c32d3372b52d`
+
+**Worktree / integrated application**: `C:\TARS-Market-XRay-Release-RC` /
+`9030b789ba61` (explicit merges of `5183708` and `d6d57fb` over `7fe5875`).
+
+**Work completed / files changed / interfaces**: integrated both requested
+branches, reviewed the backend socket lifecycle diff and lifecycle tests,
+confirmed XPASS before removing the disconnect regression's xfail marker,
+then confirmed PASS. Added `tools/measure_market_ws_reconnect.py`, exposing
+real Uvicorn timing, concurrent frame-build and outstanding-handler diagnostics.
+Full release report: `tools/market_rc_release_report.md`. This handoff and
+`tests/integration/test_market_ws_disconnect.py` are the other changed files.
+
+**Tests**: backend 1,846 passed / 8 skipped / exit 0 in 17m42s; root 76 passed /
+24 skipped; focused disconnect/first-run/isolation 42 passed; WebSocket lifecycle
+27 passed; frontend 217 passed, typecheck/build passed; Rust 33 passed / 1 ignored;
+HTTP API 15/15; API+Chromium 27/27 on three consecutive runs; native ownership
+matrix 44/44 including attached/owned recovery, foreign ports and rapid launches.
+Production-asset native desktop verification passed 19/19, including exact
+1920x1080 fullscreen/restoration, resize/reopen and no-orphan shutdown.
+Ruff and whitespace checks passed. Frontend lint retains its pre-existing
+prefer-const error in `src/test/orb-native.test.ts:4`.
+
+**Confirmed unresolved defect / Claude dependency**: 120 abrupt connections to
+the actual `/api/v1/market/ws` create enough abandoned frame work to delay a
+fresh connection's first frame by 106.086 seconds (normal 0.780–1.926 seconds;
+immediate reconnect about 1 second). Peak 16 builds; 126 started/finished; no
+ASGI/server errors; 56 drain-timeout warnings. At 75 seconds only the probe
+handler remained but 16 old frame builds still ran. Reproduction:
+`python tools/measure_market_ws_reconnect.py --storm-clients 120 --port 8781 --timeout 300 --interactive-target 5`.
+JSON and complete Uvicorn log are under `artifacts/market-ws-performance/`.
+Claude must prevent abandoned work from starving active clients while retaining
+replay correctness and socket safety. No backend optimization was made here.
+
+**Limitations / next action**: NO-GO pending the latency defect. Eight target FX
+pairs remain absent, real authenticated MT5 and clean Windows installation are
+unverified, and the old 208 MB installer must be rebuilt to include this fix.
+Trading remains DISABLED. Plain Cargo release builds require
+`--features tauri/custom-protocol` for production UI assets; an initial native
+visual attempt used development asset mode and is excluded from green evidence.
+The full report records final native visual evidence and remaining gates.
+No main/integration merge was performed.
+
+---
+
 ## Latest handoff — Market X-Ray final release-candidate review (2026-10-31)
 
 **Branch**: `feature/market-xray-final-verification`
