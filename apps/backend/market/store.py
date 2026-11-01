@@ -13,7 +13,6 @@ bar's own length.
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from contextlib import contextmanager
@@ -26,7 +25,7 @@ import duckdb
 import pyarrow as pa
 
 from market import universe
-from market.ingest import DEFAULT_STORE_ROOT  # resolved from TARS_DATA_ROOT; see P1-C2
+from market.ingest import DEFAULT_STORE_ROOT, read_manifest  # root: TARS_DATA_ROOT; see P1-C2
 
 logger = logging.getLogger("tars.market.store")
 
@@ -41,10 +40,7 @@ def active_dataset_revision(root: Path | str) -> str:
     Legacy stores have no revision marker. A malformed manifest is not
     mistaken for the old generation: callers must fail closed.
     """
-    path = Path(root) / "manifest.json"
-    if not path.exists():
-        return "legacy"
-    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest = read_manifest(Path(root)) or {}
     return str(manifest.get("dataset_revision") or "legacy")
 
 
@@ -114,15 +110,11 @@ class CandleStore:
         self._recorded_root = self.root / generation if generation else self.root
 
     def _load_manifest(self) -> dict:
-        path = self.root / "manifest.json"
-        if not path.exists():
-            logger.warning("no candle-store manifest at %s", path)
+        manifest = read_manifest(self.root)
+        if manifest is None:
+            logger.warning("no candle-store manifest at %s", self.root)
             return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("unreadable manifest at %s: %s", path, exc)
-            return {}
+        return manifest
 
     # ---- paths -----------------------------------------------------------
     def path_for(self, symbol: str, timeframe: str) -> Path:

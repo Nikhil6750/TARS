@@ -7,14 +7,20 @@ one process would pass any test run on threads.
 """
 from __future__ import annotations
 
+import errno
 import json
+import math
+import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from app.routers import market_xray
 from market import ingest, universe
 from market.store import CandleStore, active_dataset_revision
 
@@ -320,3 +326,257 @@ def test_waiting_too_long_to_publish_fails_without_touching_the_active_data(tmp_
             ingest.ingest_all(["GBPUSD"], store_root=root)
     assert active_dataset_revision(root) == revision
     assert generations(root) == existing
+
+
+# ---- windows sharing violations ------------------------------------------
+
+windows_only = pytest.mark.skipif(os.name != "nt", reason="Windows file sharing")
+ACCESS_DENIED, SHARING_VIOLATION, LOCK_VIOLATION = 5, 32, 33
+
+
+def refusal(code: int) -> PermissionError:
+    """How `os.replace` reports a file in use."""
+    return PermissionError(13, "in use", "manifest.json", code)
+
+
+def opening_refused() -> PermissionError:
+    """How `open` reports the same thing: the C runtime's EACCES, no Windows code."""
+    return PermissionError(errno.EACCES, "Permission denied", "manifest.json")
+
+
+def replace_refusing(monkeypatch, times: float, error: OSError) -> list:
+    attempts = []
+    real = os.replace
+
+    def replace(source, destination):
+        if Path(destination).name == "manifest.json":
+            attempts.append(1)
+            if len(attempts) <= times:
+                raise error
+        return real(source, destination)
+
+    monkeypatch.setattr(ingest.os, "replace", replace)
+    return attempts
+
+
+def manifest_reads_refused(monkeypatch, times: float, error: OSError) -> list:
+    attempts = []
+    real = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self.name == "manifest.json":
+            attempts.append(1)
+            if len(attempts) <= times:
+                raise error
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return attempts
+
+
+@windows_only
+@pytest.mark.parametrize("code", [ACCESS_DENIED, SHARING_VIOLATION, LOCK_VIOLATION])
+def test_publishing_waits_out_a_reader_holding_the_manifest(tmp_path, monkeypatch, code):
+    root = tmp_path / "store"
+    monkeypatch.setattr(ingest, "ingest_symbol", fake_ingest)
+    ingest.ingest_all(["EURUSD"], store_root=root)
+    attempts = replace_refusing(monkeypatch, 3, refusal(code))
+    result = ingest.ingest_all(["GBPUSD"], store_root=root)
+    assert len(attempts) == 4
+    assert active_dataset_revision(root) == result["dataset_revision"]
+    assert set(active(root)["symbols_ok"]) == {"EURUSD", "GBPUSD"}
+
+
+@windows_only
+def test_a_publication_that_stays_refused_gives_up_and_keeps_the_active_data(tmp_path, monkeypatch):
+    root = tmp_path / "store"
+    monkeypatch.setattr(ingest, "ingest_symbol", fake_ingest)
+    ingest.ingest_all(["EURUSD"], store_root=root)
+    revision, existing = active_dataset_revision(root), generations(root)
+    monkeypatch.setattr(ingest, "MANIFEST_PUBLISH_RETRY_SECONDS", 0.05)
+    attempts = replace_refusing(monkeypatch, math.inf, refusal(ACCESS_DENIED))
+    began = time.monotonic()
+    with pytest.raises(PermissionError):
+        ingest.ingest_all(["GBPUSD"], store_root=root)
+    assert time.monotonic() - began < 1
+    assert len(attempts) > 1
+    assert active_dataset_revision(root) == revision
+    assert generations(root) == existing
+    assert not list(root.glob(".manifest-*"))
+
+
+@windows_only
+@pytest.mark.parametrize("error", [
+    PermissionError(1, "not held", "manifest.json", 1314),
+    PermissionError("in use"),
+    OSError(28, "disk full", "manifest.json", 112),
+], ids=["other-permission", "no-code", "disk-full"])
+def test_only_sharing_violations_are_retried(tmp_path, monkeypatch, error):
+    root = tmp_path / "store"
+    monkeypatch.setattr(ingest, "ingest_symbol", fake_ingest)
+    ingest.ingest_all(["EURUSD"], store_root=root)
+    attempts = replace_refusing(monkeypatch, math.inf, error)
+    with pytest.raises(OSError):
+        ingest.ingest_all(["GBPUSD"], store_root=root)
+    assert len(attempts) == 1
+
+
+def test_a_sharing_violation_is_never_retried_off_windows(monkeypatch):
+    monkeypatch.setattr(ingest.os, "name", "posix")
+    assert not ingest.is_sharing_violation(opening_refused())
+
+
+@windows_only
+@pytest.mark.parametrize("error", [opening_refused(), refusal(SHARING_VIOLATION)],
+                         ids=["open", "win32"])
+def test_reading_the_revision_waits_out_a_publication(imported, monkeypatch, error):
+    root, _csvs = imported
+    revision = active_dataset_revision(root)
+    attempts = manifest_reads_refused(monkeypatch, 2, error)
+    assert active_dataset_revision(root) == revision
+    assert len(attempts) == 3
+
+
+@windows_only
+def test_a_new_store_waits_out_a_publication_instead_of_going_legacy(imported, monkeypatch):
+    root, _csvs = imported
+    revision = active_dataset_revision(root)
+    manifest_reads_refused(monkeypatch, 2, opening_refused())
+    store = CandleStore(root)
+    try:
+        assert store.recorded_revision == revision
+        assert store.path_for("EURUSD", "M5").is_relative_to(root / "generations")
+    finally:
+        store.close()
+
+
+@windows_only
+def test_a_manifest_that_stays_refused_is_an_error_and_never_legacy(imported, monkeypatch):
+    root, _csvs = imported
+    monkeypatch.setattr(ingest, "MANIFEST_READ_RETRY_SECONDS", 0.05)
+    attempts = manifest_reads_refused(monkeypatch, math.inf, opening_refused())
+    began = time.monotonic()
+    with pytest.raises(PermissionError):
+        active_dataset_revision(root)
+    with pytest.raises(PermissionError):
+        CandleStore(root)
+    assert time.monotonic() - began < 1
+    assert len(attempts) > 2
+
+
+@pytest.mark.parametrize("content", [
+    "{ not json", "", "[]", '"text"', '{"generation": "generations/x"}',
+    '{"dataset_revision": "x"}',
+], ids=["truncated", "empty", "list", "string", "no-revision", "no-generation"])
+def test_a_corrupt_manifest_is_never_taken_for_a_legacy_store(tmp_path, content):
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "manifest.json").write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError):
+        active_dataset_revision(root)
+    with pytest.raises(ValueError):
+        CandleStore(root)
+
+
+def test_a_store_with_no_manifest_or_an_old_one_is_still_legacy(tmp_path):
+    empty, flat = tmp_path / "empty", tmp_path / "flat"
+    flat.mkdir()
+    (flat / "manifest.json").write_text('{"datasets": []}', encoding="utf-8")
+    for root in (empty, flat):
+        assert active_dataset_revision(root) == "legacy"
+        store = CandleStore(root)
+        try:
+            assert store.recorded_revision == "legacy"
+        finally:
+            store.close()
+
+
+def test_a_corrupt_manifest_does_not_reach_a_running_dashboard_as_legacy(imported):
+    root, _csvs = imported
+    service = SimpleNamespace(store=CandleStore(root))
+    app = SimpleNamespace(state=SimpleNamespace(market_xray_service=service))
+    try:
+        assert market_xray._app_service(app) is service
+        (root / "manifest.json").write_text("{ not json", encoding="utf-8")
+        with pytest.raises(ValueError):
+            market_xray._app_service(app)
+        assert app.state.market_xray_service is service
+    finally:
+        service.store.close()
+
+
+# Reads the way every backend request does, as fast as it can, and reports anything
+# other than a revision that really was published.
+READING_THE_MANIFEST = """
+import json, sys
+from pathlib import Path
+from market.store import CandleStore, active_dataset_revision
+
+root, stop = Path(sys.argv[1]), Path(sys.argv[2])
+seen, errors, reads = set(), [], 0
+while not stop.exists():
+    reads += 1
+    try:
+        seen.add(active_dataset_revision(root))
+        if reads % 25 == 0:
+            store = CandleStore(root)
+            seen.add(store.recorded_revision)
+            store.close()
+    except Exception as exc:
+        errors.append(repr(exc)[:200])
+print(json.dumps({"reads": reads, "seen": sorted(seen), "errors": errors[:5]}))
+"""
+
+PUBLISHING_THE_MANIFEST = """
+import json, sys
+from pathlib import Path
+from market import ingest
+
+store, csvs, symbol, rounds = sys.argv[1:5]
+published = [
+    ingest.ingest_all([symbol], store_root=Path(store), csv_root=Path(csvs))["dataset_revision"]
+    for _ in range(int(rounds))
+]
+print(json.dumps(published))
+"""
+
+
+@windows_only
+def test_readers_and_publishers_in_separate_processes_never_disturb_each_other(tmp_path):
+    csvs, root, stop = tmp_path / "csv", tmp_path / "store", tmp_path / "stop"
+    write_sources(csvs, ["EURUSD", "GBPUSD", "AUDUSD"])
+    first = ingest.ingest_all(["EURUSD"], store_root=root, csv_root=csvs)
+    # As large as a real 18-instrument manifest, which is what keeps readers
+    # inside the file long enough to collide with a rename.
+    manifest = active(root)
+    manifest["datasets"][0]["padding"] = "x" * 380_000
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def launch(script, *arguments):
+        return subprocess.Popen(
+            [sys.executable, "-c", script, *map(str, arguments)],
+            cwd=BACKEND, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+    readers = [launch(READING_THE_MANIFEST, root, stop) for _ in range(3)]
+    publishers = [launch(PUBLISHING_THE_MANIFEST, root, csvs, symbol, 8)
+                  for symbol in ("GBPUSD", "AUDUSD")]
+    published, problems = {first["dataset_revision"]}, []
+    for process in publishers:
+        output, errors = process.communicate(timeout=120)
+        if process.returncode:
+            problems.append(errors[-300:])
+        else:
+            published.update(json.loads(output))
+    stop.touch()
+    reports = []
+    for process in readers:
+        output, errors = process.communicate(timeout=60)
+        assert process.returncode == 0, errors[-300:]
+        reports.append(json.loads(output))
+
+    assert problems == []
+    assert len(published) == 17
+    assert all(report["reads"] > 0 and report["errors"] == [] for report in reports), reports
+    assert set().union(*(report["seen"] for report in reports)) <= published
+    assert set(active(root)["symbols_ok"]) == {"EURUSD", "GBPUSD", "AUDUSD"}

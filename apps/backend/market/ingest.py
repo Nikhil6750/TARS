@@ -35,6 +35,7 @@ should not need a code change to ingest.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -42,7 +43,7 @@ import shutil
 import sqlite3
 import time
 import uuid
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -86,6 +87,15 @@ DEFAULT_STORE_ROOT = default_store_root()
 DEFAULT_START = "2024-01-01"
 # Publishing takes moments, so a wait this long means something is wrong.
 PUBLICATION_LOCK_SECONDS = 60.0
+# Windows refuses to replace a file another process has open, and refuses to open
+# one being replaced. Both pass in moments. A publisher has many readers to outlast
+# and nobody waiting on it; a reader only has the instant of one rename.
+MANIFEST_PUBLISH_RETRY_SECONDS = 5.0
+MANIFEST_READ_RETRY_SECONDS = 0.25
+_SHARING_RETRY_FIRST_DELAY = 0.002
+_SHARING_RETRY_LONGEST_DELAY = 0.05
+# ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+_SHARING_WINERRORS = frozenset({5, 32, 33})
 
 _CSV_COLUMNS = {
     "Time (UTC)": "TIMESTAMP",
@@ -234,6 +244,52 @@ def ingest_symbol(
     return results
 
 
+def is_sharing_violation(exc: OSError) -> bool:
+    """Whether Windows refused a file because someone else has it. `open()` says
+    so through the C runtime, as a bare EACCES with no Windows error code."""
+    if os.name != "nt" or not isinstance(exc, PermissionError):
+        return False
+    if exc.winerror is None:
+        return exc.errno == errno.EACCES
+    return exc.winerror in _SHARING_WINERRORS
+
+
+def with_sharing_retry[T](operation: Callable[[], T], seconds: float) -> T:
+    """Run `operation`, waiting out a sharing violation for up to `seconds`. Any
+    other error raises at once, and so does a violation that outlasts the wait."""
+    deadline = time.monotonic() + seconds
+    delay = _SHARING_RETRY_FIRST_DELAY
+    while True:
+        try:
+            return operation()
+        except OSError as exc:
+            if not is_sharing_violation(exc) or time.monotonic() >= deadline:
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, _SHARING_RETRY_LONGEST_DELAY)
+
+
+def read_manifest(store_root: Path) -> dict | None:
+    """The active manifest, or None for a store that has never had one.
+
+    Only a missing file means that. Anything unreadable or malformed raises,
+    because treating it as an older store would read candles from the wrong place.
+    """
+    path = store_root / "manifest.json"
+    try:
+        text = with_sharing_retry(
+            lambda: path.read_text(encoding="utf-8"), MANIFEST_READ_RETRY_SECONDS
+        )
+    except FileNotFoundError:
+        return None
+    manifest = json.loads(text)
+    if not isinstance(manifest, dict) or (
+        bool(manifest.get("generation")) != bool(manifest.get("dataset_revision"))
+    ):
+        raise ValueError(f"invalid candle-store manifest at {path}")
+    return manifest
+
+
 @contextmanager
 def _publication_lock(store_root: Path) -> Generator[None]:
     """One publisher at a time, across processes, from reading the active
@@ -268,10 +324,9 @@ def _carried_datasets(
     generation: symbols it was not asked for, and ones it failed to replace,
     whose old data is still the best there is. Files are immutable, so linking
     is safe; a copy covers filesystems without hardlinks."""
-    old_manifest = store_root / "manifest.json"
-    if not old_manifest.exists():
+    previous = read_manifest(store_root)
+    if previous is None:
         return []
-    previous = json.loads(old_manifest.read_text(encoding="utf-8"))
     old_root = store_root / previous.get("generation", "")
     carried: list[dict] = []
     for prior in previous.get("datasets", []):
@@ -367,7 +422,10 @@ def ingest_all(
                     json.dump(manifest, stream, indent=2)
                     stream.flush()
                     os.fsync(stream.fileno())
-                os.replace(staged_manifest, store_root / "manifest.json")
+                with_sharing_retry(
+                    lambda: os.replace(staged_manifest, store_root / "manifest.json"),
+                    MANIFEST_PUBLISH_RETRY_SECONDS,
+                )
                 published = True
             finally:
                 staged_manifest.unlink(missing_ok=True)
