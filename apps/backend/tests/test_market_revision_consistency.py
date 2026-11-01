@@ -305,3 +305,132 @@ def test_targeted_import_retains_unmodified_symbols(tmp_path, monkeypatch):
     assert (files / "GBPUSD" / "M5.parquet").read_bytes() == b"GBPUSD"
     assert initial["dataset_revision"] != updated["dataset_revision"]
     assert set(updated["symbols_ok"]) == {"EURUSD", "GBPUSD"}
+
+
+@pytest.mark.asyncio
+async def test_replay_step_during_build_discards_old_cursor(monkeypatch):
+    start = datetime(2026, 6, 3, 12, tzinfo=UTC)
+    building = threading.Event()
+    release = threading.Event()
+
+    class Stub:
+        bounds = (start, start + timedelta(days=1))
+
+        def __init__(self):
+            self.position = 0
+            self.store = SimpleNamespace(data_revision=0)
+
+        def frame_inputs(self, timeframe):
+            return FrameInputs(
+                self, timeframe, start + timedelta(minutes=self.position),
+                0, True, False,
+            )
+
+        def frame_labels(self, _inputs):
+            return {}
+
+        def step_cursor(self, *, timeframe, bars):
+            self.position += bars
+            release.set()
+            return start + timedelta(minutes=self.position)
+
+    class Socket:
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        def __init__(self):
+            self.sent = []
+            self.delivered = asyncio.Event()
+            self.first = True
+
+        async def accept(self):
+            pass
+
+        async def receive_json(self):
+            if self.first:
+                self.first = False
+                assert await asyncio.to_thread(building.wait, 5)
+                return {"type": "replay.step", "bars": 1}
+            await self.delivered.wait()
+            raise WebSocketDisconnect(code=1000)
+
+        async def send_json(self, frame):
+            self.sent.append(frame)
+            self.delivered.set()
+
+    stub = Stub()
+    monkeypatch.setattr(market_xray, "_app_service", lambda _app: stub)
+
+    def build(inputs, timeframe):
+        if inputs.as_of == start:
+            building.set()
+            assert release.wait(5)
+        return {
+            "type": "market.frame",
+            "timeframe": timeframe,
+            "cursor": inputs.as_of.isoformat(),
+        }
+
+    monkeypatch.setattr(market_xray, "_build_frame", build)
+    frames = SharedFrames(retained=2)
+    monkeypatch.setattr(market_xray, "_frames", frames)
+    sock = Socket()
+    try:
+        await asyncio.wait_for(market_xray.market_ws(sock), timeout=8)
+        assert sock.sent
+        assert sock.sent[0]["cursor"] == (start + timedelta(minutes=1)).isoformat()
+        assert not any(frame["cursor"] == start.isoformat() for frame in sock.sent)
+    finally:
+        frames._executor.shutdown(wait=True, cancel_futures=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_subscribers_get_their_own_initial_timeframes(monkeypatch):
+    class Stub:
+        bounds = (None, None)
+
+        def frame_inputs(self, tf):
+            return FrameInputs(self, tf, None, 0, False, False)
+
+        def frame_labels(self, _inputs):
+            return {}
+
+    class Socket:
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        def __init__(self, tf):
+            self.tf = tf
+            self.first = True
+            self.delivered = asyncio.Event()
+            self.sent = []
+
+        async def accept(self):
+            pass
+
+        async def receive_json(self):
+            if self.first:
+                self.first = False
+                return {"type": "subscribe", "timeframe": self.tf}
+            await self.delivered.wait()
+            raise WebSocketDisconnect(code=1000)
+
+        async def send_json(self, frame):
+            self.sent.append(frame)
+            self.delivered.set()
+
+    stub = Stub()
+    monkeypatch.setattr(market_xray, "_app_service", lambda _app: stub)
+    monkeypatch.setattr(
+        market_xray, "_build_frame",
+        lambda inputs, tf: {"type": "market.frame", "timeframe": tf},
+    )
+    frames = SharedFrames(retained=4)
+    monkeypatch.setattr(market_xray, "_frames", frames)
+    clients = [Socket("M5"), Socket("H4")]
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(market_xray.market_ws(client) for client in clients)),
+            timeout=6,
+        )
+        assert [client.sent[0]["timeframe"] for client in clients] == ["M5", "H4"]
+    finally:
+        frames._executor.shutdown(wait=True, cancel_futures=True)
