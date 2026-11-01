@@ -183,3 +183,105 @@ async def test_websocket_first_frame_uses_immediate_subscription(monkeypatch):
         assert socket.sent[0]["timeframe"] == "M5"
     finally:
         frames._executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _write_generation(root: Path, revision: str, price: float) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    generation = root / "generations" / revision
+    for tf, minutes in universe.TIMEFRAMES.items():
+        folder = generation / "EURUSD"
+        folder.mkdir(parents=True, exist_ok=True)
+        t = datetime(2026, 6, 3, tzinfo=UTC)
+        stamps = [t + timedelta(minutes=minutes * i) for i in range(180)]
+        pq.write_table(pa.table({
+            "ts": stamps,
+            "open": [price] * len(stamps),
+            "high": [price + 0.002] * len(stamps),
+            "low": [price - 0.002] * len(stamps),
+            "close": [price] * len(stamps),
+            "spread": [0.0001] * len(stamps),
+            "volume": [5.0] * len(stamps),
+        }), folder / f"{tf}.parquet")
+
+
+def test_external_generation_switch_replaces_service_without_restart(tmp_path):
+    root = tmp_path / "store"
+    _write_generation(root, "v1", 1.104)
+    (root / "manifest.json").write_text(json.dumps({
+        "dataset_revision": "v1", "generation": "generations/v1",
+    }))
+    state = MarketState(tmp_path / "market.db")
+    previous = MarketXRayService(CandleStore(root), state=state)
+    app = SimpleNamespace(state=SimpleNamespace(market_xray_service=previous))
+    assert market_xray._app_service(app) is previous
+
+    _write_generation(root, "v2", 1.5)
+    pending = root / ".manifest-pending"
+    pending.write_text(json.dumps({
+        "dataset_revision": "v2", "generation": "generations/v2",
+    }))
+    pending.replace(root / "manifest.json")
+
+    updated = market_xray._app_service(app)
+    try:
+        assert updated is not previous
+        assert updated.store.recorded_revision == "v2"
+        assert previous.store.recorded_revision == "v1"
+        assert updated.store.path_for("EURUSD", "M5").exists()
+    finally:
+        updated.store.close()
+        previous.store.close()
+
+
+def test_frame_panels_all_observe_one_live_revision(tmp_path):
+    """A mid-build feed write waits, rather than mixing X-Ray and leaders."""
+    store = CandleStore(tmp_path / "store")
+    store.put_live_batch([("EURUSD", "M5", [_bar(1.104)])])
+    at = datetime(2026, 6, 3, 12, 5, tzinfo=UTC)
+    begun = threading.Event()
+    committed = threading.Event()
+    worker = None
+
+    class Panels:
+        def __init__(self):
+            self.store = store
+
+        def market_status(self):
+            return None
+
+        def price(self):
+            candle = store.latest_close("EURUSD", "M5", as_of=at)
+            return candle.close
+
+        def xray(self, **_):
+            nonlocal worker
+            def write():
+                begun.set()
+                store.put_live_batch([("EURUSD", "M5", [_bar(1.5)])])
+                committed.set()
+            worker = threading.Thread(target=write)
+            worker.start()
+            assert begun.wait(2)
+            return {"price": self.price()}
+
+        def strength(self, **_):
+            assert not committed.wait(0.05), "writer committed within snapshot"
+            return {"price": self.price()}
+
+        def leaders(self, **_):
+            return {"price": self.price()}
+
+    try:
+        service = Panels()
+        inputs = FrameInputs(service, "M5", at, store.data_revision, False, True)
+        frame = market_xray._build_frame(inputs, "M5")
+        assert frame["xray"]["price"] == frame["strength"]["price"] == frame["leaders"]["price"]
+        assert frame["xray"]["price"] == pytest.approx(1.104)
+        assert frame["data_revision"] == inputs.data_revision
+    finally:
+        if worker is not None:
+            worker.join(timeout=4)
+        store.close()
+    assert committed.is_set()
