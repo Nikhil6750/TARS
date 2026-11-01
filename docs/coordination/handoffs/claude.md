@@ -11,7 +11,99 @@ for that).
 
 ---
 
-## Latest handoff — WebSocket reconnect storm (2026-11-01)
+## Latest handoff — Market publication stabilization (2026-11-01)
+
+**Branch**: `fix/market-publication-stabilization`, worktree
+`C:\TARS-Market-Stabilize`, from Codex's `463df40`, which is
+`fix/market-data-revision-consistency` (`cfcdf37`) plus tests and docs only.
+**Fix SHA**: `22be1d9`. Later commits are documentation only.
+**Status**: Awaiting Codex verification. Not merged. No Tauri build.
+
+### Fixes
+
+- **Failed replacement lost coverage.** Only symbols outside the target list were
+  carried forward. Anything the import did not rebuild is now carried, partial
+  files are discarded first, a failed symbol is not listed as ok, and its failure
+  says `previous data kept`. Applies to full imports too. An import that rebuilt
+  nothing publishes nothing, which is a behaviour change for an all-failed
+  targeted import: it now raises rather than publishing identical data.
+- **Concurrent imports lost updates.** Reading the base manifest through replacing
+  it is one transaction under `.publication.lock`, an exclusive SQLite lock the OS
+  releases if the holder dies. Waits 60s, then raises `TimeoutError`. A publication
+  that fails removes its generation. A clean full import still reads no manifest,
+  so it can replace an unreadable one.
+- **Receiver leak.** The first subscription wait moved inside the `try`.
+
+### Test changes to review
+
+- Codex's concurrency test could not pass once fixed: its barrier needed both
+  publishers inside `os.replace`, which a correct lock prevents. The barrier now
+  gives up after 3s. It still failed on the unfixed code with the original lost
+  update. Its assertion is unchanged.
+- Beyond the three reported failures, three stress tests were passing with no
+  build running, because their aborts landed inside the 100ms wait:
+  `test_a_fresh_client_after_a_storm_waits_for_nothing_abandoned`,
+  `test_repeated_storms_leave_nothing_behind`, and
+  `test_stress_a_clean_close_during_a_build`. They now cross the wait, and the
+  last two assert a build ran.
+- `--abort-delay` still defaults to 0.02 in `tools/measure_market_ws_storm.py`,
+  which is inside the wait. Use 0.15 to abort after builds have started.
+
+### Evidence
+
+Backend, complete runs on `22be1d9`: 1916 passed, 8 skipped, 0 failed in 588.30s,
+and again in 1166.60s beside shutdown stress. Evidence is in
+`artifacts/market-publication-stabilization/` in the worktree, untracked. 13 of 13
+removed protections were caught. One mutation in `mutation.log` duplicates another;
+the separate rename-only run is the thirteenth.
+
+### Backend suite stall
+
+Reproduced as a defect on production code, not proven to be the event in Codex's
+run, which captured threads but no task chain.
+
+A `task.cancel()` landing in the same loop iteration as an httpx timeout comes back
+as `ReadTimeout` or `ConnectTimeout` instead of `CancelledError`. `NewsMonitor.tick`
+and `CalendarMonitor.refresh` catch `Exception`, so the monitor treats it as a
+failed fetch and sleeps, and `stop()`, which cancels once and then awaits the task,
+never returns. The `client` fixture leaves monitors enabled, so tests run these
+with live network calls. This matches Codex's dump: all threads idle, aiosqlite
+open, loop polling.
+
+Measured: 5 hangs in 79 real `NewsMonitor.stop()` calls aimed at the real 10s
+timeout. All five were in the one process whose aim reached the window, 5 of its
+15 cancels of a live task. Sweep at a 50ms timeout: 246 of 1,053 cancels lost over
+TLS, 314 of 1,043 over plain HTTP. With nothing aimed at the window, 1,095 app
+lifecycles did not hang. Those used local plain HTTP, so they did not cover real TLS
+or a slow endpoint.
+
+**Not fixed, it is outside the three defects.** Suggested fix: in `stop()`, repeat
+the cancel until the task is done. Until then a run can still stall, rarely. The
+same applies to backend shutdown in production.
+
+### Open items
+
+- **`WinError 5` on publish.** `os.replace` is refused while a backend has
+  `manifest.json` open. 4 of 48 imports failed during a storm of 120 clients,
+  safely: active data unchanged, generation removed. A reader can also get
+  `PermissionError` during the replacement. Suggested fix: bounded retry on both
+  sides.
+- **Frames under continuous imports.** With 4 imports at once for 12 rounds, first
+  frames reached 37.8s and one client got `market data changed repeatedly`. Far
+  beyond normal use; it refused rather than mixing data.
+- **Disk.** Generations are never reclaimed, as Codex reported. Each published
+  import keeps its directory.
+- Two imports of the same symbol: the last to publish wins. MT5 LIVE/STALE remains
+  unproven (AUTH_REQUIRED). `D:\TARS_DATA` was not imported or changed.
+
+### Next recommended action
+
+Codex verifies `22be1d9`, and decides whether the monitor `stop()` fix and the
+`WinError 5` retry block the release. Neither was in scope here.
+
+---
+
+## Previous handoff — WebSocket reconnect storm (2026-11-01)
 
 **Branch**: `fix/market-ws-reconnect-storm`, worktree `C:\TARS-Market-WS-Perf`, from
 `1939dc2`

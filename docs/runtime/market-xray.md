@@ -82,6 +82,21 @@ non-system drive with room to spare, else a repo-local fallback. On this
 machine that is `D:\TARS_DATA\market\xray_store`. Source CSVs are read from
 `C:\Trade Data` unless `TARS_MARKET_CSV_ROOT` says otherwise.
 
+**What an import publishes.** Each import writes a new generation and then
+replaces `manifest.json`, so readers see all of it or none of it. Anything the
+import did not rebuild is carried into the new generation: symbols it was not
+asked for, and symbols it failed to replace, which keep their old data and are
+listed under `symbols_failed` with `previous data kept`. An import that rebuilt
+nothing publishes nothing. Imports can run at the same time, in one process or
+several: reading the active manifest and replacing it happen under
+`.publication.lock` in the store, which the operating system releases if the
+holder dies. An import that cannot publish removes its generation and leaves
+the active data alone.
+
+On Windows a publish can be refused with `WinError 5` while a running backend
+has the manifest open, and a read can fail the same way during the replacement.
+Nothing is lost when this happens, and running the import again publishes it.
+
 | Variable | Effect |
 |---|---|
 | `TARS_DATA_ROOT` | Moves the candle store, and every other TARS dataset. |
