@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -28,6 +29,24 @@ from market import universe
 from market.ingest import DEFAULT_STORE_ROOT  # resolved from TARS_DATA_ROOT; see P1-C2
 
 logger = logging.getLogger("tars.market.store")
+
+
+class RevisionChanged(RuntimeError):
+    """A frame began under a live-data revision that has since changed."""
+
+
+def active_dataset_revision(root: Path | str) -> str:
+    """Cross-process revision published atomically with the active generation.
+
+    Legacy stores have no revision marker. A malformed manifest is not
+    mistaken for the old generation: callers must fail closed.
+    """
+    path = Path(root) / "manifest.json"
+    if not path.exists():
+        return "legacy"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    return str(manifest.get("dataset_revision") or "legacy")
+
 
 
 @dataclass(frozen=True)
@@ -72,7 +91,7 @@ class CandleStore:
 
     def __init__(self, root: Path | str = DEFAULT_STORE_ROOT):
         self.root = Path(root)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._con = duckdb.connect(database=":memory:")
         self._con.execute("SET TimeZone='UTC'")
         # Bars from a live feed. Held in memory, apart from the recorded
@@ -88,6 +107,11 @@ class CandleStore:
         # an import rewrites it, then replaces the service and this store.
         self.data_revision = 0
         self.manifest = self._load_manifest()
+        self.recorded_revision = str(self.manifest.get("dataset_revision") or "legacy")
+        generation = self.manifest.get("generation")
+        # A new generation is immutable and survives replacement of the
+        # active manifest; readers holding this store never see partial imports.
+        self._recorded_root = self.root / generation if generation else self.root
 
     def _load_manifest(self) -> dict:
         path = self.root / "manifest.json"
@@ -102,7 +126,7 @@ class CandleStore:
 
     # ---- paths -----------------------------------------------------------
     def path_for(self, symbol: str, timeframe: str) -> Path:
-        return self.root / symbol.upper() / (timeframe.upper() + ".parquet")
+        return self._recorded_root / symbol.upper() / (timeframe.upper() + ".parquet")
 
     def has(self, symbol: str, timeframe: str) -> bool:
         return self.path_for(symbol, timeframe).exists() or self._has_live(symbol, timeframe)
@@ -114,31 +138,59 @@ class CandleStore:
         )
         return bool(rows)
 
-    def put_live_bars(self, symbol: str, timeframe: str, bars: list[Candle]) -> None:
-        """Add closed bars from a live feed, replacing any with the same open.
-        They never reach the Parquet store, and any overlapping a recorded bar
-        are ignored on read, so a feed cannot alter recorded history."""
-        if not bars:
-            return
-        # Through Arrow, because a backfill is many thousands of rows and
-        # `executemany` inserts them one at a time.
-        incoming = pa.table({
-            "symbol": [symbol.upper()] * len(bars),
-            "timeframe": [timeframe.upper()] * len(bars),
-            "ts": [_naive(b.ts) for b in bars],
-            "open": [b.open for b in bars],
-            "high": [b.high for b in bars],
-            "low": [b.low for b in bars],
-            "close": [b.close for b in bars],
-            "spread": [b.spread for b in bars],
-            "volume": [b.volume for b in bars],
-        })
+    @contextmanager
+    def consistent_snapshot(self, expected_live_revision: int):
+        """Hold one in-memory DuckDB revision across every panel read.
+
+        A feed writer cannot modify one symbol halfway through a frame.
+        The revision check happens *inside* the lock so a build queued behind
+        a feed commit does not accidentally claim an earlier version.
+        """
         with self._lock:
-            self._con.register("incoming_bars", incoming)
+            if self.data_revision != expected_live_revision:
+                raise RevisionChanged("live data changed before frame build")
+            yield
+
+    def put_live_bars(self, symbol: str, timeframe: str, bars: list[Candle]) -> None:
+        """Compatibility seam for one symbol/timeframe, committed atomically."""
+        self.put_live_batch([(symbol, timeframe, bars)])
+
+    def put_live_batch(self, updates: list[tuple[str, str, list[Candle]]]) -> None:
+        """Commit a whole feed poll in one DuckDB transaction/revision.
+
+        Publishing per-symbol writes allowed X-Ray and leaders to observe
+        different stages of the same poll. A failure rolls everything back
+        and does not advance the revision.
+        """
+        updates = [(symbol, timeframe, bars) for symbol, timeframe, bars in updates if bars]
+        if not updates:
+            return
+        with self._lock:
+            self._con.execute("BEGIN TRANSACTION")
             try:
-                self._con.execute("INSERT OR REPLACE INTO live_bars SELECT * FROM incoming_bars")
-            finally:
-                self._con.unregister("incoming_bars")
+                for symbol, timeframe, bars in updates:
+                    incoming = pa.table({
+                        "symbol": [symbol.upper()] * len(bars),
+                        "timeframe": [timeframe.upper()] * len(bars),
+                        "ts": [_naive(b.ts) for b in bars],
+                        "open": [b.open for b in bars],
+                        "high": [b.high for b in bars],
+                        "low": [b.low for b in bars],
+                        "close": [b.close for b in bars],
+                        "spread": [b.spread for b in bars],
+                        "volume": [b.volume for b in bars],
+                    })
+                    self._con.register("incoming_bars", incoming)
+                    try:
+                        self._con.execute(
+                            "INSERT OR REPLACE INTO live_bars SELECT * FROM incoming_bars"
+                        )
+                    finally:
+                        self._con.unregister("incoming_bars")
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
             self.data_revision += 1
 
     @property
