@@ -196,6 +196,12 @@ POST /api/v1/market/replay/reset
 | `POST /api/v1/market/import` | Build the store from a local folder, in the background |
 | `WS /api/v1/market/ws` | `market.frame` every 10s. Closes 1008 on a message it cannot read, 1011 on an internal error |
 
+Connections share frame panels: one build per timeframe, cursor and live-data
+revision, one at a time, with up to 16 finished frames kept. `status`,
+`provenance`, `feed`, `replay_pinned` and `sent_at` are never shared. They are
+resolved for each frame as it is sent, so a kept frame cannot carry an old
+`LIVE`. A build whose clients have all gone before it starts never runs.
+
 Separately, `GET /api/v1/health` carries an `identity` block: `instance_id`
 (this process), `build_id` and `build_source` (this code — the commit SHA
 where the repository is readable, else the release version), `app_version`

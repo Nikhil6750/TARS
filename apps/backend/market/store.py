@@ -83,6 +83,10 @@ class CandleStore:
             " high DOUBLE, low DOUBLE, close DOUBLE, spread DOUBLE, volume DOUBLE,"
             " PRIMARY KEY (symbol, timeframe, ts))"
         )
+        # Counts writes to `live_bars`, so results read from the store can be
+        # told apart from ones read before a write. The Parquet is not covered:
+        # an import rewrites it, then replaces the service and this store.
+        self.data_revision = 0
         self.manifest = self._load_manifest()
 
     def _load_manifest(self) -> dict:
@@ -135,6 +139,7 @@ class CandleStore:
                 self._con.execute("INSERT OR REPLACE INTO live_bars SELECT * FROM incoming_bars")
             finally:
                 self._con.unregister("incoming_bars")
+            self.data_revision += 1
 
     @property
     def available_symbols(self) -> tuple[str, ...]:

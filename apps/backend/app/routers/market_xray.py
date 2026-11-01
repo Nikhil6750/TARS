@@ -15,19 +15,22 @@ for the duration -- including the desktop shell's backend health poll, which
 then concludes the backend has died and restarts it. Declaring them `def`
 makes Starlette run each in its threadpool, so the loop stays responsive. The
 WebSocket handler must stay `async`, so it offloads the same work with
-``asyncio.to_thread``.
+``asyncio.to_thread``, and its frames are built by `market.frames`, which
+shares them between connections.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
 from market import feed, ingest, setup, universe
-from market.service import MarketXRayService
+from market.frames import Flight, SharedFrames
+from market.service import FrameInputs, MarketXRayService
 from market.store import CandleStore
 
 logger = logging.getLogger("tars.market.api")
@@ -40,6 +43,11 @@ router = APIRouter(prefix="/api/v1/market", tags=["market-xray"])
 PUSH_INTERVAL_SECONDS = 10.0
 # How long a disconnect waits for a frame already being built before giving up.
 FRAME_DRAIN_SECONDS = 60.0
+# Finished frames kept. Enough for every timeframe at the current cursor and a
+# few replay steps around it; each is a few hundred kilobytes.
+FRAMES_RETAINED = 16
+# The panels of a frame, each of which carries its own provenance.
+_FRAME_PANELS = ("xray", "strength", "leaders")
 # WebSocket close codes.
 _POLICY_VIOLATION = 1008
 _INTERNAL_ERROR = 1011
@@ -48,6 +56,10 @@ _CLOSED_SOCKET_MESSAGES = (
     "after sending 'websocket.close'",
     "once a close message has been sent",
 )
+
+_frames = SharedFrames(retained=FRAMES_RETAINED)
+# Clients arriving together at a fresh backend must not each build a service.
+_service_creation = threading.Lock()
 
 
 def _service(request: Request) -> MarketXRayService:
@@ -58,21 +70,25 @@ def _app_service(app) -> MarketXRayService:
     existing = getattr(app.state, "market_xray_service", None)
     if existing is not None:
         return existing
-    try:
-        service = MarketXRayService()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("market x-ray service unavailable: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "market_store_unavailable",
-                "message": str(exc),
-                "remedy": "Build the candle store: python -m market.ingest",
-            },
-        ) from exc
-    app.state.market_xray_service = service
-    _start_feed(app)
-    return service
+    with _service_creation:
+        existing = getattr(app.state, "market_xray_service", None)
+        if existing is not None:
+            return existing
+        try:
+            service = MarketXRayService()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("market x-ray service unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "market_store_unavailable",
+                    "message": str(exc),
+                    "remedy": "Build the candle store: python -m market.ingest",
+                },
+            ) from exc
+        app.state.market_xray_service = service
+        _start_feed(app)
+        return service
 
 
 def _start_feed(app) -> None:
@@ -326,27 +342,38 @@ def replay_reset(request: Request) -> dict:
     return {"cursor": cursor.isoformat(), "status": service.market_status().as_dict()}
 
 
-def _build_frame(service: MarketXRayService, timeframe: str) -> dict:
-    """One WebSocket frame. Synchronous by design -- callers run it in a
-    thread so the event loop stays free."""
-    status = service.market_status().as_dict()
-    if service.bounds[1] is None and not service.panels_follow_feed:
+def _build_frame(inputs: FrameInputs, timeframe: str) -> dict:
+    """The panels of a WebSocket frame, computed from `inputs`. Synchronous by
+    design -- callers run it in a thread so the event loop stays free.
+
+    The result is shared and must not be changed. It holds what follows from
+    `inputs` alone: `_labelled` adds whatever depends on the moment of sending.
+    """
+    service = inputs.service
+    service.market_status()
+    if inputs.as_of is None:
         # Nothing to compute from yet: the first-run screen owns this state,
         # and a frame must not fail just because the store is still empty.
-        return {"type": "market.status", "status": status, "feed": service.feed_state}
+        return {"type": "market.status"}
     return {
         "type": "market.frame",
-        "sent_at": datetime.now(UTC).isoformat(),
-        "cursor": service.cursor.isoformat(),
+        "cursor": inputs.as_of.isoformat(),
         "timeframe": timeframe,
-        "status": status,
-        "provenance": service.data_provenance().as_dict(),
-        "replay_pinned": service.replay_pinned,
-        "feed": service.feed_state,
-        "xray": service.xray(timeframe=timeframe),
-        "strength": service.strength(),
-        "leaders": service.leaders(timeframe=timeframe),
+        "xray": service.xray(timeframe=timeframe, as_of=inputs.as_of),
+        "strength": service.strength(as_of=inputs.as_of),
+        "leaders": service.leaders(timeframe=timeframe, as_of=inputs.as_of),
     }
+
+
+def _labelled(frame: dict, labels: dict) -> dict:
+    """A copy of a shared frame for sending now, under the labels of now."""
+    if frame["type"] == "market.status":
+        return {**frame, "status": labels["status"], "feed": labels["feed"]}
+    sending = {**frame, **labels}
+    for panel in _FRAME_PANELS:
+        if panel in frame:
+            sending[panel] = {**frame[panel], "provenance": labels["provenance"]}
+    return sending
 
 
 # ---- websocket ----------------------------------------------------------
@@ -426,9 +453,10 @@ async def _finished_before(task: asyncio.Future, stop: asyncio.Event) -> bool:
 async def _drain_build(building: asyncio.Future | None) -> None:
     """See a frame build through after the connection has ended.
 
-    Its thread cannot be cancelled, so returning now would leave it running
-    with nothing attached. Bounded, because a stuck query must not pin the
-    handler forever. Its result is unwanted, but a failure is still reported.
+    A running build cannot be cancelled, so returning now would leave it
+    running with nothing attached; one that never started is already over.
+    Bounded, because a stuck query must not pin the handler forever. Its
+    result is unwanted here, but a failure is still reported.
     """
     if building is None:
         return
@@ -509,31 +537,40 @@ async def market_ws(websocket: WebSocket) -> None:
                 await connection.close(_POLICY_VIOLATION)
                 return
 
-    def build_frame(tf: str) -> dict:
-        return _build_frame(service(), tf)
+    flight: Flight | None = None
+    building: asyncio.Future | None = None
+
+    async def next_frame() -> dict | None:
+        """The frame to send now. None if the connection ended first, which
+        leaves `flight` and `building` set for the cleanup below."""
+        nonlocal flight, building
+        inputs = service().frame_inputs(timeframe)
+        # Built in a worker thread: this is seconds of DuckDB and order-block
+        # work, and on the event loop it would stall every other request
+        # between frames.
+        flight = _frames.join(inputs, lambda: _build_frame(inputs, inputs.timeframe))
+        building = asyncio.wrap_future(flight.work)
+        if not await _finished_before(building, connection.stopped):
+            return None
+        finished = building
+        _frames.leave(flight)
+        flight = building = None
+        return _labelled(finished.result(), inputs.service.frame_labels(inputs))
 
     receiver = asyncio.create_task(receive_loop())
     # However it ends, a finished receiver means nothing is listening.
     receiver.add_done_callback(lambda _task: connection.stopped.set())
-    building: asyncio.Future | None = None
     try:
         while not connection.stopped.is_set():
-            # Built in a worker thread: this is seconds of DuckDB and
-            # order-block work, and on the event loop it would stall every
-            # other request between frames.
-            building = asyncio.ensure_future(asyncio.to_thread(build_frame, timeframe))
-            if not await _finished_before(building, connection.stopped):
-                break
             try:
-                frame = building.result()
+                frame = await next_frame()
             except Exception as exc:  # noqa: BLE001
                 frame = {
                     "type": "market.error",
                     "sent_at": datetime.now(UTC).isoformat(),
                     "message": str(exc),
                 }
-            building = None
-            if not await connection.send(frame):
+            if frame is None or not await connection.send(frame):
                 break
             try:
                 await asyncio.wait_for(connection.stopped.wait(), timeout=PUSH_INTERVAL_SECONDS)
@@ -543,6 +580,8 @@ async def market_ws(websocket: WebSocket) -> None:
         connection.stopped.set()
         receiver.cancel()
         outcome = (await asyncio.gather(receiver, return_exceptions=True))[0]
+        if flight is not None:
+            _frames.leave(flight)
         await _drain_build(building)
     if isinstance(outcome, Exception):
         await connection.close(_INTERNAL_ERROR)
