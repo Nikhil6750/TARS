@@ -15,10 +15,6 @@ from app.routers import market_xray
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="confirmed at 7fe5875: sender resumes after disconnect and sends on a closed ASGI socket",
-    strict=False,
-)
 async def test_market_websocket_does_not_send_after_receiver_disconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
