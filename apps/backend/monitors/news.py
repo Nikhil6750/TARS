@@ -19,7 +19,7 @@ from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree
 
 from events.core import EventSource, NormalizedEvent
-from monitors.calendar import NewsProvider
+from monitors.calendar import NewsProvider, stop_monitor_task
 
 logger = logging.getLogger("tars.monitors.news")
 
@@ -106,14 +106,16 @@ class NewsMonitor:
         self.state, self.detail = "DISCONNECTED", "not started"
         self.fetched_at: datetime | None = None
         self._task: asyncio.Task | None = None
+        self._stopping = False
 
     async def start(self):
+        self._stopping = False
         self._task = asyncio.create_task(self._run())
 
     async def stop(self):
         if self._task:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+            self._stopping = True
+            await stop_monitor_task(self._task, "news")
 
     async def _run(self):
         while True:
@@ -123,6 +125,8 @@ class NewsMonitor:
                 raise
             except Exception:
                 logger.exception("news tick failed; monitor remains alive")
+            if self._stopping:  # see stop_monitor_task
+                return
             await asyncio.sleep(self.tick_seconds)
 
     async def tick(self):

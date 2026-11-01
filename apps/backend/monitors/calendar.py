@@ -20,6 +20,28 @@ from events.core import EventSource, NormalizedEvent
 
 logger = logging.getLogger("tars.monitors.calendar")
 
+# How long a stopped monitor gets to finish. A tick that is already ending only
+# has its state to report, which is itself bounded per subscriber.
+MONITOR_STOP_SECONDS = 5.0
+
+
+async def stop_monitor_task(task: asyncio.Task, name: str) -> None:
+    """Cancel a monitor's task and wait for it, for a fixed time.
+
+    The monitor must have already been told to stop: a cancellation that reaches
+    an HTTP fetch just as it times out comes back as that timeout, which on its
+    own looks like a fetch to retry. Shutdown must finish whatever a task does, so
+    one that outlasts the wait is cancelled once more and reported, not awaited.
+    """
+    task.cancel()
+    done, _pending = await asyncio.wait({task}, timeout=MONITOR_STOP_SECONDS)
+    if not done:
+        task.cancel()
+        logger.error("%s monitor did not stop within %ss", name, MONITOR_STOP_SECONDS)
+    elif not task.cancelled() and task.exception() is not None:
+        logger.warning("%s monitor failed while stopping: %s", name, task.exception())
+
+
 # Which quoted symbols a currency move can affect.
 CURRENCY_SYMBOLS = {
     "USD": ("EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD"),
@@ -112,14 +134,16 @@ class CalendarMonitor:
         self.state, self.detail = "DISCONNECTED", "not started"
         self.fetched_at: datetime | None = None
         self._task: asyncio.Task | None = None
+        self._stopping = False
 
     async def start(self):
+        self._stopping = False
         self._task = asyncio.create_task(self._run())
 
     async def stop(self):
         if self._task:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+            self._stopping = True
+            await stop_monitor_task(self._task, "calendar")
 
     async def _run(self):
         while True:
@@ -129,6 +153,8 @@ class CalendarMonitor:
                 raise
             except Exception:
                 logger.exception("calendar tick failed; monitor remains alive")
+            if self._stopping:  # see stop_monitor_task
+                return
             await asyncio.sleep(self.tick_seconds)
 
     async def refresh(self):

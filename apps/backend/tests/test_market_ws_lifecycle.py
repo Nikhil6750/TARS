@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from starlette.websockets import WebSocketDisconnect
 
 from app.routers import market_xray
+from market.service import FrameInputs
 
 UVICORN_CLOSED_ERROR = (
     "Unexpected ASGI message 'websocket.send', after sending 'websocket.close' "
@@ -75,6 +76,17 @@ class StubService:
     def __init__(self):
         self.steps: list[tuple[str, int]] = []
         self.resets = 0
+        self.requests = 0
+
+    def frame_inputs(self, timeframe):
+        # Different every time, so no two requests share a build and these
+        # tests keep exercising a build per frame. Sharing has its own tests,
+        # in test_market_ws_shared_frames.
+        self.requests += 1
+        return FrameInputs(self, timeframe, None, self.requests, False, False)
+
+    def frame_labels(self, _inputs):
+        return {}
 
     def step_cursor(self, *, timeframe, bars):
         self.steps.append((timeframe, bars))
@@ -106,6 +118,17 @@ def frames(monkeypatch, *, seconds=0.0, on_start=None):
     return log
 
 
+def gone_during_a_build(monkeypatch, *, seconds):
+    """A client that disconnects once its build is running. It has to wait for
+    that: one gone before the build starts simply has it cancelled."""
+    socket_ = FakeSocket()
+    log = frames(
+        monkeypatch, seconds=seconds,
+        on_start=lambda: socket_.script.append(WebSocketDisconnect(code=1000)),
+    )
+    return socket_, log
+
+
 def run(websocket, timeout=5.0):
     return asyncio.wait_for(market_xray.market_ws(websocket), timeout=timeout)
 
@@ -115,9 +138,9 @@ def run(websocket, timeout=5.0):
 
 async def test_a_disconnect_during_a_build_never_sends(service, monkeypatch):
     """The sender used to wake from the build and write without looking."""
-    frames(monkeypatch, seconds=0.05)
-    socket_ = FakeSocket([WebSocketDisconnect(code=1000)])
+    socket_, log = gone_during_a_build(monkeypatch, seconds=0.05)
     await run(socket_)
+    assert log["finished"] == 1
     assert socket_.sent == []
 
 
@@ -152,24 +175,46 @@ async def test_a_disconnect_reported_by_the_write_is_normal(service, monkeypatch
 
 
 async def test_the_handler_does_not_finish_before_its_build(service, monkeypatch):
-    """`to_thread` cannot be cancelled, so returning early would leave a worker
-    running with nothing attached to it."""
-    log = frames(monkeypatch, seconds=0.15)
-    await run(FakeSocket([WebSocketDisconnect(code=1000)]))
+    """A running build cannot be cancelled, so returning early would leave a
+    worker running with nothing attached to it."""
+    socket_, log = gone_during_a_build(monkeypatch, seconds=0.15)
+    await run(socket_)
     assert log == {"started": 1, "finished": 1}
 
 
+async def test_a_build_not_yet_started_is_cancelled_by_a_disconnect(service, monkeypatch):
+    """The worker is busy with someone else's build, so this one is queued."""
+    release = threading.Event()
+    started = threading.Event()
+
+    def busy():
+        started.set()
+        assert release.wait(5)
+        return {"type": "market.frame"}
+
+    other = market_xray._frames.join("busy", busy)
+    started.wait(5)
+    log = frames(monkeypatch)
+    try:
+        await run(FakeSocket([WebSocketDisconnect(code=1000)]))
+    finally:
+        release.set()
+        market_xray._frames.leave(other)
+    other.work.result(timeout=5)
+    assert log == {"started": 0, "finished": 0}
+
+
 async def test_no_new_build_starts_after_a_disconnect(service, monkeypatch):
-    log = frames(monkeypatch, seconds=0.05)
-    await run(FakeSocket([WebSocketDisconnect(code=1000)]))
+    socket_, log = gone_during_a_build(monkeypatch, seconds=0.05)
+    await run(socket_)
     await asyncio.sleep(0.1)
     assert log["started"] == 1
 
 
 async def test_no_tasks_outlive_the_handler(service, monkeypatch):
-    frames(monkeypatch, seconds=0.05)
+    socket_, _log = gone_during_a_build(monkeypatch, seconds=0.05)
     before = asyncio.all_tasks()
-    await run(FakeSocket([WebSocketDisconnect(code=1000)]))
+    await run(socket_)
     await asyncio.sleep(0)
     assert asyncio.all_tasks() - before == set()
 
@@ -192,14 +237,16 @@ async def test_cancellation_propagates_after_cleaning_up(service, monkeypatch):
 
 async def test_a_build_failure_after_disconnect_is_retrieved(service, monkeypatch, caplog):
     """Otherwise it surfaces as 'Task exception was never retrieved'."""
+    socket_ = FakeSocket()
 
     def boom(_service, _timeframe):
+        socket_.script.append(WebSocketDisconnect(code=1000))
         time.sleep(0.05)
         raise ValueError("bad store")
 
     monkeypatch.setattr(market_xray, "_build_frame", boom)
     with caplog.at_level(logging.WARNING, logger="tars.market.api"):
-        await run(FakeSocket([WebSocketDisconnect(code=1000)]))
+        await run(socket_)
     assert "bad store" in caplog.text
 
 
@@ -304,7 +351,8 @@ async def test_an_unknown_timeframe_is_ignored_as_before(service, monkeypatch):
     monkeypatch.setattr(market_xray, "PUSH_INTERVAL_SECONDS", 0.01)
     socket_ = FakeSocket([{"type": "subscribe", "timeframe": "W1"}])
     task = asyncio.create_task(market_xray.market_ws(socket_))
-    await asyncio.sleep(0.06)
+    while not socket_.sent:
+        await asyncio.sleep(0.005)
     socket_.script.append(WebSocketDisconnect(code=1000))
     await asyncio.wait_for(task, 5)
     assert socket_.sent[-1]["timeframe"] == universe_default()
@@ -438,12 +486,37 @@ def assert_clean(errors, server, active) -> None:
     assert active["builds"] == 0, "a frame build is still running"
 
 
+async def test_cancelling_during_the_first_subscription_wait_stops_the_receiver(service):
+    receiving = asyncio.Event()
+
+    class Waiting(FakeSocket):
+        async def receive_json(self):
+            receiving.set()
+            await asyncio.Event().wait()
+
+    before = asyncio.all_tasks()
+    handler = asyncio.create_task(market_xray.market_ws(Waiting()))
+    await asyncio.wait_for(receiving.wait(), 3)
+    handler.cancel()
+    outcome = (await asyncio.gather(handler, return_exceptions=True))[0]
+    await asyncio.sleep(0)
+    left = asyncio.all_tasks() - before
+    for task in left:
+        task.cancel()
+    await asyncio.gather(*left, return_exceptions=True)
+    assert not left
+    assert isinstance(outcome, asyncio.CancelledError), "the cancellation must still propagate"
+
+
 async def test_stress_aborting_at_every_phase_of_a_frame(live_server):
-    """Delays straddle the 30ms build and the 10ms wait, so aborts land before,
-    during and after a build, and during a large write."""
+    """Delays straddle the first subscription wait, the 30ms build and the 10ms
+    wait, so aborts land before, during and after a build, and during a large
+    write."""
     url, server, errors, active = live_server
+    delays = [0.002 * i for i in range(40)]
+    delays += [market_xray.INITIAL_SUBSCRIPTION_SECONDS + delay for delay in delays]
     for _ in range(4):
-        await asyncio.gather(*[_abort_at(url, 0.002 * i) for i in range(40)])
+        await asyncio.gather(*[_abort_at(url, delay) for delay in delays])
     await _settle(server, active)
     assert active["total"] > 0, "nothing was exercised"
     assert_clean(errors, server, active)
@@ -457,8 +530,10 @@ async def test_stress_a_clean_close_during_a_build(live_server):
         await asyncio.sleep(delay)
         await connection.close()
 
-    await asyncio.gather(*[polite(0.003 * i) for i in range(40)])
+    wait = market_xray.INITIAL_SUBSCRIPTION_SECONDS
+    await asyncio.gather(*[polite(wait + 0.003 * i) for i in range(40)])
     await _settle(server, active)
+    assert active["total"] > 0, "nothing was exercised"
     assert_clean(errors, server, active)
 
 

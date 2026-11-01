@@ -294,6 +294,7 @@ class FeedBridge:
         self._last_bars_at = now
         offset = self.tracker.server_offset
         edges: list[datetime] = []
+        updates: list[tuple[str, str, list[Candle]]] = []
         for broker_symbol, symbol in self._symbols.items():
             point = self._provider.point(broker_symbol)
             if not point or offset is None:
@@ -303,14 +304,16 @@ class FeedBridge:
                 bars = completed_bars(
                     rates, timeframe=timeframe, server_offset=offset, point=point, now=now
                 )
-                service.store.put_live_bars(symbol, timeframe, bars)
+                updates.append((symbol, timeframe, bars))
                 if timeframe == "H1":
                     self._hourly.setdefault(symbol, {}).update({b.ts: b for b in bars})
                 if timeframe == "M5" and bars:
                     edges.append(bars[-1].ts + timedelta(minutes=5))
             hourly = list(self._hourly.get(symbol, {}).values())
-            service.store.put_live_bars(symbol, "H4", aggregate(hourly, "H4"))
-            service.store.put_live_bars(symbol, "D1", aggregate(hourly, "D1"))
+            updates.append((symbol, "H4", aggregate(hourly, "H4")))
+            updates.append((symbol, "D1", aggregate(hourly, "D1")))
+        # All symbols and timeframes become visible together, with one revision.
+        service.store.put_live_batch(updates)
         if edges:
             # The slowest instrument sets the edge, the same rule the recorded
             # bounds use: a panel must not outrun any of its inputs.

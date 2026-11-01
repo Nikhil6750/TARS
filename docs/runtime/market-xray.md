@@ -82,6 +82,27 @@ non-system drive with room to spare, else a repo-local fallback. On this
 machine that is `D:\TARS_DATA\market\xray_store`. Source CSVs are read from
 `C:\Trade Data` unless `TARS_MARKET_CSV_ROOT` says otherwise.
 
+**What an import publishes.** Each import writes a new generation and then
+replaces `manifest.json`, so readers see all of it or none of it. Anything the
+import did not rebuild is carried into the new generation: symbols it was not
+asked for, and symbols it failed to replace, which keep their old data and are
+listed under `symbols_failed` with `previous data kept`. An import that rebuilt
+nothing publishes nothing. Imports can run at the same time, in one process or
+several: reading the active manifest and replacing it happen under
+`.publication.lock` in the store, which the operating system releases if the
+holder dies. An import that cannot publish removes its generation and leaves
+the active data alone.
+
+On Windows a publish is refused while another process has the manifest open, and
+a read is refused during the replacement. Both clear in moments, so a publish
+retries for up to 5s and a read for up to 0.25s, for sharing violations only. A
+publish that stays refused fails, removes its generation and leaves the active
+data alone, and running the import again publishes it.
+
+Only a missing manifest means an older store with no generations. A manifest that
+cannot be read, or is malformed, is an error: the market routes fail rather than
+read candles from the wrong place. A clean `python -m market.ingest` replaces it.
+
 | Variable | Effect |
 |---|---|
 | `TARS_DATA_ROOT` | Moves the candle store, and every other TARS dataset. |
@@ -195,6 +216,12 @@ POST /api/v1/market/replay/reset
 | `GET /api/v1/market/setup` | What exists, for the first-run screen. Answers with an empty store |
 | `POST /api/v1/market/import` | Build the store from a local folder, in the background |
 | `WS /api/v1/market/ws` | `market.frame` every 10s. Closes 1008 on a message it cannot read, 1011 on an internal error |
+
+Connections share frame panels: one build per timeframe, cursor and live-data
+revision, one at a time, with up to 16 finished frames kept. `status`,
+`provenance`, `feed`, `replay_pinned` and `sent_at` are never shared. They are
+resolved for each frame as it is sent, so a kept frame cannot carry an old
+`LIVE`. A build whose clients have all gone before it starts never runs.
 
 Separately, `GET /api/v1/health` carries an `identity` block: `instance_id`
 (this process), `build_id` and `build_source` (this code — the commit SHA

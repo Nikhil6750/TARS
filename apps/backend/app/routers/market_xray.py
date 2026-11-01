@@ -15,20 +15,23 @@ for the duration -- including the desktop shell's backend health poll, which
 then concludes the backend has died and restarts it. Declaring them `def`
 makes Starlette run each in its threadpool, so the loop stays responsive. The
 WebSocket handler must stay `async`, so it offloads the same work with
-``asyncio.to_thread``.
+``asyncio.to_thread``, and its frames are built by `market.frames`, which
+shares them between connections.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
 from market import feed, ingest, setup, universe
-from market.service import MarketXRayService
-from market.store import CandleStore
+from market.frames import Flight, SharedFrames
+from market.service import FrameInputs, MarketXRayService
+from market.store import CandleStore, RevisionChanged, active_dataset_revision
 
 logger = logging.getLogger("tars.market.api")
 
@@ -38,8 +41,15 @@ router = APIRouter(prefix="/api/v1/market", tags=["market-xray"])
 # Each frame costs real CPU (see `_build_frame`), so this is deliberately
 # unhurried: the underlying data is recorded history, not a ticking feed.
 PUSH_INTERVAL_SECONDS = 10.0
+# How long a new connection waits for its first subscribe before defaulting.
+INITIAL_SUBSCRIPTION_SECONDS = 0.1
 # How long a disconnect waits for a frame already being built before giving up.
 FRAME_DRAIN_SECONDS = 60.0
+# Finished frames kept. Enough for every timeframe at the current cursor and a
+# few replay steps around it; each is a few hundred kilobytes.
+FRAMES_RETAINED = 16
+# The panels of a frame, each of which carries its own provenance.
+_FRAME_PANELS = ("xray", "strength", "leaders")
 # WebSocket close codes.
 _POLICY_VIOLATION = 1008
 _INTERNAL_ERROR = 1011
@@ -49,6 +59,10 @@ _CLOSED_SOCKET_MESSAGES = (
     "once a close message has been sent",
 )
 
+_frames = SharedFrames(retained=FRAMES_RETAINED)
+# Clients arriving together at a fresh backend must not each build a service.
+_service_creation = threading.Lock()
+
 
 def _service(request: Request) -> MarketXRayService:
     return _app_service(request.app)
@@ -56,23 +70,43 @@ def _service(request: Request) -> MarketXRayService:
 
 def _app_service(app) -> MarketXRayService:
     existing = getattr(app.state, "market_xray_service", None)
-    if existing is not None:
+    if existing is not None and (
+        existing.store.recorded_revision == active_dataset_revision(existing.store.root)
+    ):
         return existing
-    try:
-        service = MarketXRayService()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("market x-ray service unavailable: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "market_store_unavailable",
-                "message": str(exc),
-                "remedy": "Build the candle store: python -m market.ingest",
-            },
-        ) from exc
-    app.state.market_xray_service = service
-    _start_feed(app)
-    return service
+    with _service_creation:
+        existing = getattr(app.state, "market_xray_service", None)
+        if existing is not None:
+            if existing.store.recorded_revision == active_dataset_revision(existing.store.root):
+                return existing
+            # An external import atomically published a new generation.
+            # Keep the old immutable store alive for any in-flight build,
+            # and replace only the service pointer used by new requests.
+            replacement = MarketXRayService(
+                store=CandleStore(existing.store.root),
+                state=existing.state,
+                config=existing.config,
+            )
+            replacement.adopt_feed_from(existing)
+            if existing.replay_pinned and replacement.bounds[1] is not None:
+                replacement.set_cursor(existing.cursor)
+            app.state.market_xray_service = replacement
+            return replacement
+        try:
+            service = MarketXRayService()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("market x-ray service unavailable: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "market_store_unavailable",
+                    "message": str(exc),
+                    "remedy": "Build the candle store: python -m market.ingest",
+                },
+            ) from exc
+        app.state.market_xray_service = service
+        _start_feed(app)
+        return service
 
 
 def _start_feed(app) -> None:
@@ -118,7 +152,12 @@ def _import_job(request: Request) -> setup.ImportJob:
             # The service reads its bounds at construction, so a fresh import
             # needs a fresh service. Replaced, not mutated, so a request in
             # flight finishes against the object it started with.
+            before_reload = getattr(request.app.state, "market_xray_service", None)
             previous = _service(request)
+            if previous is not before_reload:
+                # _app_service already noticed the committed generation and
+                # atomically installed a replacement. Do not load it twice.
+                return
             replacement = MarketXRayService(
                 store=CandleStore(previous.store.root), state=previous.state
             )
@@ -326,27 +365,51 @@ def replay_reset(request: Request) -> dict:
     return {"cursor": cursor.isoformat(), "status": service.market_status().as_dict()}
 
 
-def _build_frame(service: MarketXRayService, timeframe: str) -> dict:
-    """One WebSocket frame. Synchronous by design -- callers run it in a
-    thread so the event loop stays free."""
-    status = service.market_status().as_dict()
-    if service.bounds[1] is None and not service.panels_follow_feed:
+def _build_frame(inputs: FrameInputs, timeframe: str) -> dict:
+    """The panels of a WebSocket frame, computed from `inputs`. Synchronous by
+    design -- callers run it in a thread so the event loop stays free.
+
+    The result is shared and must not be changed. It holds what follows from
+    `inputs` alone: `_labelled` adds whatever depends on the moment of sending.
+    """
+    service = inputs.service
+    # One coherent DuckDB revision for every panel. All store queries use
+    # its reentrant lock; a concurrent feed batch must wait until the frame
+    # is complete. Stale builds retry rather than claim the old revision.
+    if hasattr(service, "store"):
+        with service.store.consistent_snapshot(inputs.data_revision):
+            return _build_frame_panels(inputs, timeframe)
+    return _build_frame_panels(inputs, timeframe)
+
+
+def _build_frame_panels(inputs: FrameInputs, timeframe: str) -> dict:
+    service = inputs.service
+    service.market_status()
+    if inputs.as_of is None:
         # Nothing to compute from yet: the first-run screen owns this state,
         # and a frame must not fail just because the store is still empty.
-        return {"type": "market.status", "status": status, "feed": service.feed_state}
+        return {"type": "market.status"}
     return {
         "type": "market.frame",
-        "sent_at": datetime.now(UTC).isoformat(),
-        "cursor": service.cursor.isoformat(),
+        "cursor": inputs.as_of.isoformat(),
         "timeframe": timeframe,
-        "status": status,
-        "provenance": service.data_provenance().as_dict(),
-        "replay_pinned": service.replay_pinned,
-        "feed": service.feed_state,
-        "xray": service.xray(timeframe=timeframe),
-        "strength": service.strength(),
-        "leaders": service.leaders(timeframe=timeframe),
+        "data_revision": inputs.data_revision,
+        "dataset_revision": getattr(getattr(service, "store", None), "recorded_revision", None),
+        "xray": service.xray(timeframe=timeframe, as_of=inputs.as_of),
+        "strength": service.strength(as_of=inputs.as_of),
+        "leaders": service.leaders(timeframe=timeframe, as_of=inputs.as_of),
     }
+
+
+def _labelled(frame: dict, labels: dict) -> dict:
+    """A copy of a shared frame for sending now, under the labels of now."""
+    if frame["type"] == "market.status":
+        return {**frame, "status": labels["status"], "feed": labels["feed"]}
+    sending = {**frame, **labels}
+    for panel in _FRAME_PANELS:
+        if panel in frame:
+            sending[panel] = {**frame[panel], "provenance": labels["provenance"]}
+    return sending
 
 
 # ---- websocket ----------------------------------------------------------
@@ -426,9 +489,10 @@ async def _finished_before(task: asyncio.Future, stop: asyncio.Event) -> bool:
 async def _drain_build(building: asyncio.Future | None) -> None:
     """See a frame build through after the connection has ended.
 
-    Its thread cannot be cancelled, so returning now would leave it running
-    with nothing attached. Bounded, because a stuck query must not pin the
-    handler forever. Its result is unwanted, but a failure is still reported.
+    A running build cannot be cancelled, so returning now would leave it
+    running with nothing attached; one that never started is already over.
+    Bounded, because a stuck query must not pin the handler forever. Its
+    result is unwanted here, but a failure is still reported.
     """
     if building is None:
         return
@@ -467,6 +531,7 @@ async def market_ws(websocket: WebSocket) -> None:
         return _app_service(websocket.app)
 
     timeframe = universe.DEFAULT_TIMEFRAME
+    initial_subscription = asyncio.Event()
 
     async def handle(msg: object) -> None:
         nonlocal timeframe
@@ -477,6 +542,7 @@ async def market_ws(websocket: WebSocket) -> None:
             requested = str(msg.get("timeframe", timeframe)).upper()
             if requested in universe.TIMEFRAMES:
                 timeframe = requested
+                initial_subscription.set()
         elif kind == "replay.step":
             bars = int(msg.get("bars", 1))
             if service().bounds[1] is not None:
@@ -509,31 +575,63 @@ async def market_ws(websocket: WebSocket) -> None:
                 await connection.close(_POLICY_VIOLATION)
                 return
 
-    def build_frame(tf: str) -> dict:
-        return _build_frame(service(), tf)
+    flight: Flight | None = None
+    building: asyncio.Future | None = None
+
+    async def next_frame() -> dict | None:
+        """Build under one dataset/live revision, retrying if it changes.
+
+        The service can be replaced by an external import, a feed batch can
+        commit while a build waits, and a subscribe/replay command can change
+        the requested view. None of those may send the old frame as current.
+        """
+        nonlocal flight, building
+        for _attempt in range(4):
+            current = await asyncio.to_thread(service)
+            inputs = current.frame_inputs(timeframe)
+            flight = _frames.join(inputs, lambda: _build_frame(inputs, inputs.timeframe))
+            building = asyncio.wrap_future(flight.work)
+            if not await _finished_before(building, connection.stopped):
+                return None
+            finished = building
+            _frames.leave(flight)
+            flight = building = None
+            try:
+                frame = finished.result()
+            except RevisionChanged:
+                continue
+
+            latest = await asyncio.to_thread(service)
+            if latest is not inputs.service or timeframe != inputs.timeframe:
+                continue
+            if hasattr(latest, "store") and latest.frame_inputs(timeframe) != inputs:
+                continue
+            return _labelled(frame, inputs.service.frame_labels(inputs))
+        raise RuntimeError("market data changed repeatedly while preparing a frame")
 
     receiver = asyncio.create_task(receive_loop())
     # However it ends, a finished receiver means nothing is listening.
     receiver.add_done_callback(lambda _task: connection.stopped.set())
-    building: asyncio.Future | None = None
     try:
+        # Give the immediate on-open subscribe command priority over a default
+        # H1 frame. If a subscription arrives while building, next_frame retries
+        # under its timeframe rather than publishing a wrongly selected H1 frame.
+        try:
+            await asyncio.wait_for(
+                initial_subscription.wait(), timeout=INITIAL_SUBSCRIPTION_SECONDS
+            )
+        except TimeoutError:
+            pass
         while not connection.stopped.is_set():
-            # Built in a worker thread: this is seconds of DuckDB and
-            # order-block work, and on the event loop it would stall every
-            # other request between frames.
-            building = asyncio.ensure_future(asyncio.to_thread(build_frame, timeframe))
-            if not await _finished_before(building, connection.stopped):
-                break
             try:
-                frame = building.result()
+                frame = await next_frame()
             except Exception as exc:  # noqa: BLE001
                 frame = {
                     "type": "market.error",
                     "sent_at": datetime.now(UTC).isoformat(),
                     "message": str(exc),
                 }
-            building = None
-            if not await connection.send(frame):
+            if frame is None or not await connection.send(frame):
                 break
             try:
                 await asyncio.wait_for(connection.stopped.wait(), timeout=PUSH_INTERVAL_SECONDS)
@@ -543,6 +641,8 @@ async def market_ws(websocket: WebSocket) -> None:
         connection.stopped.set()
         receiver.cancel()
         outcome = (await asyncio.gather(receiver, return_exceptions=True))[0]
+        if flight is not None:
+            _frames.leave(flight)
         await _drain_build(building)
     if isinstance(outcome, Exception):
         await connection.close(_INTERNAL_ERROR)

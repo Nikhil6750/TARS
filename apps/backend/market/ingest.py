@@ -35,10 +35,16 @@ should not need a code change to ingest.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import shutil
+import sqlite3
 import time
+import uuid
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -79,6 +85,17 @@ DEFAULT_STORE_ROOT = default_store_root()
 # Everything before this is recorded history the dashboard does not need;
 # keeping the window bounded is what makes a full ingest take seconds.
 DEFAULT_START = "2024-01-01"
+# Publishing takes moments, so a wait this long means something is wrong.
+PUBLICATION_LOCK_SECONDS = 60.0
+# Windows refuses to replace a file another process has open, and refuses to open
+# one being replaced. Both pass in moments. A publisher has many readers to outlast
+# and nobody waiting on it; a reader only has the instant of one rename.
+MANIFEST_PUBLISH_RETRY_SECONDS = 5.0
+MANIFEST_READ_RETRY_SECONDS = 0.25
+_SHARING_RETRY_FIRST_DELAY = 0.002
+_SHARING_RETRY_LONGEST_DELAY = 0.05
+# ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+_SHARING_WINERRORS = frozenset({5, 32, 33})
 
 _CSV_COLUMNS = {
     "Time (UTC)": "TIMESTAMP",
@@ -227,6 +244,111 @@ def ingest_symbol(
     return results
 
 
+def is_sharing_violation(exc: OSError) -> bool:
+    """Whether Windows refused a file because someone else has it. `open()` says
+    so through the C runtime, as a bare EACCES with no Windows error code."""
+    if os.name != "nt" or not isinstance(exc, PermissionError):
+        return False
+    if exc.winerror is None:
+        return exc.errno == errno.EACCES
+    return exc.winerror in _SHARING_WINERRORS
+
+
+def with_sharing_retry[T](operation: Callable[[], T], seconds: float) -> T:
+    """Run `operation`, waiting out a sharing violation for up to `seconds`. Any
+    other error raises at once, and so does a violation that outlasts the wait."""
+    deadline = time.monotonic() + seconds
+    delay = _SHARING_RETRY_FIRST_DELAY
+    while True:
+        try:
+            return operation()
+        except OSError as exc:
+            if not is_sharing_violation(exc) or time.monotonic() >= deadline:
+                raise
+        time.sleep(delay)
+        delay = min(delay * 2, _SHARING_RETRY_LONGEST_DELAY)
+
+
+def read_manifest(store_root: Path) -> dict | None:
+    """The active manifest, or None for a store that has never had one.
+
+    Only a missing file means that. Anything unreadable or malformed raises,
+    because treating it as an older store would read candles from the wrong place.
+    """
+    path = store_root / "manifest.json"
+    try:
+        text = with_sharing_retry(
+            lambda: path.read_text(encoding="utf-8"), MANIFEST_READ_RETRY_SECONDS
+        )
+    except FileNotFoundError:
+        return None
+    manifest = json.loads(text)
+    if not isinstance(manifest, dict) or (
+        bool(manifest.get("generation")) != bool(manifest.get("dataset_revision"))
+    ):
+        raise ValueError(f"invalid candle-store manifest at {path}")
+    return manifest
+
+
+@contextmanager
+def _publication_lock(store_root: Path) -> Generator[None]:
+    """One publisher at a time, across processes, from reading the active
+    manifest to replacing it.
+
+    An atomic rename prevents a torn manifest, not a lost update: two imports
+    extending the same manifest would each discard what the other added. The
+    operating system drops SQLite's file lock when its holder dies, so a killed
+    import cannot block the next one, as a marker file would.
+    """
+    con = sqlite3.connect(
+        store_root / ".publication.lock",
+        timeout=PUBLICATION_LOCK_SECONDS,
+        isolation_level=None,
+    )
+    try:
+        try:
+            con.execute("BEGIN EXCLUSIVE")
+        except sqlite3.OperationalError as exc:
+            raise TimeoutError(
+                "another import is still publishing; active data unchanged"
+            ) from exc
+        yield
+    finally:
+        con.close()
+
+
+def _carried_datasets(
+    store_root: Path, generation_root: Path, rebuilt: set[str], failures: dict[str, str]
+) -> list[dict]:
+    """Bring everything active that this import did not rebuild into its new
+    generation: symbols it was not asked for, and ones it failed to replace,
+    whose old data is still the best there is. Files are immutable, so linking
+    is safe; a copy covers filesystems without hardlinks."""
+    previous = read_manifest(store_root)
+    if previous is None:
+        return []
+    old_root = store_root / previous.get("generation", "")
+    carried: list[dict] = []
+    for prior in previous.get("datasets", []):
+        symbol = prior.get("symbol")
+        tf = prior.get("timeframe")
+        if symbol in rebuilt or not symbol or not tf:
+            continue
+        source = old_root / symbol / (tf + ".parquet")
+        if not source.is_file():
+            continue
+        destination = generation_root / symbol / (tf + ".parquet")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(source, destination)
+        except OSError:
+            shutil.copy2(source, destination)
+        carried.append({**prior, "path": str(destination)})
+    for symbol in failures.keys() & {row["symbol"] for row in carried}:
+        failures[symbol] += "; previous data kept"
+    return carried
+
+
 def ingest_all(
     symbols: list[str] | None = None,
     *,
@@ -238,6 +360,13 @@ def ingest_all(
     than aborting the run, so partial coverage is reported and never hidden."""
     targets = symbols or list(universe.SYMBOLS)
     store_root.mkdir(parents=True, exist_ok=True)
+    # Immutable generations make publishing an import atomic for all
+    # timeframes/symbols, including readers in another process. Never replace
+    # the Parquet files referenced by the active manifest.
+    revision = uuid.uuid4().hex
+    generation_name = f"generations/{revision}"
+    generation_root = store_root / generation_name
+    generation_root.mkdir(parents=True)
     con = duckdb.connect()
     con.execute("SET TimeZone='UTC'")
 
@@ -248,27 +377,64 @@ def ingest_all(
         t0 = time.time()
         try:
             for r in ingest_symbol(
-                con, symbol, store_root=store_root, start=start, csv_root=csv_root
+                con, symbol, store_root=generation_root, start=start, csv_root=csv_root
             ):
                 rows.append(asdict(r))
             logger.info("ingested %s in %.1fs", symbol, time.time() - t0)
         except Exception as exc:  # noqa: BLE001 - recorded in the manifest, not swallowed
             failures[symbol] = type(exc).__name__ + ": " + str(exc)
             logger.warning("ingest failed for %s: %s", symbol, exc)
+            # Whatever it wrote before failing must not reach the generation.
+            shutil.rmtree(generation_root / symbol, ignore_errors=True)
     con.close()
 
-    manifest = {
-        "generated_at": datetime.now(UTC).isoformat(),
-        "csv_root": str(csv_root or CSV_ROOT),
-        "store_root": str(store_root),
-        "window_start": start,
-        "timeframes": universe.TIMEFRAMES,
-        "elapsed_seconds": round(time.time() - started, 2),
-        "symbols_ok": sorted({r["symbol"] for r in rows}),
-        "symbols_failed": failures,
-        "datasets": rows,
-    }
-    (store_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if not rows:
+        shutil.rmtree(generation_root)
+        raise ValueError("import produced no usable candle datasets; active data unchanged")
+
+    rebuilt = {r["symbol"] for r in rows}
+    published = False
+    try:
+        with _publication_lock(store_root):
+            # A clean full import replaces everything, and needs nothing from
+            # the active generation, which is what lets it repair a bad manifest.
+            if symbols is not None or failures:
+                rows += _carried_datasets(store_root, generation_root, rebuilt, failures)
+            manifest = {
+                "dataset_revision": revision,
+                "generation": generation_name,
+                "generated_at": datetime.now(UTC).isoformat(),
+                "csv_root": str(csv_root or CSV_ROOT),
+                "store_root": str(store_root),
+                "window_start": start,
+                "timeframes": universe.TIMEFRAMES,
+                "elapsed_seconds": round(time.time() - started, 2),
+                "symbols_ok": sorted({r["symbol"] for r in rows} - failures.keys()),
+                "symbols_failed": failures,
+                "datasets": rows,
+            }
+            # Publish a single pointer only after every successful dataset is
+            # written. A failed import leaves the previous generation and
+            # manifest untouched.
+            staged_manifest = store_root / f".manifest-{revision}.tmp"
+            try:
+                with staged_manifest.open("w", encoding="utf-8") as stream:
+                    json.dump(manifest, stream, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                with_sharing_retry(
+                    lambda: os.replace(staged_manifest, store_root / "manifest.json"),
+                    MANIFEST_PUBLISH_RETRY_SECONDS,
+                )
+                published = True
+            finally:
+                staged_manifest.unlink(missing_ok=True)
+    except BaseException:
+        if not published:
+            shutil.rmtree(generation_root, ignore_errors=True)
+        raise
+    # Keep previous immutable generations: in-flight readers may still be
+    # using them. Reclamation needs a separate, explicitly safe policy.
     return manifest
 
 

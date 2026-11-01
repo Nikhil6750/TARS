@@ -63,6 +63,28 @@ class CalcConfig:
         }
 
 
+@dataclass(frozen=True)
+class FrameInputs:
+    """Everything the panels of a frame are computed from, read in one step.
+
+    Panels computed from equal inputs are identical, so this is both what
+    pins a frame's panels to one moment and the key they are shared under. A
+    cursor that moves during a build cannot change what that build computes,
+    or leave it filed under a moment it was not computed at. `as_of` is None
+    when there is nothing to compute from yet.
+
+    Nothing that changes with the clock belongs here, because panels do not:
+    see `MarketXRayService.frame_labels`.
+    """
+    service: MarketXRayService
+    timeframe: str
+    as_of: datetime | None
+    data_revision: int
+    replay_pinned: bool
+    follows_feed: bool
+    dataset_revision: str = "legacy"
+
+
 class MarketXRayService:
     def __init__(
         self,
@@ -190,6 +212,9 @@ class MarketXRayService:
             self._feed_state = state.as_dict()
         if connected and state.provider:
             self.attach_feed(provider=state.provider, last_tick=last_tick)
+        # Here and not per frame: a shared frame involves no build to record
+        # it, and a feed ageing into STALE changes nothing a build depends on.
+        self.market_status()
 
     def report_live_edge(self, edge: datetime) -> None:
         with self._lock:
@@ -208,13 +233,49 @@ class MarketXRayService:
             self._feed_connection = previous._feed_connection
             self._feed_detail = previous._feed_detail
 
-    def data_provenance(self) -> provenance.Provenance:
+    def frame_inputs(self, timeframe: str) -> FrameInputs:
+        """What a frame for `timeframe` would be computed from right now."""
+        with self._lock:
+            follows_feed = self.panels_follow_feed
+            return FrameInputs(
+                service=self,
+                timeframe=timeframe,
+                as_of=self._live_edge if follows_feed else self._cursor,
+                data_revision=self.store.data_revision,
+                replay_pinned=self._replay_pinned,
+                follows_feed=follows_feed,
+                dataset_revision=self.store.recorded_revision,
+            )
+
+    def frame_labels(self, inputs: FrameInputs) -> dict:
+        """What to say, at this moment, about panels computed from `inputs`.
+
+        Status and provenance turn on the wall clock as well as on the data:
+        a feed ages out of LIVE with no bar changing. So they are resolved
+        for each frame as it is sent and never kept with the panels, which
+        is what stops a shared frame carrying an old LIVE forward. No I/O, so
+        this is safe on the event loop.
+        """
+        status = self._resolve_status(inputs)
+        return {
+            "sent_at": status.as_of.isoformat(),
+            "status": status.as_dict(),
+            "provenance": self.data_provenance(status).as_dict(),
+            "replay_pinned": self._replay_pinned or inputs.replay_pinned,
+            "feed": self._feed_state,
+        }
+
+    def data_provenance(
+        self, status: clock.MarketStatus | None = None
+    ) -> provenance.Provenance:
         """Where the observations in the next payload come from.
 
         Derived from the same inputs as the status, so the two can never
         disagree: anything but a resolved LIVE/STALE feed is recorded data.
+        A caller stamping both passes the status, so they share one reading
+        of the clock.
         """
-        status = self._resolve_status()
+        status = status or self._resolve_status()
         if status.source == provenance.DataSource.LIVE_FEED.value:
             return provenance.live(
                 provider=self._feed_provider,
@@ -246,14 +307,22 @@ class MarketXRayService:
         self.state.record_feed_health(status)
         return status
 
-    def _resolve_status(self) -> clock.MarketStatus:
+    def _resolve_status(self, inputs: FrameInputs | None = None) -> clock.MarketStatus:
         now = datetime.now(UTC)
+        panels_follow_feed = self.panels_follow_feed
+        cursor = self._cursor
+        if inputs is not None:
+            # The status of panels already computed. The world may have moved
+            # since, and LIVE has to be true of both: panels computed at a
+            # pinned cursor are not live because the pin has just been lifted.
+            panels_follow_feed = panels_follow_feed and inputs.follows_feed
+            cursor = inputs.as_of
         status = clock.resolve_status(
             now=now,
             feed_last_tick=self._feed_last_tick,
             replay_pinned=self._replay_pinned,
-            panels_follow_feed=self.panels_follow_feed,
-            cursor=self._cursor,
+            panels_follow_feed=panels_follow_feed,
+            cursor=cursor,
             store_last_bar=self._last_bar,
             feed_connection=self._feed_connection,
             feed_detail=self._feed_detail,
@@ -292,9 +361,9 @@ class MarketXRayService:
             })
         return out
 
-    def xray(self, *, timeframe: str) -> dict:
+    def xray(self, *, timeframe: str, as_of: datetime | None = None) -> dict:
         snap = xray.build_xray(
-            self.store, as_of=self.cursor, timeframe=timeframe,
+            self.store, as_of=as_of or self.cursor, timeframe=timeframe,
             return_window=self.config.xray_return_window,
             points=self.config.xray_points,
         )
@@ -307,26 +376,29 @@ class MarketXRayService:
         payload["provenance"] = self.data_provenance().as_dict()
         return payload
 
-    def strength(self, *, window: str | None = None) -> dict:
+    def strength(self, *, window: str | None = None, as_of: datetime | None = None) -> dict:
         snap = strength.compute_strength(
-            self.store, as_of=self.cursor, window=window or self.config.strength_window
+            self.store, as_of=as_of or self.cursor, window=window or self.config.strength_window
         )
         self.state.record_strength(snap)
         payload = snap.as_dict()
         payload["provenance"] = self.data_provenance().as_dict()
         return payload
 
-    def leaders(self, *, timeframe: str, limit: int = LEADERS) -> dict:
+    def leaders(
+        self, *, timeframe: str, limit: int = LEADERS, as_of: datetime | None = None
+    ) -> dict:
         """Ranked bullish and bearish cards, each carrying its real price, its
         normalised strength, its volatility regime and the distance to its
         nearest qualifying order block."""
+        moment = as_of or self.cursor
         snap = xray.build_xray(
-            self.store, as_of=self.cursor, timeframe=timeframe,
+            self.store, as_of=moment, timeframe=timeframe,
             return_window=self.config.xray_return_window, points=2,
         )
         cards: list[dict] = []
         for s in snap.series:
-            candles = self.store.candles(s.symbol, timeframe, as_of=self.cursor, limit=OB_SCAN_BARS)
+            candles = self.store.candles(s.symbol, timeframe, as_of=moment, limit=OB_SCAN_BARS)
             regime = volatility_regime(candles)
             zones = orderblocks.detect(
                 candles, symbol=s.symbol, timeframe=timeframe, config=self.config.ob

@@ -11,7 +11,298 @@ for that).
 
 ---
 
-## Latest handoff — WebSocket send-after-close (2026-10-31)
+## Latest handoff — Windows reliability fixes (2026-11-01)
+
+**Branch**: `fix/market-publication-stabilization`, worktree
+`C:\TARS-Market-Stabilize`, pushed to origin.
+**Fix SHA**: `cfc529a`, on top of `5ad32e8`. Later commits are documentation only.
+**Status**: Awaiting Codex verification. Not merged. No Tauri build.
+
+### Fixes
+
+- **Monitor shutdown hang.** `NewsMonitor.stop()` and `CalendarMonitor.stop()` set a
+  flag before cancelling, and `_run` checks it before sleeping, so a cancellation
+  that came back as a timeout still ends the task. `stop_monitor_task` waits at most
+  `MONITOR_STOP_SECONDS` (5s). A task that outlasts it gets exactly one more cancel,
+  is logged, and is left behind rather than awaited. `MT5Provider` is unchanged: it
+  uses no httpx, so it has no such race. Nor does `MarketWatchService`.
+- **Manifest contention.** `with_sharing_retry` in `market/ingest.py` retries
+  sharing violations only: WinError 5, 32, 33, and `open()`'s bare EACCES. Publish
+  bound 5s, read bound 0.25s, backoff 2ms to 50ms. The lock and atomic replace are
+  unchanged. No effect off Windows.
+- **Corrupt manifests.** Not in the brief as a defect, but required by it:
+  `CandleStore._load_manifest` caught everything and returned `{}`, so a transient
+  refusal or a corrupt file made a new store read as legacy from the flat root.
+  `read_manifest` now returns None only for a missing file. Anything unreadable,
+  non-object, or with only one of `generation` and `dataset_revision` raises.
+
+### Evidence
+
+On `cfc529a`, in `artifacts/market-windows-reliability/`, untracked.
+
+- Complete backend: 1953 passed, 8 skipped, 0 failed, in one run of 1038.93s. Slow
+  because the machine was busy: a pandas-only test took 171s against 71s earlier.
+- Root: 82 passed, 24 skipped. 72 focused monitor and publication tests passed.
+- On unfixed code: 16 publication tests and 8 monitor tests failed, and a ninth case
+  blocked the run forever, which is the stall itself.
+- 22 of 22 protections caught when removed. Two first survived because the restart
+  test was weak; it was rewritten and both were rerun.
+- The race is deterministic in `test_stop_survives_the_race_through_a_real_timeout_scope`
+  through the real anyio scope, with no timers. Real 10s trials: 0 hung in 72, against
+  5 hung in 79 before, but only one cancel lost the race in those 72, so they are
+  weak evidence alone.
+- Three tight-loop readers against a publisher: 306 publishes, 0 gave up, worst
+  0.37s, 26,766 reads, 0 errors, 0 legacy. Before: 2,984 attempts refused, 128 read
+  errors. 12 of 12 repeats of the real multi-process test passed.
+- Imports during a 120-client storm: 44 of 44 succeeded, against 44 of 48 before.
+- Reconnect, `--abort-delay 0.15`: cold 1.48, 0.42, 0.39s; mixed 1.34, 1.63, 1.27s.
+  Peak 1 build, 0 server errors, 0 frame problems, trading `DISABLED`.
+
+### Open items
+
+- **Frames under continuous imports.** With 4 imports at once in a loop, first frames
+  still reached 39.5s while they ran. No frame problems this run, and it was 37.8s
+  before, so this is unchanged by these fixes. The storm tool exits 1 for it.
+- **A corrupt manifest now stops market routes** until a clean full import replaces
+  it, from a terminal: `/setup` and `POST /import` need the service too. This is the
+  fail-closed behaviour asked for.
+- **Stuck monitor.** If a task outlasts the bound it is abandoned and logged, and
+  can outlive `db.close()`. Nothing observed does this.
+- **Retry on the event loop.** The WebSocket `replay.step` and `replay.reset` paths
+  call `service()` synchronously, so a persistent refusal can block the loop for up
+  to 0.25s per call. Transient ones clear in milliseconds.
+- `--abort-delay` still defaults to 0.02. Generations are never reclaimed. MT5
+  LIVE/STALE remains unproven (AUTH_REQUIRED). Stall in Codex's own run: this was the
+  only hang mechanism found, but that run captured no task chain.
+
+### Next recommended action
+
+Codex verifies `cfc529a` independently, on its own run of the complete backend suite.
+
+---
+
+## Previous handoff — Market publication stabilization (2026-11-01)
+
+**Branch**: `fix/market-publication-stabilization`, worktree
+`C:\TARS-Market-Stabilize`, from Codex's `463df40`, which is
+`fix/market-data-revision-consistency` (`cfcdf37`) plus tests and docs only.
+**Fix SHA**: `22be1d9`. Later commits are documentation only.
+**Status**: Awaiting Codex verification. Not merged. No Tauri build.
+
+### Fixes
+
+- **Failed replacement lost coverage.** Only symbols outside the target list were
+  carried forward. Anything the import did not rebuild is now carried, partial
+  files are discarded first, a failed symbol is not listed as ok, and its failure
+  says `previous data kept`. Applies to full imports too. An import that rebuilt
+  nothing publishes nothing, which is a behaviour change for an all-failed
+  targeted import: it now raises rather than publishing identical data.
+- **Concurrent imports lost updates.** Reading the base manifest through replacing
+  it is one transaction under `.publication.lock`, an exclusive SQLite lock the OS
+  releases if the holder dies. Waits 60s, then raises `TimeoutError`. A publication
+  that fails removes its generation. A clean full import still reads no manifest,
+  so it can replace an unreadable one.
+- **Receiver leak.** The first subscription wait moved inside the `try`.
+
+### Test changes to review
+
+- Codex's concurrency test could not pass once fixed: its barrier needed both
+  publishers inside `os.replace`, which a correct lock prevents. The barrier now
+  gives up after 3s. It still failed on the unfixed code with the original lost
+  update. Its assertion is unchanged.
+- Beyond the three reported failures, three stress tests were passing with no
+  build running, because their aborts landed inside the 100ms wait:
+  `test_a_fresh_client_after_a_storm_waits_for_nothing_abandoned`,
+  `test_repeated_storms_leave_nothing_behind`, and
+  `test_stress_a_clean_close_during_a_build`. They now cross the wait, and the
+  last two assert a build ran.
+- `--abort-delay` still defaults to 0.02 in `tools/measure_market_ws_storm.py`,
+  which is inside the wait. Use 0.15 to abort after builds have started.
+
+### Evidence
+
+Backend, complete runs on `22be1d9`: 1916 passed, 8 skipped, 0 failed in 588.30s,
+and again in 1166.60s beside shutdown stress. Evidence is in
+`artifacts/market-publication-stabilization/` in the worktree, untracked. 13 of 13
+removed protections were caught. One mutation in `mutation.log` duplicates another;
+the separate rename-only run is the thirteenth.
+
+### Backend suite stall
+
+Reproduced as a defect on production code, not proven to be the event in Codex's
+run, which captured threads but no task chain.
+
+A `task.cancel()` landing in the same loop iteration as an httpx timeout comes back
+as `ReadTimeout` or `ConnectTimeout` instead of `CancelledError`. `NewsMonitor.tick`
+and `CalendarMonitor.refresh` catch `Exception`, so the monitor treats it as a
+failed fetch and sleeps, and `stop()`, which cancels once and then awaits the task,
+never returns. The `client` fixture leaves monitors enabled, so tests run these
+with live network calls. This matches Codex's dump: all threads idle, aiosqlite
+open, loop polling.
+
+Measured: 5 hangs in 79 real `NewsMonitor.stop()` calls aimed at the real 10s
+timeout. All five were in the one process whose aim reached the window, 5 of its
+15 cancels of a live task. Sweep at a 50ms timeout: 246 of 1,053 cancels lost over
+TLS, 314 of 1,043 over plain HTTP. With nothing aimed at the window, 1,095 app
+lifecycles did not hang. Those used local plain HTTP, so they did not cover real TLS
+or a slow endpoint.
+
+**Not fixed, it is outside the three defects.** Suggested fix: in `stop()`, repeat
+the cancel until the task is done. Until then a run can still stall, rarely. The
+same applies to backend shutdown in production.
+
+### Open items
+
+- **`WinError 5` on publish.** `os.replace` is refused while a backend has
+  `manifest.json` open. 4 of 48 imports failed during a storm of 120 clients,
+  safely: active data unchanged, generation removed. A reader can also get
+  `PermissionError` during the replacement. Suggested fix: bounded retry on both
+  sides.
+- **Frames under continuous imports.** With 4 imports at once for 12 rounds, first
+  frames reached 37.8s and one client got `market data changed repeatedly`. Far
+  beyond normal use; it refused rather than mixing data.
+- **Disk.** Generations are never reclaimed, as Codex reported. Each published
+  import keeps its directory.
+- Two imports of the same symbol: the last to publish wins. MT5 LIVE/STALE remains
+  unproven (AUTH_REQUIRED). `D:\TARS_DATA` was not imported or changed.
+
+### Next recommended action
+
+Codex verifies `22be1d9`, and decides whether the monitor `stop()` fix and the
+`WinError 5` retry block the release. Neither was in scope here.
+
+---
+
+## Previous handoff — WebSocket reconnect storm (2026-11-01)
+
+**Branch**: `fix/market-ws-reconnect-storm`, worktree `C:\TARS-Market-WS-Perf`, from
+`1939dc2`
+**Fix SHA**: `ae917ae`
+**Status**: fixed and measured. Not merged. Awaiting Codex's independent validation. No
+native build was made, as directed.
+
+Reported by Codex as the release blocker in `tools/market_rc_release_report.md`.
+
+**Root cause.** Every connection submitted its own frame build to the default executor,
+and nothing withdrew it when the client left. Each build holds the candle store's single
+DuckDB lock for about 2.2s of its 2.5s, so builds cannot overlap: throughput was 0.40
+frames/s at 1 worker and 0.40 at 16, while mean build time went from 2.51s to 39.28s. After
+120 aborted clients the fresh client queued behind about 120 identical builds. A client
+that stayed connected through the storm starved the same way, which the report did not
+cover: it received 0 frames in 25s.
+
+**Fix.** `market/frames.py` is new; the rest is in `market/service.py`, `market/store.py`
+and `app/routers/market_xray.py`.
+
+* **One build per distinct frame.** Connections wanting the same `FrameInputs` join one
+  build, and up to 16 finished frames are kept.
+* **One worker.** A second adds queueing and no throughput, per the figures above.
+* **Abandoned work cannot accumulate.** The last client to leave cancels a build not yet
+  started. A running build cannot be stopped; it finishes and its result is kept.
+* **`FrameInputs` is the snapshot.** Service, timeframe, as-of cursor, live-data revision
+  and replay state, read in one step. It pins all three panels to one cursor, which also
+  ends frames that could tear across a cursor move, and it is the cache key, so nothing
+  expires by time. `CandleStore.data_revision` is in it because the feed rewrites bars at
+  and behind an unmoved cursor.
+* **Labels are never kept.** `status`, `provenance`, `feed`, `replay_pinned` and `sent_at`
+  are resolved as each frame is sent, including the provenance on every panel. Panels
+  depend on no clock, checked across `market/`; labels do, which is why a kept frame
+  cannot carry an old LIVE. LIVE must also hold of the panels' own inputs, so history
+  landing just after a pin is lifted cannot be labelled LIVE.
+* **Shutdown is unchanged.** `_MarketSocket` is untouched, and a handler still waits for a
+  running build, bounded by `FRAME_DRAIN_SECONDS`.
+
+**Behaviour changes.** Feed health is now recorded by `report_feed`, because a shared frame
+has no build to record it and a feed ageing into STALE changes nothing a build depends on.
+It therefore stays current with no client connected. `_app_service` takes a lock, because
+clients arriving together at a fresh backend each built a service. The frame contract is
+unchanged. `_build_frame` keeps its two positional arguments, but the first is now
+`FrameInputs`.
+
+**Evidence.** Real Uvicorn, real 18-instrument store, same machine and day. `reconnect` is
+Codex's unmodified tool. Hard cases are `tools/measure_market_ws_storm.py`, run unchanged
+on `1939dc2` and `ae917ae`, except that the 150-storm soak added a `gc.collect()` before
+each sample and ran only on the fix.
+
+| Measurement | Before `1939dc2` | After `ae917ae` | Target |
+|---|---|---|---|
+| Fresh client after 120 aborts, `reconnect` | 137.74s | **0.014s** | 5s |
+| Same, cursor just moved, nothing kept | 125.03s (1 run) | **0.96–2.62s** (6 runs) | 5s |
+| Worst case: abandoned build ahead of a cold probe | not run | **2.41–2.89s** (6 runs) | 5s |
+| Normal first frame, nothing kept | 3.53s | 3.28s | comparable |
+| Normal first frame, frame kept | 1.39–1.75s | 0.017–0.018s | comparable |
+| Builds for 120 identical clients | 121 | 1 | |
+| Peak concurrent builds | 16 | 1 | |
+| Client connected through a storm, frames in 25s | 0 | 2, 10.03s apart | |
+| `/api/v1/health` max during a storm, 3 runs each | 0.59–0.69s | 0.23–0.46s | |
+| "Build still running" warnings | 72 | 0 | |
+| Send-after-close, ASGI errors, tracebacks | 0 | 0 | 0 |
+| Frame problems: cursor, timeframe, look-ahead, LIVE | 0 | 0 | 0 |
+| `trading_execution` | DISABLED | DISABLED | DISABLED |
+
+Resources, 150 storms of 120 clients: 150 builds, peak 1. After every storm, 0 flights, 0
+active builds and 0 handlers; kept frames stopped at 16; 58–63 threads with no upward
+trend. RSS after a collection rises while the 16 frames fill, then holds at 264–278MB from
+storm 45 to 150 with no slope. Without the collection it is a 260–490MB sawtooth of
+uncollected sockets, in the tool's clients as well as the server, since both share the
+process. A separate 250-pass run of panels alone on `1939dc2` plateaued at about 125MB.
+
+| Check | Result |
+|---|---|
+| `tests/test_market_ws_shared_frames.py`, new | 46 pass |
+| `tests/test_market_ws_lifecycle.py` | 28 pass, 3 repeat runs clean |
+| Mutation check: each of 15 protections removed in turn | 15 of 15 caught, after the first run found 3 gaps. See below |
+| Backend suite | 1893 passed, 8 skipped, 0 failed, 1083.79s |
+| Root contracts, integration and unit | 72 passed |
+| Ruff on changed files | clean |
+
+The first mutation run caught 11 of 14. One survivor was dead code, since deleted. Two were
+tests too weak to tell, since strengthened. The driver is in the evidence folder.
+
+**For Codex.**
+
+* Evidence is in `artifacts/market-ws-reconnect-fix/` in the worktree, untracked like your
+  other artifacts. `tools/codegen` there has `npm ci` applied; without it 3 contract tests
+  fail on the missing dependency.
+* `tests/integration/test_market_ws_disconnect.py` still passes unmodified, but **no longer
+  tests what it was written for.** Its service is a bare `object()`, which has no
+  `frame_inputs`, so the handler sends a `market.error` frame before any build and
+  `slow_frame` never runs. Giving the stub `frame_inputs` and `frame_labels` restores it.
+  The scenario is covered by `test_a_disconnect_during_a_build_never_sends` and
+  `test_a_disconnect_during_a_shared_build_never_sends`. Your file, so I left it.
+* I changed tests in `test_market_ws_lifecycle.py`: they assumed a build always starts, and
+  a client gone before that now has it cancelled. They disconnect once the build is running
+  instead, and the assertions are as strict. Please check that judgement.
+* `reconnect` now probes a kept frame, so its 0.014s is the easy case. The `cold` and
+  `timeframes` scenarios are the ones to reproduce.
+
+**Known limitations.**
+
+* Real MT5 LIVE and STALE remain unproven: the terminal reports AUTH_REQUIRED. The LIVE
+  paths here use a synthetic feed through the real service and store.
+* Once a frame is not kept, first-frame time is one build, about 1 to 3s here. Nothing in
+  this change makes a build cheaper.
+* With a feed connected every pass bumps the revision, so kept frames last about 15s.
+  Sharing still bounds the work; the near-instant reuse above is REPLAY's.
+* A client's first frame is always the default timeframe. Its subscribed one arrives on the
+  next push, up to 10s later. Existing behaviour, not changed.
+* HTTP routes are not shared and use the same store lock. `/dashboard` is seconds of work
+  per request, so a burst of those would still queue, and would slow frame builds. Not
+  measured here.
+* `python -m market.ingest` from a separate process while the backend runs does not change
+  the key, so REPLAY keeps serving kept frames until the cursor moves or the backend
+  restarts. The in-app import replaces the service and is unaffected.
+* A leaving client waits for a shared build that others still want, bounded by
+  `FRAME_DRAIN_SECONDS`. Harmless, but not strictly necessary.
+
+### Next recommended action
+
+Codex validates `ae917ae` independently. If it holds, merge into
+`release/market-xray-final-rc`, then do the final native build, which is also what first
+packages this fix and the send-after-close fix into an installer. Nothing goes to `main` or
+`integration/v1`.
+
+## Previous handoff — WebSocket send-after-close (2026-10-31)
 
 **Branch**: `fix/market-ws-send-after-close`, from `7fe5875`
 **Fix SHA**: `6c1feb6`
