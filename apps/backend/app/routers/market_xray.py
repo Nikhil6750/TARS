@@ -150,7 +150,12 @@ def _import_job(request: Request) -> setup.ImportJob:
             # The service reads its bounds at construction, so a fresh import
             # needs a fresh service. Replaced, not mutated, so a request in
             # flight finishes against the object it started with.
+            before_reload = getattr(request.app.state, "market_xray_service", None)
             previous = _service(request)
+            if previous is not before_reload:
+                # _app_service already noticed the committed generation and
+                # atomically installed a replacement. Do not load it twice.
+                return
             replacement = MarketXRayService(
                 store=CandleStore(previous.store.root), state=previous.state
             )
