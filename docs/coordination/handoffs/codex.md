@@ -6,6 +6,71 @@ integration/quality harness). Only Codex edits this file. See
 
 ---
 
+## Data revision consistency verification — 2026-11-01
+
+**Branch**: `verify/market-data-consistency-final`
+**Implementation SHA**: `8d8df7a2f7d26de5fabfa5f50447f78d1ce5b869`
+**Reviewed commit**: `cfcdf37a43189bd3e3033254aaeab3a9c15691e2`, fetched from
+`origin/fix/market-data-revision-consistency` into separate worktree
+`C:\TARS-Market-Consistency-Verify`.
+
+**Work completed / files changed / interfaces**: added independent actual-CSV
+publication probes in `tests/integration/test_market_generation_publication.py`,
+initial-wait cancellation probe in `test_market_ws_initial_cancel.py`, imported
+and reverified the prior external-import/live-revision regressions in
+`test_market_shared_frame_external_import.py`, and restored the real-build
+disconnect test. Both prior defect tests now pass without xfail. Feed-write
+interleaving uses the separate writer thread used by production, rather than
+a synchronous reentrant callback. Report: `tools/market_data_consistency_verification.md`.
+This handoff is the only coordination file changed. No backend production/test
+files were edited; no Tauri build or merge.
+
+**Evidence / tests**: new backend revision tests 10 passed; original defects
+and real-build disconnect 3 passed; root 79 passed / 24 skipped / 3 strict
+known-defect xfails; real Uvicorn API 15/15 and API-only acceptance 16/16.
+Cold 120-abort probes: 2.0548 / 0.9796 / 0.8223 seconds, mixed-timeframe probes
+0.9768 / 0.9624 / 0.8475 seconds. Peak one build, zero server ERROR records;
+30 storms settle with zero connections/handlers/flights/builds and retention
+at 16. RSS oscillates about 225–280MB, threads 61→59. M5/H1/H4 each arrive on
+the first frame. Full-backend final counts and detailed logs are in the report.
+Ruff and whitespace checks passed. Trading is DISABLED throughout.
+
+**Confirmed unresolved defects / Claude dependencies**:
+
+- Failed targeted replacement removes the previous usable symbol from the
+  active generation; preserve old datasets when replacements fail or reject
+  publication. Exact `--runxfail` reproduction is in the publication test.
+- Concurrent targeted imports based on the same manifest both report success,
+  but last publication loses one addition. Coordinate across processes or
+  reject/rebase conflicting publications. Atomic rename alone is insufficient.
+- Cancelling the handler during its initial 100ms subscription wait leaks
+  receive_loop, because the wait precedes receiver-cleanup try/finally. Move
+  post-receiver setup under guaranteed cleanup and retest cancellation.
+- Three backend regression tests still assume pre-100ms behavior and fail
+  reproducibly: per-client subscription, unknown-timeframe fallback, and the
+  real-abort stress test (all its clients disconnect before any build starts).
+  Correct their synchronization without weakening coverage. Also repair the
+  service-creation test Stub, whose missing `.store` causes unhandled thread
+  exceptions despite its count assertion passing.
+
+**Known limitations / next action**: overall FAIL / NO-GO. Original correctness
+fixes and cold performance pass, but publication/cancellation defects remain.
+Legacy real store remains readable; new stores pin immutable generations.
+Old generations are never reclaimed: plan safe retention and disk management.
+Current production flat store is 112,543,045 bytes; no production reimport,
+deletion, disk-full experiment, or authenticated broker test was performed.
+Claude should apply focused corrections, then Codex reruns documented failing
+probes and complete regressions. No RC/main/integration branch was modified.
+The full backend run was interrupted after an idle TestClient teardown stall at
+`test_response_quality_v2.py::test_v1_query_is_the_only_canonical_presentation_endpoint`.
+Its watchdog trace is preserved; the test passes alone in 9.55s. No completed
+full-suite PASS is claimed. Remaining-file execution is recorded separately in
+the report; the cause of this accumulated-state shutdown stall is unresolved.
+The remaining backend files from response-quality onward completed with
+543 passed, exit 0, in 239.42s; this includes the formerly stalled test.
+
+---
+
 ## Integrated release candidate validation — 2026-11-01
 
 **Branch**: `release/market-xray-final-rc`
